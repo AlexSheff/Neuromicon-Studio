@@ -1,0 +1,6 @@
+{
+  "name": "Neuromicon Studio",
+  "description": "Audio-reactive image and video visualizer with real-time animated typography, beat presets, and high-resolution social media export for 16:9, Instagram Reels, and TikTok.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
