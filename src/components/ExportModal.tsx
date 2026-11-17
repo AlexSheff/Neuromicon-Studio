@@ -21,6 +21,13 @@ function formatElapsed(ms: number): string {
   return `${sec.toFixed(1)}s`;
 }
 
+function formatEta(ms: number): string {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m ${s.toString().padStart(2, '0')}s` : `${s}s`;
+}
+
 export function ExportModal({
   lang,
   state,
@@ -41,8 +48,16 @@ export function ExportModal({
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
       <div className="w-full max-w-lg rounded-lg border border-[#323849] bg-[#12151C] shadow-2xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#262B38] flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-gray-100">{t.exportModalTitle}</h3>
+        <div className="px-5 py-4 border-b border-[#262B38] flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-gray-100 truncate">{t.exportModalTitle}</h3>
+            {state.batchIndex !== undefined && state.batchTotal !== undefined && (
+              <p className="text-[11px] font-mono text-amber-400 mt-0.5">
+                {t.batchProgressLabel}: {state.batchIndex}/{state.batchTotal}
+                {state.batchLabel ? ` · ${state.batchLabel}` : ''}
+              </p>
+            )}
+          </div>
           {!isBusy && (
             <button
               type="button"
@@ -118,6 +133,12 @@ export function ExportModal({
             <p className="text-sm font-medium text-gray-300">{t.exportCancelled}</p>
           )}
 
+          {state.isNonDeterministicFallback && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300 leading-snug">
+              {t.exportFallbackWarning}
+            </div>
+          )}
+
           {/* Real Encoding Metrics */}
           <div className="rounded-md border border-[#262B38] bg-[#0D1016] divide-y divide-[#262B38] text-xs">
             <div className="px-3 py-2 flex justify-between">
@@ -136,6 +157,14 @@ export function ExportModal({
                 {formatElapsed(state.elapsedMs)}
               </span>
             </div>
+            {isBusy && state.etaMs !== undefined && (
+              <div className="px-3 py-2 flex justify-between">
+                <span className="text-gray-400">{t.etaLabel}</span>
+                <span className="font-mono tabular-nums text-amber-300">
+                  {formatEta(state.etaMs)}
+                </span>
+              </div>
+            )}
             {state.outputSizeBytes !== undefined && (
               <div className="px-3 py-2 flex justify-between">
                 <span className="text-gray-400">{t.sizeLabel}</span>

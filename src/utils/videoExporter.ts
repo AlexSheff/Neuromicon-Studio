@@ -11,21 +11,30 @@ import {
   analyzeAudioAtTime,
   buildMonoAudioData,
   computeBeatCutTimestamps,
+  computeClipTimelineSegments,
   computeFadeEnvelope,
   createSmoothState,
   resolveActiveSlideshowSlice,
+  resolveBeatCutPoints,
 } from './audioAnalyzer';
 import { renderStudioFrame } from './canvasRenderer';
 
 export interface ExportDimensions {
   width: number;
   height: number;
-  aspectLabel: '16:9' | '9:16' | '4:5' | '1:1';
+  aspectLabel: '16:9' | '9:16' | '4:5' | '1:1' | '4K 16:9' | '4K 9:16' | 'Custom';
+}
+
+function alignEven(val: number, fallback: number): number {
+  const clamped = Math.max(320, Math.min(4096, Math.round(val || fallback)));
+  return clamped % 2 === 0 ? clamped : clamped - 1;
 }
 
 export function resolveExportDimensions(
   mode: ExportAspectMode,
-  mediaItems: VisualMediaState[]
+  mediaItems: VisualMediaState[],
+  customWidth = 1920,
+  customHeight = 1080
 ): ExportDimensions {
   let effective = mode;
   const primaryMedia = mediaItems[0] || null;
@@ -43,6 +52,16 @@ export function resolveExportDimensions(
       return { width: 1080, height: 1350, aspectLabel: '4:5' };
     case '1:1':
       return { width: 1080, height: 1080, aspectLabel: '1:1' };
+    case '4k_16:9':
+      return { width: 3840, height: 2160, aspectLabel: '4K 16:9' };
+    case '4k_9:16':
+      return { width: 2160, height: 3840, aspectLabel: '4K 9:16' };
+    case 'custom':
+      return {
+        width: alignEven(customWidth, 1920),
+        height: alignEven(customHeight, 1080),
+        aspectLabel: 'Custom',
+      };
     case '16:9':
     default:
       return { width: 1920, height: 1080, aspectLabel: '16:9' };
@@ -62,7 +81,11 @@ export function sanitizeOutputFileName(
     .trim()
     .slice(0, 70);
   const suffix =
-    aspectLabel === '9:16' ? ' (Reels-Vertical)' : aspectLabel === '16:9' ? '' : ` (${aspectLabel})`;
+    aspectLabel === '9:16'
+      ? ' (Reels-Vertical)'
+      : aspectLabel === '16:9'
+        ? ''
+        : ` (${aspectLabel.replace(/\s+/g, '-')})`;
   return `${clean}${suffix}.${ext}`;
 }
 
@@ -95,6 +118,7 @@ interface ProbedWebCodecsProfile {
   muxerVideoCodec: 'avc' | 'V_VP9' | 'V_VP8';
   audioCodec: string;
   muxerAudioCodec: 'aac' | 'A_OPUS';
+  audioSampleRate: number;
   label: string;
 }
 
@@ -110,7 +134,13 @@ async function probeBestWebCodecsProfile(
     return null;
   }
 
-  const avcCandidates = ['avc1.640028', 'avc1.4d002a', 'avc1.420028', 'avc1.42E01F'];
+  const aacSampleRates = Array.from(new Set([sampleRate, 48000, 44100]));
+  // Level 5.1/5.2 first for 4K support, then Level 4.0/3.1
+  const avcCandidates =
+    width * height > 2_200_000
+      ? ['avc1.640033', 'avc1.4d0033', 'avc1.640028', 'avc1.4d002a']
+      : ['avc1.640028', 'avc1.4d002a', 'avc1.420028', 'avc1.42E01F'];
+
   for (const avc of avcCandidates) {
     try {
       const vSupport = await VideoEncoder.isConfigSupported({
@@ -120,21 +150,26 @@ async function probeBestWebCodecsProfile(
         bitrate: videoBitrate,
         framerate: fps,
       });
-      const aSupport = await AudioEncoder.isConfigSupported({
-        codec: 'mp4a.40.2',
-        sampleRate,
-        numberOfChannels,
-        bitrate: 192_000,
-      });
-      if (vSupport.supported && aSupport.supported) {
-        return {
-          container: 'mp4',
-          videoCodec: avc,
-          muxerVideoCodec: 'avc',
-          audioCodec: 'mp4a.40.2',
-          muxerAudioCodec: 'aac',
-          label: `MP4 (${avc.slice(0, 4).toUpperCase()} + AAC)`,
-        };
+      if (!vSupport.supported) continue;
+
+      for (const sr of aacSampleRates) {
+        const aSupport = await AudioEncoder.isConfigSupported({
+          codec: 'mp4a.40.2',
+          sampleRate: sr,
+          numberOfChannels,
+          bitrate: 192_000,
+        });
+        if (aSupport.supported) {
+          return {
+            container: 'mp4',
+            videoCodec: avc,
+            muxerVideoCodec: 'avc',
+            audioCodec: 'mp4a.40.2',
+            muxerAudioCodec: 'aac',
+            audioSampleRate: sr,
+            label: `MP4 (${avc.slice(0, 4).toUpperCase()} + AAC ${Math.round(sr / 1000)}kHz)`,
+          };
+        }
       }
     } catch {
       // Try next candidate
@@ -167,7 +202,8 @@ async function probeBestWebCodecsProfile(
           muxerVideoCodec: cand.muxer,
           audioCodec: 'opus',
           muxerAudioCodec: 'A_OPUS',
-          label: `WebM (${cand.name} + Opus)`,
+          audioSampleRate: 48000,
+          label: `WebM (${cand.name} + Opus, AAC fallback)`,
         };
       }
     } catch {
@@ -178,42 +214,101 @@ async function probeBestWebCodecsProfile(
   return null;
 }
 
+type VideoWithFrameCallback = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: () => void) => number;
+  cancelVideoFrameCallback?: (id: number) => void;
+};
+
 async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Promise<void> {
   const dur = video.duration || 1;
-  const wrapped = targetSec % dur;
-  if (Math.abs(video.currentTime - wrapped) < 0.008) return;
+  const wrapped = Math.max(0, targetSec % dur);
+  if (!video.seeking && Math.abs(video.currentTime - wrapped) < 0.004) return;
+
   await new Promise<void>((resolve) => {
-    const onSeeked = () => {
+    let settled = false;
+    const vid = video as VideoWithFrameCallback;
+    let rvfcId: number | null = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
       video.removeEventListener('seeked', onSeeked);
+      clearTimeout(timer);
+      if (rvfcId !== null && vid.cancelVideoFrameCallback) {
+        try {
+          vid.cancelVideoFrameCallback(rvfcId);
+        } catch {
+          // ignore
+        }
+      }
       resolve();
     };
+
+    const onSeeked = () => {
+      if (typeof vid.requestVideoFrameCallback === 'function') {
+        rvfcId = vid.requestVideoFrameCallback(() => finish());
+        setTimeout(finish, 120);
+      } else {
+        finish();
+      }
+    };
+
+    const timer = setTimeout(finish, 1500);
     video.addEventListener('seeked', onSeeked, { once: true });
     video.currentTime = wrapped;
-    setTimeout(() => {
-      video.removeEventListener('seeked', onSeeked);
-      resolve();
-    }, 120);
   });
 }
 
 async function renderTrimmedAudioWithFades(
   sourceBuffer: AudioBuffer,
-  trimStart: number,
-  trimEnd: number,
-  fadeInSec: number,
-  fadeOutSec: number,
-  audioGain: number,
+  config: StudioConfig,
+  mediaItems: VisualMediaState[],
+  beatCutTimestamps: number[],
   targetSampleRate: number
 ): Promise<AudioBuffer> {
-  const clipDuration = Math.max(0.25, trimEnd - trimStart);
+  const clipDuration = Math.max(0.25, config.trimEnd - config.trimStart);
   const frameCount = Math.ceil(clipDuration * targetSampleRate);
   const channels = Math.min(2, sourceBuffer.numberOfChannels);
   const offline = new OfflineAudioContext(channels, frameCount, targetSampleRate);
 
   const src = offline.createBufferSource();
   src.buffer = sourceBuffer;
-  src.connect(offline.destination);
-  src.start(0, trimStart, clipDuration);
+  const mainGain = offline.createGain();
+  src.connect(mainGain);
+  mainGain.connect(offline.destination);
+  src.start(0, config.trimStart, clipDuration);
+
+  // Mix unmuted video clip audio tracks & schedule ducking envelope on main track
+  const segments = computeClipTimelineSegments(mediaItems, clipDuration, config, beatCutTimestamps);
+  const duckAmt = Math.max(0, Math.min(0.9, config.audioDucking || 0));
+  const duckGain = 1 - duckAmt;
+
+  mainGain.gain.setValueAtTime(1, 0);
+  for (const seg of segments) {
+    const clip = mediaItems[seg.clipIndex];
+    if (!clip || clip.kind !== 'video' || clip.clipAudioMuted || clip.clipAudioVolume <= 0.01) {
+      continue;
+    }
+    if (!clip.decodedAudioBuffer) continue;
+
+    const segDur = Math.max(0.05, seg.endSec - seg.startSec);
+    const clipSrc = offline.createBufferSource();
+    clipSrc.buffer = clip.decodedAudioBuffer;
+    clipSrc.playbackRate.value = clip.playbackRate || 1;
+    const clipGainNode = offline.createGain();
+    clipGainNode.gain.value = clip.clipAudioVolume;
+    clipSrc.connect(clipGainNode);
+    clipGainNode.connect(offline.destination);
+
+    const bufDur = clip.decodedAudioBuffer.duration || 1;
+    const offsetInClip = clip.sourceStartSec % bufDur;
+    clipSrc.start(seg.startSec, offsetInClip, segDur * (clip.playbackRate || 1));
+
+    if (duckAmt > 0.02) {
+      mainGain.gain.setTargetAtTime(duckGain, seg.startSec, 0.08);
+      mainGain.gain.setTargetAtTime(1, seg.endSec, 0.12);
+    }
+  }
 
   const rendered = await offline.startRendering();
 
@@ -221,9 +316,8 @@ async function renderTrimmedAudioWithFades(
     const data = rendered.getChannelData(ch);
     for (let i = 0; i < data.length; i++) {
       const t = i / targetSampleRate;
-      const env = computeFadeEnvelope(t, clipDuration, fadeInSec, fadeOutSec);
-      const scaled = data[i] * env * audioGain;
-      // Soft clip guard if user boosts gain > 1.0
+      const env = computeFadeEnvelope(t, clipDuration, config.fadeInSec, config.fadeOutSec);
+      const scaled = data[i] * env * config.audioGain;
       data[i] = Math.max(-0.99, Math.min(0.99, scaled));
     }
   }
@@ -236,10 +330,16 @@ export async function exportStudioVideo(params: {
   config: StudioConfig;
   abortSignal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
+  batchContext?: { index: number; total: number; label: string };
 }): Promise<ExportProgressState> {
-  const { audio, mediaItems, config, abortSignal, onProgress } = params;
+  const { audio, mediaItems, config, abortSignal, onProgress, batchContext } = params;
   const startWallMs = performance.now();
-  const dims = resolveExportDimensions(config.aspectMode, mediaItems);
+  const dims = resolveExportDimensions(
+    config.aspectMode,
+    mediaItems,
+    config.customWidth,
+    config.customHeight
+  );
   const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
   const totalFrames = Math.max(1, Math.ceil(clipDuration * config.fps));
   const videoBitrate = config.bitrateMbps * 1_000_000;
@@ -251,6 +351,9 @@ export async function exportStudioVideo(params: {
     elapsedMs: 0,
     encoderLabel: 'Probing hardware/software codecs...',
     outputFormat: 'mp4',
+    batchIndex: batchContext?.index,
+    batchTotal: batchContext?.total,
+    batchLabel: batchContext?.label,
   });
 
   try {
@@ -260,7 +363,7 @@ export async function exportStudioVideo(params: {
   }
 
   const monoData = buildMonoAudioData(audio.buffer);
-  const beatCutTimestamps =
+  const autoCuts =
     config.slideshowMode === 'beat_cut'
       ? computeBeatCutTimestamps(
           monoData,
@@ -271,6 +374,12 @@ export async function exportStudioVideo(params: {
           config.beatSensitivity
         )
       : [0];
+  const beatCutTimestamps = resolveBeatCutPoints(
+    autoCuts,
+    config.manualBeatMarkers,
+    config.trimStart,
+    clipDuration
+  );
   const channels = Math.min(2, audio.numberOfChannels);
 
   const profile = await probeBestWebCodecsProfile(
@@ -298,6 +407,7 @@ export async function exportStudioVideo(params: {
       startWallMs,
       abortSignal,
       onProgress,
+      batchContext,
     });
   }
 
@@ -314,6 +424,7 @@ export async function exportStudioVideo(params: {
     startWallMs,
     abortSignal,
     onProgress,
+    batchContext,
   });
 }
 
@@ -332,6 +443,7 @@ async function exportWithWebCodecs(params: {
   startWallMs: number;
   abortSignal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
+  batchContext?: { index: number; total: number; label: string };
 }): Promise<ExportProgressState> {
   const {
     profile,
@@ -348,16 +460,15 @@ async function exportWithWebCodecs(params: {
     startWallMs,
     abortSignal,
     onProgress,
+    batchContext,
   } = params;
 
-  const targetSampleRate = profile.container === 'webm' ? 48000 : audio.sampleRate;
+  const targetSampleRate = profile.audioSampleRate;
   const trimmedAudio = await renderTrimmedAudioWithFades(
     audio.buffer,
-    config.trimStart,
-    config.trimEnd,
-    config.fadeInSec,
-    config.fadeOutSec,
-    config.audioGain,
+    config,
+    mediaItems,
+    beatCutTimestamps,
     targetSampleRate
   );
 
@@ -369,6 +480,9 @@ async function exportWithWebCodecs(params: {
       elapsedMs: performance.now() - startWallMs,
       encoderLabel: profile.label,
       outputFormat: profile.container,
+      batchIndex: batchContext?.index,
+      batchTotal: batchContext?.total,
+      batchLabel: batchContext?.label,
     };
   }
 
@@ -434,206 +548,248 @@ async function exportWithWebCodecs(params: {
     },
   });
 
-  videoEncoder.configure({
-    codec: profile.videoCodec,
-    width: dims.width,
-    height: dims.height,
-    bitrate: videoBitrate,
-    framerate: config.fps,
-  });
-
-  audioEncoder.configure({
-    codec: profile.audioCodec,
-    sampleRate: targetSampleRate,
-    numberOfChannels: channels,
-    bitrate: profile.container === 'mp4' ? 192_000 : 160_000,
-  });
-
-  const chunkSize = 1024;
-  const totalAudioSamples = trimmedAudio.length;
-  for (let offset = 0; offset < totalAudioSamples; offset += chunkSize) {
-    if (abortSignal.aborted || encoderError) break;
-    const count = Math.min(chunkSize, totalAudioSamples - offset);
-    const planar = new Float32Array(count * channels);
-    for (let ch = 0; ch < channels; ch++) {
-      const chSlice = trimmedAudio.getChannelData(ch).subarray(offset, offset + count);
-      planar.set(chSlice, ch * count);
+  const closeEncoders = () => {
+    try {
+      if (videoEncoder.state !== 'closed') videoEncoder.close();
+    } catch {
+      // ignore
     }
-    const audioData = new AudioData({
-      format: 'f32-planar',
-      sampleRate: targetSampleRate,
-      numberOfChannels: channels,
-      numberOfFrames: count,
-      timestamp: Math.round((offset / targetSampleRate) * 1_000_000),
-      data: planar,
-    });
-    audioEncoder.encode(audioData);
-    audioData.close();
-  }
-
-  const canvas = document.createElement('canvas');
-  canvas.width = dims.width;
-  canvas.height = dims.height;
-  const ctx = canvas.getContext('2d', { alpha: false });
-  if (!ctx) throw new Error('Failed to create 2D export canvas context');
-
-  const smoothState = createSmoothState();
-  const frameDurationUs = Math.round(1_000_000 / config.fps);
-
-  // Pause all video elements during offline deterministic seeking
-  for (const item of mediaItems) {
-    if (item.kind === 'video' && item.videoElement && !item.videoElement.paused) {
-      item.videoElement.pause();
+    try {
+      if (audioEncoder.state !== 'closed') audioEncoder.close();
+    } catch {
+      // ignore
     }
-  }
+  };
 
-  for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
-    if (abortSignal.aborted || encoderError) break;
-
-    const localTime = frameIdx / config.fps;
-    const sourceAudioTime = config.trimStart + localTime;
-
-    if (mediaItems.length > 0) {
-      const slice = resolveActiveSlideshowSlice(
-        mediaItems,
-        localTime,
-        clipDuration,
-        config,
-        beatCutTimestamps
-      );
-      const activeItem = mediaItems[slice.activeIndex];
-      if (activeItem?.kind === 'video' && activeItem.videoElement) {
-        const vidTime =
-          activeItem.sourceStartSec + slice.slideLocalTime * (activeItem.playbackRate || 1);
-        await seekVideoToTime(activeItem.videoElement, vidTime);
-      }
-      if (slice.prevIndex !== null) {
-        const prevItem = mediaItems[slice.prevIndex];
-        if (prevItem?.kind === 'video' && prevItem.videoElement) {
-          const prevVidTime =
-            prevItem.sourceStartSec + slice.prevSlideLocalTime * (prevItem.playbackRate || 1);
-          await seekVideoToTime(prevItem.videoElement, prevVidTime);
-        }
-      }
-    }
-
-    const metrics = analyzeAudioAtTime(
-      monoData,
-      audio.sampleRate,
-      sourceAudioTime,
-      config.beatSensitivity,
-      smoothState,
-      config.visualizerSmoothing
-    );
-
-    renderStudioFrame({
-      ctx,
+  try {
+    videoEncoder.configure({
+      codec: profile.videoCodec,
       width: dims.width,
       height: dims.height,
-      localTime,
-      clipDuration,
-      metrics,
-      config,
-      mediaItems,
-      beatCutTimestamps,
-      reducedMotion: false,
-      isExport: true,
+      bitrate: videoBitrate,
+      framerate: config.fps,
     });
 
-    const timestampUs = Math.round(localTime * 1_000_000);
-    const videoFrame = new VideoFrame(canvas, {
-      timestamp: timestampUs,
-      duration: frameDurationUs,
+    audioEncoder.configure({
+      codec: profile.audioCodec,
+      sampleRate: targetSampleRate,
+      numberOfChannels: channels,
+      bitrate: profile.container === 'mp4' ? 192_000 : 160_000,
     });
 
-    while (videoEncoder.encodeQueueSize > 8 && !abortSignal.aborted) {
-      await new Promise((r) => setTimeout(r, 8));
+    const chunkSize = 1024;
+    const totalAudioSamples = trimmedAudio.length;
+    for (let offset = 0; offset < totalAudioSamples; offset += chunkSize) {
+      if (abortSignal.aborted || encoderError) break;
+
+      while (audioEncoder.encodeQueueSize > 64 && !abortSignal.aborted && !encoderError) {
+        await new Promise((r) => setTimeout(r, 4));
+      }
+      if (abortSignal.aborted || encoderError) break;
+
+      const count = Math.min(chunkSize, totalAudioSamples - offset);
+      const planar = new Float32Array(count * channels);
+      for (let ch = 0; ch < channels; ch++) {
+        const chSlice = trimmedAudio.getChannelData(ch).subarray(offset, offset + count);
+        planar.set(chSlice, ch * count);
+      }
+      const audioData = new AudioData({
+        format: 'f32-planar',
+        sampleRate: targetSampleRate,
+        numberOfChannels: channels,
+        numberOfFrames: count,
+        timestamp: Math.round((offset / targetSampleRate) * 1_000_000),
+        data: planar,
+      });
+      try {
+        audioEncoder.encode(audioData);
+      } finally {
+        audioData.close();
+      }
     }
 
-    videoEncoder.encode(videoFrame, { keyFrame: frameIdx % (config.fps * 2) === 0 });
-    videoFrame.close();
+    const canvas = document.createElement('canvas');
+    canvas.width = dims.width;
+    canvas.height = dims.height;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) throw new Error('Failed to create 2D export canvas context');
 
-    if (frameIdx % 4 === 0 || frameIdx === totalFrames - 1) {
-      onProgress({
-        phase: 'encoding',
-        currentFrame: frameIdx + 1,
+    const smoothState = createSmoothState();
+    const frameDtSec = 1 / config.fps;
+    const frameDurationUs = Math.round(1_000_000 / config.fps);
+    const encodeLoopStartMs = performance.now();
+
+    for (const item of mediaItems) {
+      if (item.kind === 'video' && item.videoElement && !item.videoElement.paused) {
+        item.videoElement.pause();
+      }
+    }
+
+    for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+      if (abortSignal.aborted || encoderError) break;
+
+      const localTime = frameIdx / config.fps;
+      const sourceAudioTime = config.trimStart + localTime;
+
+      if (mediaItems.length > 0) {
+        const slice = resolveActiveSlideshowSlice(
+          mediaItems,
+          localTime,
+          clipDuration,
+          config,
+          beatCutTimestamps
+        );
+        const activeItem = mediaItems[slice.activeIndex];
+        if (activeItem?.kind === 'video' && activeItem.videoElement) {
+          const vidTime =
+            activeItem.sourceStartSec + slice.slideLocalTime * (activeItem.playbackRate || 1);
+          await seekVideoToTime(activeItem.videoElement, vidTime);
+        }
+        if (slice.prevIndex !== null) {
+          const prevItem = mediaItems[slice.prevIndex];
+          if (prevItem?.kind === 'video' && prevItem.videoElement) {
+            const prevVidTime =
+              prevItem.sourceStartSec + slice.prevSlideLocalTime * (prevItem.playbackRate || 1);
+            await seekVideoToTime(prevItem.videoElement, prevVidTime);
+          }
+        }
+      }
+
+      const metrics = analyzeAudioAtTime(
+        monoData,
+        audio.sampleRate,
+        sourceAudioTime,
+        config.beatSensitivity,
+        smoothState,
+        config.visualizerSmoothing,
+        frameDtSec
+      );
+
+      renderStudioFrame({
+        ctx,
+        width: dims.width,
+        height: dims.height,
+        localTime,
+        absTime: sourceAudioTime,
+        clipDuration,
+        metrics,
+        config,
+        mediaItems,
+        beatCutTimestamps,
+        reducedMotion: false,
+        isExport: true,
+      });
+
+      while (videoEncoder.encodeQueueSize > 8 && !abortSignal.aborted && !encoderError) {
+        await new Promise((r) => setTimeout(r, 8));
+      }
+      if (abortSignal.aborted || encoderError) break;
+
+      const timestampUs = Math.round(localTime * 1_000_000);
+      const videoFrame = new VideoFrame(canvas, {
+        timestamp: timestampUs,
+        duration: frameDurationUs,
+      });
+      try {
+        videoEncoder.encode(videoFrame, { keyFrame: frameIdx % (config.fps * 2) === 0 });
+      } finally {
+        videoFrame.close();
+      }
+
+      if (frameIdx % 4 === 0 || frameIdx === totalFrames - 1) {
+        const now = performance.now();
+        const done = frameIdx + 1;
+        const loopElapsed = now - encodeLoopStartMs;
+        const etaMs = done > 3 ? (loopElapsed / done) * (totalFrames - done) : undefined;
+        onProgress({
+          phase: 'encoding',
+          currentFrame: done,
+          totalFrames,
+          elapsedMs: now - startWallMs,
+          etaMs,
+          encoderLabel: profile.label,
+          outputFormat: profile.container,
+          batchIndex: batchContext?.index,
+          batchTotal: batchContext?.total,
+          batchLabel: batchContext?.label,
+        });
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    if (abortSignal.aborted) {
+      return {
+        phase: 'cancelled',
+        currentFrame: 0,
         totalFrames,
         elapsedMs: performance.now() - startWallMs,
         encoderLabel: profile.label,
         outputFormat: profile.container,
-      });
-      await new Promise((r) => setTimeout(r, 0));
+        batchIndex: batchContext?.index,
+        batchTotal: batchContext?.total,
+        batchLabel: batchContext?.label,
+      };
     }
-  }
 
-  if (abortSignal.aborted) {
-    try {
-      videoEncoder.close();
-      audioEncoder.close();
-    } catch {
-      // ignore
+    if (encoderError) {
+      throw encoderError;
     }
+
+    onProgress({
+      phase: 'muxing',
+      currentFrame: totalFrames,
+      totalFrames,
+      elapsedMs: performance.now() - startWallMs,
+      etaMs: 0,
+      encoderLabel: profile.label,
+      outputFormat: profile.container,
+      batchIndex: batchContext?.index,
+      batchTotal: batchContext?.total,
+      batchLabel: batchContext?.label,
+    });
+
+    await Promise.all([videoEncoder.flush(), audioEncoder.flush()]);
+
+    let buffer: ArrayBuffer;
+    let mime: string;
+    if (mp4Muxer && mp4Target) {
+      mp4Muxer.finalize();
+      buffer = mp4Target.buffer;
+      mime = 'video/mp4';
+    } else if (webmMuxer && webmTarget) {
+      webmMuxer.finalize();
+      buffer = webmTarget.buffer;
+      mime = 'video/webm';
+    } else {
+      throw new Error('Muxer target missing');
+    }
+
+    const blob = new Blob([buffer], { type: mime });
+    const outputUrl = URL.createObjectURL(blob);
+    const outputFileName = sanitizeOutputFileName(
+      config.titleText,
+      config.artistText,
+      dims.aspectLabel,
+      profile.container
+    );
+
     return {
-      phase: 'cancelled',
-      currentFrame: 0,
+      phase: 'complete',
+      currentFrame: totalFrames,
       totalFrames,
       elapsedMs: performance.now() - startWallMs,
       encoderLabel: profile.label,
       outputFormat: profile.container,
+      batchIndex: batchContext?.index,
+      batchTotal: batchContext?.total,
+      batchLabel: batchContext?.label,
+      outputUrl,
+      outputFileName,
+      outputSizeBytes: blob.size,
     };
+  } finally {
+    closeEncoders();
   }
-
-  if (encoderError) {
-    throw encoderError;
-  }
-
-  onProgress({
-    phase: 'muxing',
-    currentFrame: totalFrames,
-    totalFrames,
-    elapsedMs: performance.now() - startWallMs,
-    encoderLabel: profile.label,
-    outputFormat: profile.container,
-  });
-
-  await Promise.all([videoEncoder.flush(), audioEncoder.flush()]);
-  videoEncoder.close();
-  audioEncoder.close();
-
-  let buffer: ArrayBuffer;
-  let mime: string;
-  if (mp4Muxer && mp4Target) {
-    mp4Muxer.finalize();
-    buffer = mp4Target.buffer;
-    mime = 'video/mp4';
-  } else if (webmMuxer && webmTarget) {
-    webmMuxer.finalize();
-    buffer = webmTarget.buffer;
-    mime = 'video/webm';
-  } else {
-    throw new Error('Muxer target missing');
-  }
-
-  const blob = new Blob([buffer], { type: mime });
-  const outputUrl = URL.createObjectURL(blob);
-  const outputFileName = sanitizeOutputFileName(
-    config.titleText,
-    config.artistText,
-    dims.aspectLabel,
-    profile.container
-  );
-
-  return {
-    phase: 'complete',
-    currentFrame: totalFrames,
-    totalFrames,
-    elapsedMs: performance.now() - startWallMs,
-    encoderLabel: profile.label,
-    outputFormat: profile.container,
-    outputUrl,
-    outputFileName,
-    outputSizeBytes: blob.size,
-  };
 }
 
 async function exportWithMediaRecorder(params: {
@@ -649,6 +805,7 @@ async function exportWithMediaRecorder(params: {
   startWallMs: number;
   abortSignal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
+  batchContext?: { index: number; total: number; label: string };
 }): Promise<ExportProgressState> {
   const {
     audio,
@@ -663,6 +820,7 @@ async function exportWithMediaRecorder(params: {
     startWallMs,
     abortSignal,
     onProgress,
+    batchContext,
   } = params;
 
   const mimeCandidates = [
@@ -682,7 +840,7 @@ async function exportWithMediaRecorder(params: {
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('Cannot initialize export canvas');
 
-  const audioCtx = new AudioContext();
+  const audioCtx = new AudioContext({ sampleRate: 48000 });
   const dest = audioCtx.createMediaStreamDestination();
   const src = audioCtx.createBufferSource();
   src.buffer = audio.buffer;
@@ -742,6 +900,10 @@ async function exportWithMediaRecorder(params: {
           elapsedMs: performance.now() - startWallMs,
           encoderLabel: label,
           outputFormat: ext,
+          isNonDeterministicFallback: true,
+          batchIndex: batchContext?.index,
+          batchTotal: batchContext?.total,
+          batchLabel: batchContext?.label,
         });
         return;
       }
@@ -754,6 +916,10 @@ async function exportWithMediaRecorder(params: {
         elapsedMs: performance.now() - startWallMs,
         encoderLabel: label,
         outputFormat: ext,
+        isNonDeterministicFallback: true,
+        batchIndex: batchContext?.index,
+        batchTotal: batchContext?.total,
+        batchLabel: batchContext?.label,
         outputUrl,
         outputFileName: sanitizeOutputFileName(
           config.titleText,
@@ -770,6 +936,7 @@ async function exportWithMediaRecorder(params: {
   src.start(now, config.trimStart, clipDuration);
 
   const startTime = performance.now();
+  let lastTickTime = startTime;
   let rafId = 0;
 
   const tick = () => {
@@ -777,19 +944,24 @@ async function exportWithMediaRecorder(params: {
       recorder.stop();
       return;
     }
-    const localTime = (performance.now() - startTime) / 1000;
+    const wallNow = performance.now();
+    const dtSec = Math.max(0.001, (wallNow - lastTickTime) / 1000);
+    lastTickTime = wallNow;
+    const localTime = (wallNow - startTime) / 1000;
     if (localTime >= clipDuration) {
       recorder.stop();
       return;
     }
     const currentFrame = Math.min(totalFrames, Math.floor(localTime * config.fps));
+    const sourceAudioTime = config.trimStart + localTime;
     const metrics = analyzeAudioAtTime(
       monoData,
       audio.sampleRate,
-      config.trimStart + localTime,
+      sourceAudioTime,
       config.beatSensitivity,
       smoothState,
-      config.visualizerSmoothing
+      config.visualizerSmoothing,
+      dtSec
     );
 
     renderStudioFrame({
@@ -797,6 +969,7 @@ async function exportWithMediaRecorder(params: {
       width: dims.width,
       height: dims.height,
       localTime,
+      absTime: sourceAudioTime,
       clipDuration,
       metrics,
       config,
@@ -810,9 +983,14 @@ async function exportWithMediaRecorder(params: {
       phase: 'encoding',
       currentFrame,
       totalFrames,
-      elapsedMs: performance.now() - startWallMs,
+      elapsedMs: wallNow - startWallMs,
+      etaMs: Math.max(0, (clipDuration - localTime) * 1000),
       encoderLabel: label,
       outputFormat: ext,
+      isNonDeterministicFallback: true,
+      batchIndex: batchContext?.index,
+      batchTotal: batchContext?.total,
+      batchLabel: batchContext?.label,
     });
 
     rafId = requestAnimationFrame(tick);

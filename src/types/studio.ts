@@ -12,9 +12,15 @@ export type GeneratorEffectId =
   | 'none'
   | 'fractal_julia'
   | 'fractal_kaleido'
+  | 'mandelbrot_zoom'
   | 'space_nebula'
   | 'galaxy_spiral'
-  | 'cosmic_particles';
+  | 'aurora_ribbons'
+  | 'blackhole_accretion'
+  | 'cosmic_particles'
+  | 'cyber_grid_tunnel'
+  | 'voronoi_plasma'
+  | 'custom_glsl';
 
 export type GeneratorBlendMode = 'backdrop' | 'screen' | 'lighter';
 
@@ -43,7 +49,15 @@ export type ColorSchemeId =
   | 'warm_copper'
   | 'custom';
 
-export type ExportAspectMode = 'auto' | '16:9' | '9:16' | '4:5' | '1:1';
+export type ExportAspectMode =
+  | 'auto'
+  | '16:9'
+  | '9:16'
+  | '4:5'
+  | '1:1'
+  | '4k_16:9'
+  | '4k_9:16'
+  | 'custom';
 
 export type MediaFramingMode = 'cover' | 'fit_blur';
 
@@ -52,6 +66,8 @@ export type SlideshowMode = 'custom_durations' | 'even' | 'fixed' | 'beat_cut';
 export type SlideTransitionType = 'crossfade' | 'dip_black' | 'slide' | 'cut';
 
 export type MediaColorFilter = 'none' | 'bw' | 'warm_film' | 'cool_noir' | 'high_contrast';
+
+export type LutPresetId = 'none' | 'teal_orange' | 'cyber_magenta' | 'vintage_gold' | 'deep_ocean';
 
 export type TrimPresetId = 'full' | 'reels_60' | 'tiktok_60' | 'shorts_57' | 'custom';
 
@@ -64,6 +80,41 @@ export type TextBackdropMode = 'none' | 'accent_line' | 'glass_box';
 export type VisualizerPlacement = 'bottom' | 'center' | 'top';
 
 export type InspectorTab = 'effects' | 'generator' | 'typography' | 'export';
+
+export type KeyframeEasing = 'linear' | 'ease_in_out' | 'ease_out';
+
+export interface ClipTransform {
+  offsetX: number; // -0.5 .. 0.5 of frame width
+  offsetY: number; // -0.5 .. 0.5 of frame height
+  scale: number; // 0.3 .. 2.5
+  rotationDeg: number; // -180 .. 180
+  opacity: number; // 0.1 .. 1.0
+  endScale: number; // 0.3 .. 2.5 (keyframe target at end of clip)
+  endOffsetX: number; // -0.5 .. 0.5
+  endOffsetY: number; // -0.5 .. 0.5
+  easing: KeyframeEasing;
+}
+
+export interface SubtitleCue {
+  id: string;
+  startSec: number;
+  endSec: number;
+  text: string;
+}
+
+export interface OverlayLayer {
+  id: string;
+  kind: 'text' | 'image';
+  label: string;
+  text?: string;
+  imageUrl?: string;
+  imageElement?: HTMLImageElement;
+  xPct: number; // 0.05 .. 0.95
+  yPct: number; // 0.05 .. 0.95
+  scale: number; // 0.4 .. 2.5
+  opacity: number; // 0.1 .. 1.0
+  color?: string;
+}
 
 export interface ColorScheme {
   id: ColorSchemeId;
@@ -104,6 +155,7 @@ export interface VisualMediaState {
   imageElement?: HTMLImageElement;
   videoElement?: HTMLVideoElement;
   videoDuration?: number;
+  decodedAudioBuffer?: AudioBuffer;
   // Video Editor clip-level timeline properties
   durationSec: number;
   sourceStartSec: number;
@@ -111,6 +163,10 @@ export interface VisualMediaState {
   transitionOut: SlideTransitionType;
   transitionDurationSec: number;
   generatorId?: GeneratorEffectId;
+  // Stage 2: Transforms, keyframes & per-clip audio
+  transform: ClipTransform;
+  clipAudioVolume: number; // 0 .. 1.5
+  clipAudioMuted: boolean;
 }
 
 export interface StudioConfig {
@@ -126,13 +182,20 @@ export interface StudioConfig {
   visualizerPlacement: VisualizerPlacement;
   backgroundPulse: number;
 
-  // Generative visual effects (Fractals, Deep Space, Galaxies, Particles)
+  // Generative visual effects (Fractals, Deep Space, Galaxies, Particles, Aurora, Black Hole, Cyber Grid, Voronoi, Custom GLSL)
   generatorEffect: GeneratorEffectId;
   generatorBlend: GeneratorBlendMode;
-  generatorOpacity: number; // 0.1 - 1.0
-  generatorSpeed: number; // 0.2 - 2.5
-  generatorScale: number; // 0.5 - 2.0
-  generatorBeatReact: number; // 0.0 - 2.0
+  generatorOpacity: number;
+  generatorSpeed: number;
+  generatorScale: number;
+  generatorBeatReact: number;
+  generatorComplexity: number; // 0.4 .. 2.0
+  generatorWarp: number; // 0.0 .. 1.5
+  generatorSymmetry: 1 | 2 | 4 | 6 | 8;
+  generatorRotationSpeed: number; // -1.5 .. 1.5
+  generatorHueShift: number; // -180 .. 180 degrees
+  generatorGlow: number; // 0.4 .. 2.2
+  customGlslCode: string;
 
   // Multi-clip sequence & background styling
   slideshowMode: SlideshowMode;
@@ -143,6 +206,8 @@ export interface StudioConfig {
   kenBurnsMotion: boolean;
   framingMode: MediaFramingMode;
   mediaFilter: MediaColorFilter;
+  lutPreset: LutPresetId;
+  glitchStrength: number; // 0 .. 1.0
   mediaBrightness: number;
   mediaBlur: number;
   scrimStrength: number;
@@ -164,6 +229,16 @@ export interface StudioConfig {
   textBackdrop: TextBackdropMode;
   textShadowStrength: number;
 
+  // Subtitles & Multi-layer Overlays
+  showSubtitles: boolean;
+  subtitleSizeScale: number;
+  subtitles: SubtitleCue[];
+  overlays: OverlayLayer[];
+
+  // Manual Beat Markers & Snapping
+  manualBeatMarkers: number[];
+  snapToBeats: boolean;
+
   // Color scheme
   colorSchemeId: ColorSchemeId;
   customTextColor: string;
@@ -172,11 +247,14 @@ export interface StudioConfig {
   // Preview helper (never exported)
   showSafeZones: boolean;
 
-  // Export & Auto-trim
+  // Export, Audio Mixing & Auto-trim
   aspectMode: ExportAspectMode;
+  customWidth: number;
+  customHeight: number;
   fps: 30 | 60;
-  bitrateMbps: 8 | 12 | 16;
+  bitrateMbps: number;
   audioGain: number;
+  audioDucking: number; // 0 .. 0.9 reduction on main audio when clip audio plays
   trimPreset: TrimPresetId;
   trimStart: number;
   trimEnd: number;
@@ -199,8 +277,13 @@ export interface ExportProgressState {
   currentFrame: number;
   totalFrames: number;
   elapsedMs: number;
+  etaMs?: number;
   encoderLabel: string;
   outputFormat: 'mp4' | 'webm';
+  isNonDeterministicFallback?: boolean;
+  batchIndex?: number;
+  batchTotal?: number;
+  batchLabel?: string;
   outputUrl?: string;
   outputFileName?: string;
   outputSizeBytes?: number;

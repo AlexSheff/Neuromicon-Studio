@@ -80,7 +80,8 @@ export function analyzeAudioAtTime(
   timeSec: number,
   sensitivity: number,
   smoothState?: AnalyzerSmoothState,
-  smoothing = 0.45
+  smoothing = 0.45,
+  dtSec = 1 / 30
 ): AudioFrameMetrics {
   const spectrumOut = new Float32Array(48);
   const waveformOut = new Float32Array(64);
@@ -153,8 +154,16 @@ export function analyzeAudioAtTime(
   const rawBeat = Math.max(0, Math.min(1, (rawBass - 0.16) * 1.45));
 
   if (smoothState) {
-    const decayRate = Math.max(0.08, 0.45 * (1 - smoothing * 0.75));
-    const attackRate = Math.max(0.25, 0.85 * (1 - smoothing * 0.45));
+    // Convert 30fps reference alpha to dt-independent exponential coefficient
+    const clampedDt = Math.max(0.001, Math.min(0.25, dtSec));
+    const dtScale = clampedDt * 30;
+    const baseDecay = Math.max(0.08, 0.45 * (1 - smoothing * 0.75));
+    const baseAttack = Math.max(0.25, 0.85 * (1 - smoothing * 0.45));
+    const decayRate = 1 - Math.pow(1 - baseDecay, dtScale);
+    const attackRate = 1 - Math.pow(1 - baseAttack, dtScale);
+    const midRate = 1 - Math.pow(1 - Math.max(0.15, baseDecay * 1.2), dtScale);
+    const beatAttackRate = 1 - Math.pow(1 - Math.min(0.85, baseAttack * 1.1), dtScale);
+    const beatDecayRate = 1 - Math.pow(1 - baseDecay * 0.8, dtScale);
 
     for (let i = 0; i < 48; i++) {
       const target = spectrumOut[i];
@@ -163,13 +172,14 @@ export function analyzeAudioAtTime(
       smoothState.spectrum[i] = prev + (target - prev) * rate;
       spectrumOut[i] = smoothState.spectrum[i];
     }
-    smoothState.bass += (rawBass - smoothState.bass) * (rawBass > smoothState.bass ? attackRate : decayRate);
-    smoothState.mid += (rawMid - smoothState.mid) * Math.max(0.15, decayRate * 1.2);
-    smoothState.treble += (rawTreble - smoothState.treble) * Math.max(0.15, decayRate * 1.2);
-    smoothState.rms += (rawRms - smoothState.rms) * Math.max(0.15, decayRate * 1.2);
+    smoothState.bass +=
+      (rawBass - smoothState.bass) * (rawBass > smoothState.bass ? attackRate : decayRate);
+    smoothState.mid += (rawMid - smoothState.mid) * midRate;
+    smoothState.treble += (rawTreble - smoothState.treble) * midRate;
+    smoothState.rms += (rawRms - smoothState.rms) * midRate;
     smoothState.beatPulse +=
       (rawBeat - smoothState.beatPulse) *
-      (rawBeat > smoothState.beatPulse ? Math.min(0.85, attackRate * 1.1) : decayRate * 0.8);
+      (rawBeat > smoothState.beatPulse ? beatAttackRate : beatDecayRate);
 
     return {
       rms: smoothState.rms,
@@ -206,21 +216,76 @@ export function computeBeatCutTimestamps(
   if (mono.length === 0) return cuts;
 
   const stepSec = 0.05;
-  let rollingAvg = 0.2;
-  let lastCut = 0;
+  const energies: number[] = [];
+  const times: number[] = [];
+  let maxEnergy = 0;
 
-  for (let t = 0.25; t < clipDuration - 0.35; t += stepSec) {
+  for (let t = 0.2; t < clipDuration - 0.3; t += stepSec) {
     const metrics = analyzeAudioAtTime(mono, sampleRate, trimStart + t, sensitivity);
     const energy = metrics.bass * 0.75 + metrics.rms * 0.25;
+    energies.push(energy);
+    times.push(t);
+    if (energy > maxEnergy) maxEnergy = energy;
+  }
+
+  if (energies.length === 0 || maxEnergy < 0.02) return cuts;
+
+  // Adaptive floor scales with track loudness so quiet ambient tracks still get musical cuts
+  const adaptiveFloor = Math.max(0.04, maxEnergy * 0.24);
+  let rollingAvg = energies[0];
+  let lastCut = 0;
+
+  for (let i = 0; i < energies.length; i++) {
+    const t = times[i];
+    const energy = energies[i];
     rollingAvg = rollingAvg * 0.88 + energy * 0.12;
 
-    if (t - lastCut >= Math.max(0.6, minHoldSec) && energy > rollingAvg * 1.26 && energy > 0.28) {
+    if (
+      t - lastCut >= Math.max(0.6, minHoldSec) &&
+      energy > rollingAvg * 1.24 &&
+      energy > adaptiveFloor
+    ) {
       cuts.push(Number(t.toFixed(3)));
       lastCut = t;
     }
   }
 
   return cuts;
+}
+
+/**
+ * Merges user-authored manual beat markers (relative to trimStart) with auto-detected cuts
+ * when manual markers exist, returning a clean sorted timeline cut array starting at 0.
+ */
+export function resolveBeatCutPoints(
+  autoCuts: number[],
+  manualMarkersAbs: number[],
+  trimStart: number,
+  clipDuration: number
+): number[] {
+  if (!manualMarkersAbs || manualMarkersAbs.length === 0) return autoCuts;
+  const rel = manualMarkersAbs
+    .map((abs) => Number((abs - trimStart).toFixed(3)))
+    .filter((t) => t > 0.15 && t < clipDuration - 0.15);
+  const unique = Array.from(new Set([0, ...rel])).sort((a, b) => a - b);
+  return unique.length > 1 ? unique : autoCuts;
+}
+
+export function snapTimeToBeat(
+  timeSec: number,
+  beatPointsAbs: number[],
+  thresholdSec = 0.22
+): number {
+  let closest = timeSec;
+  let bestDist = thresholdSec;
+  for (const bp of beatPointsAbs) {
+    const d = Math.abs(bp - timeSec);
+    if (d < bestDist) {
+      bestDist = d;
+      closest = bp;
+    }
+  }
+  return closest;
 }
 
 export interface TimelineClipSegment {
@@ -239,7 +304,7 @@ export function computeClipTimelineSegments(
   beatCutTimestamps: number[]
 ): TimelineClipSegment[] {
   const count = mediaItems.length;
-  if (count === 0) return [];
+  if (count === 0 || clipDuration <= 0) return [];
   if (count === 1) {
     return [{ clipIndex: 0, startSec: 0, endSec: clipDuration }];
   }
@@ -249,10 +314,11 @@ export function computeClipTimelineSegments(
   if (config.slideshowMode === 'custom_durations') {
     let cursor = 0;
     let step = 0;
-    while (cursor < clipDuration - 0.01 && step < 400) {
+    while (cursor < clipDuration - 0.005 && step < 400) {
       const clipIndex = step % count;
       const dur = Math.max(0.4, mediaItems[clipIndex].durationSec || 4);
-      const endSec = Math.min(clipDuration, cursor + dur);
+      const rawEnd = cursor + dur;
+      const endSec = clipDuration - rawEnd < 0.01 ? clipDuration : Math.min(clipDuration, rawEnd);
       segments.push({ clipIndex, startSec: cursor, endSec });
       cursor = endSec;
       step++;

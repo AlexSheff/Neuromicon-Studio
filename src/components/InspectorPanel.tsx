@@ -1,4 +1,15 @@
-import { Download, FileText, Orbit, Palette, Sliders, Type } from 'lucide-react';
+import {
+  Download,
+  FileText,
+  Layers,
+  Orbit,
+  Palette,
+  Play,
+  RotateCcw,
+  Sliders,
+  Sparkles,
+  Type,
+} from 'lucide-react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
@@ -7,6 +18,7 @@ import {
   GeneratorBlendMode,
   InspectorTab,
   Language,
+  LutPresetId,
   MediaColorFilter,
   StudioConfig,
   TextAlignMode,
@@ -16,7 +28,12 @@ import {
   VisualMediaState,
   VisualizerPlacement,
 } from '../types/studio';
-import { COLOR_SCHEMES, FONT_OPTIONS, GENERATOR_EFFECTS } from '../utils/presets';
+import {
+  COLOR_SCHEMES,
+  FONT_OPTIONS,
+  GENERATOR_EFFECTS,
+  STUDIO_MOOD_PRESETS,
+} from '../utils/presets';
 import { resolveExportDimensions } from '../utils/videoExporter';
 
 interface InspectorPanelProps {
@@ -25,9 +42,14 @@ interface InspectorPanelProps {
   audio: AudioTrackState | null;
   mediaItems: VisualMediaState[];
   config: StudioConfig;
+  glslError: string | null;
   onChangeTab: (tab: InspectorTab) => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
+  onApplyMoodPreset: (patch: Partial<StudioConfig>) => void;
+  onResetGenerator: () => void;
+  onCompileCustomGlsl: () => void;
   onStartExport: () => void;
+  onStartBatchExport: () => void;
   onDownloadMetadataTxt: () => void;
 }
 
@@ -55,13 +77,23 @@ export function InspectorPanel({
   audio,
   mediaItems,
   config,
+  glslError,
   onChangeTab,
   onUpdateConfig,
+  onApplyMoodPreset,
+  onResetGenerator,
+  onCompileCustomGlsl,
   onStartExport,
+  onStartBatchExport,
   onDownloadMetadataTxt,
 }: InspectorPanelProps) {
   const t = tFor(lang);
-  const dims = resolveExportDimensions(config.aspectMode, mediaItems);
+  const dims = resolveExportDimensions(
+    config.aspectMode,
+    mediaItems,
+    config.customWidth,
+    config.customHeight
+  );
   const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
 
   const colorFilters: { id: MediaColorFilter; label: string }[] = [
@@ -70,6 +102,14 @@ export function InspectorPanel({
     { id: 'warm_film', label: t.filterWarm },
     { id: 'cool_noir', label: t.filterCool },
     { id: 'high_contrast', label: t.filterContrast },
+  ];
+
+  const lutPresets: { id: LutPresetId; label: string }[] = [
+    { id: 'none', label: t.lutNone },
+    { id: 'teal_orange', label: t.lutTealOrange },
+    { id: 'cyber_magenta', label: t.lutCyberMagenta },
+    { id: 'vintage_gold', label: t.lutVintageGold },
+    { id: 'deep_ocean', label: t.lutDeepOcean },
   ];
 
   return (
@@ -133,6 +173,25 @@ export function InspectorPanel({
       <div className="flex-1 overflow-y-auto p-4 space-y-5">
         {activeTab === 'effects' && (
           <>
+            <div className="space-y-2 pb-3 border-b border-[#262B38]">
+              <label className="text-xs font-semibold text-gray-200 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                <span>{t.moodPresetsLabel}</span>
+              </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                {STUDIO_MOOD_PRESETS.map((mood) => (
+                  <button
+                    key={mood.id}
+                    type="button"
+                    onClick={() => onApplyMoodPreset(mood.patch)}
+                    className="px-2.5 py-2 rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/70 hover:bg-amber-500/10 text-left text-[11px] font-medium text-gray-200 transition-colors cursor-pointer truncate"
+                  >
+                    {lang === 'ru' ? mood.nameRu : mood.nameEn}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="space-y-2">
               <label className="text-xs font-semibold text-gray-200 block">{t.beatPresetLabel}</label>
               <div className="grid grid-cols-2 gap-2">
@@ -412,6 +471,44 @@ export function InspectorPanel({
                   className="w-full studio-slider"
                 />
               </div>
+
+              <div className="space-y-1.5 pt-1">
+                <span className="text-[11px] text-gray-400 block">{t.lutPresetLabel}</span>
+                <div className="grid grid-cols-3 gap-1">
+                  {lutPresets.map((lut) => (
+                    <button
+                      key={lut.id}
+                      type="button"
+                      onClick={() => onUpdateConfig({ lutPreset: lut.id })}
+                      className={`py-1.5 px-1.5 rounded border text-[11px] font-medium cursor-pointer truncate ${
+                        config.lutPreset === lut.id
+                          ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                          : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                      }`}
+                    >
+                      {lut.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-300">{t.glitchStrengthLabel}</span>
+                  <span className="font-mono tabular-nums text-gray-200">
+                    {Math.round(config.glitchStrength * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={config.glitchStrength}
+                  onChange={(e) => onUpdateConfig({ glitchStrength: Number(e.target.value) })}
+                  className="w-full studio-slider"
+                />
+              </div>
             </div>
           </>
         )}
@@ -425,7 +522,7 @@ export function InspectorPanel({
               </p>
             </div>
 
-            <div className="grid grid-cols-1 gap-2">
+            <div className="grid grid-cols-2 gap-1.5">
               {GENERATOR_EFFECTS.map((eff) => {
                 const active = config.generatorEffect === eff.id;
                 return (
@@ -433,16 +530,16 @@ export function InspectorPanel({
                     key={eff.id}
                     type="button"
                     onClick={() => onUpdateConfig({ generatorEffect: eff.id })}
-                    className={`p-3 rounded-md border text-left transition-colors cursor-pointer ${
+                    className={`p-2.5 rounded-md border text-left transition-colors cursor-pointer ${
                       active
                         ? 'border-amber-500 bg-amber-500/12'
                         : 'border-[#262B38] bg-[#141821] hover:border-gray-500'
                     }`}
                   >
-                    <div className="text-xs font-semibold text-gray-100">
+                    <div className="text-[11px] font-semibold text-gray-100 truncate">
                       {lang === 'ru' ? eff.nameRu : eff.nameEn}
                     </div>
-                    <div className="text-[11px] text-gray-400 mt-0.5">
+                    <div className="text-[10px] text-gray-400 mt-0.5 line-clamp-2 leading-tight">
                       {lang === 'ru' ? eff.descRu : eff.descEn}
                     </div>
                   </button>
@@ -475,6 +572,28 @@ export function InspectorPanel({
                         }`}
                       >
                         {b.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <span className="text-xs font-semibold text-gray-200 block">
+                    {t.generatorSymmetryLabel}
+                  </span>
+                  <div className="grid grid-cols-5 gap-1">
+                    {([1, 2, 4, 6, 8] as const).map((sym) => (
+                      <button
+                        key={sym}
+                        type="button"
+                        onClick={() => onUpdateConfig({ generatorSymmetry: sym })}
+                        className={`py-1.5 rounded border text-[11px] font-mono tabular-nums cursor-pointer ${
+                          config.generatorSymmetry === sym
+                            ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                            : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                        }`}
+                      >
+                        {sym}×
                       </button>
                     ))}
                   </div>
@@ -551,6 +670,139 @@ export function InspectorPanel({
                     className="w-full studio-slider"
                   />
                 </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-300">{t.generatorComplexityLabel}</span>
+                    <span className="font-mono tabular-nums text-gray-200">
+                      {config.generatorComplexity.toFixed(2)}×
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.4}
+                    max={2.0}
+                    step={0.05}
+                    value={config.generatorComplexity}
+                    onChange={(e) => onUpdateConfig({ generatorComplexity: Number(e.target.value) })}
+                    className="w-full studio-slider"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-300">{t.generatorWarpLabel}</span>
+                    <span className="font-mono tabular-nums text-gray-200">
+                      {Math.round(config.generatorWarp * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1.5}
+                    step={0.05}
+                    value={config.generatorWarp}
+                    onChange={(e) => onUpdateConfig({ generatorWarp: Number(e.target.value) })}
+                    className="w-full studio-slider"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-300">{t.generatorRotSpeedLabel}</span>
+                    <span className="font-mono tabular-nums text-gray-200">
+                      {config.generatorRotationSpeed >= 0 ? '+' : ''}
+                      {config.generatorRotationSpeed.toFixed(2)}×
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-1.5}
+                    max={1.5}
+                    step={0.05}
+                    value={config.generatorRotationSpeed}
+                    onChange={(e) =>
+                      onUpdateConfig({ generatorRotationSpeed: Number(e.target.value) })
+                    }
+                    className="w-full studio-slider"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-300">{t.generatorHueShiftLabel}</span>
+                    <span className="font-mono tabular-nums text-gray-200">
+                      {config.generatorHueShift > 0 ? '+' : ''}
+                      {config.generatorHueShift}°
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-180}
+                    max={180}
+                    step={5}
+                    value={config.generatorHueShift}
+                    onChange={(e) => onUpdateConfig({ generatorHueShift: Number(e.target.value) })}
+                    className="w-full studio-slider"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-300">{t.generatorGlowLabel}</span>
+                    <span className="font-mono tabular-nums text-gray-200">
+                      {config.generatorGlow.toFixed(2)}×
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.4}
+                    max={2.2}
+                    step={0.05}
+                    value={config.generatorGlow}
+                    onChange={(e) => onUpdateConfig({ generatorGlow: Number(e.target.value) })}
+                    className="w-full studio-slider"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onResetGenerator}
+                  className="w-full py-1.5 px-3 rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/50 text-[11px] font-medium text-gray-300 hover:text-amber-300 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                  <span>{t.resetGeneratorBtn}</span>
+                </button>
+
+                {config.generatorEffect === 'custom_glsl' && (
+                  <div className="space-y-2 pt-2 border-t border-[#262B38]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-gray-200">{t.customGlslTitle}</span>
+                      <button
+                        type="button"
+                        onClick={onCompileCustomGlsl}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-[11px] font-semibold text-zinc-950 cursor-pointer transition-colors"
+                      >
+                        <Play className="w-3 h-3" aria-hidden="true" />
+                        <span>{t.compileGlslBtn}</span>
+                      </button>
+                    </div>
+                    <textarea
+                      rows={9}
+                      spellCheck={false}
+                      value={config.customGlslCode}
+                      onChange={(e) => onUpdateConfig({ customGlslCode: e.target.value })}
+                      className="w-full rounded-md bg-[#0B0D11] border border-[#262B38] p-2.5 text-[11px] leading-relaxed font-mono text-gray-100 focus:border-amber-500 focus:outline-none resize-y"
+                    />
+                    {glslError ? (
+                      <div className="rounded border border-rose-500/50 bg-rose-500/10 px-2.5 py-1.5 text-[11px] font-mono text-rose-300 break-words">
+                        {glslError}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-emerald-400">{t.glslOkNote}</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </>
@@ -874,12 +1126,15 @@ export function InspectorPanel({
               <div className="space-y-1.5">
                 {(
                   [
-                    { id: 'auto', label: `${t.aspectAuto} → ${dims.width}×${dims.height}` },
-                    { id: '16:9', label: t.aspect169 },
-                    { id: '9:16', label: t.aspect916 },
-                    { id: '4:5', label: t.aspect45 },
-                    { id: '1:1', label: t.aspect11 },
-                  ] as { id: ExportAspectMode; label: string }[]
+                    { id: 'auto', tag: dims.aspectLabel, label: `${t.aspectAuto} → ${dims.width}×${dims.height}` },
+                    { id: '16:9', tag: '16:9', label: t.aspect169 },
+                    { id: '9:16', tag: '9:16', label: t.aspect916 },
+                    { id: '4:5', tag: '4:5', label: t.aspect45 },
+                    { id: '1:1', tag: '1:1', label: t.aspect11 },
+                    { id: '4k_16:9', tag: '4K', label: t.aspect4k169 },
+                    { id: '4k_9:16', tag: '4K', label: t.aspect4k916 },
+                    { id: 'custom', tag: 'Custom', label: t.aspectCustom },
+                  ] as { id: ExportAspectMode; tag: string; label: string }[]
                 ).map((opt) => (
                   <button
                     key={opt.id}
@@ -893,53 +1148,80 @@ export function InspectorPanel({
                   >
                     <span className="truncate">{opt.label}</span>
                     <span className="font-mono text-[11px] text-gray-400 shrink-0 ml-2">
-                      {opt.id === 'auto' ? dims.aspectLabel : opt.id}
+                      {opt.tag}
                     </span>
+                  </button>
+                ))}
+              </div>
+
+              {config.aspectMode === 'custom' && (
+                <div className="grid grid-cols-2 gap-2.5 pt-1">
+                  <label className="space-y-1 block">
+                    <span className="text-[11px] text-gray-400 block">{t.customWidthLabel}</span>
+                    <input
+                      type="number"
+                      min={320}
+                      max={4096}
+                      step={2}
+                      value={config.customWidth}
+                      onChange={(e) =>
+                        onUpdateConfig({ customWidth: Math.max(320, Number(e.target.value) || 1920) })
+                      }
+                      className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs font-mono tabular-nums text-gray-100"
+                    />
+                  </label>
+                  <label className="space-y-1 block">
+                    <span className="text-[11px] text-gray-400 block">{t.customHeightLabel}</span>
+                    <input
+                      type="number"
+                      min={320}
+                      max={4096}
+                      step={2}
+                      value={config.customHeight}
+                      onChange={(e) =>
+                        onUpdateConfig({ customHeight: Math.max(320, Number(e.target.value) || 1080) })
+                      }
+                      className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs font-mono tabular-nums text-gray-100"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="text-xs font-semibold text-gray-200 block">{t.fpsLabel}</span>
+              <div className="grid grid-cols-2 gap-1.5">
+                {([30, 60] as const).map((fps) => (
+                  <button
+                    key={fps}
+                    type="button"
+                    onClick={() => onUpdateConfig({ fps })}
+                    className={`py-2 rounded-md border text-xs font-mono tabular-nums cursor-pointer ${
+                      config.fps === fps
+                        ? 'border-amber-500 bg-amber-500/15 text-amber-300'
+                        : 'border-[#262B38] bg-[#141821] text-gray-300'
+                    }`}
+                  >
+                    {fps} fps
                   </button>
                 ))}
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <span className="text-xs font-semibold text-gray-200 block">{t.fpsLabel}</span>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {([30, 60] as const).map((fps) => (
-                    <button
-                      key={fps}
-                      type="button"
-                      onClick={() => onUpdateConfig({ fps })}
-                      className={`py-2 rounded-md border text-xs font-mono tabular-nums cursor-pointer ${
-                        config.fps === fps
-                          ? 'border-amber-500 bg-amber-500/15 text-amber-300'
-                          : 'border-[#262B38] bg-[#141821] text-gray-300'
-                      }`}
-                    >
-                      {fps} fps
-                    </button>
-                  ))}
-                </div>
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-300">{t.bitrateLabel}</span>
+                <span className="font-mono tabular-nums text-gray-200">{config.bitrateMbps} Mbps</span>
               </div>
-
-              <div className="space-y-1.5">
-                <span className="text-xs font-semibold text-gray-200 block">{t.bitrateLabel}</span>
-                <div className="grid grid-cols-3 gap-1">
-                  {([8, 12, 16] as const).map((mbps) => (
-                    <button
-                      key={mbps}
-                      type="button"
-                      onClick={() => onUpdateConfig({ bitrateMbps: mbps })}
-                      className={`py-2 rounded-md border text-[11px] font-mono tabular-nums cursor-pointer ${
-                        config.bitrateMbps === mbps
-                          ? 'border-amber-500 bg-amber-500/15 text-amber-300'
-                          : 'border-[#262B38] bg-[#141821] text-gray-300'
-                      }`}
-                    >
-                      {mbps}M
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <input
+                type="range"
+                min={4}
+                max={40}
+                step={2}
+                value={config.bitrateMbps}
+                onChange={(e) => onUpdateConfig({ bitrateMbps: Number(e.target.value) })}
+                className="w-full studio-slider"
+              />
             </div>
 
             <div className="space-y-1">
@@ -993,6 +1275,16 @@ export function InspectorPanel({
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>{t.exportVideoBtn}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={onStartBatchExport}
+                disabled={!audio}
+                className="w-full py-2 px-4 rounded-md border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-amber-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>{t.batchExportBtn}</span>
               </button>
 
               <button

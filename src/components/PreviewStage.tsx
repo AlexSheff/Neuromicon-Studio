@@ -1,15 +1,22 @@
 import {
   AudioWaveform,
+  Camera,
+  Flag,
   Frame,
   Globe,
+  Magnet,
   Orbit,
   Pause,
   Play,
+  Repeat,
   RotateCcw,
+  Scissors,
   SlidersHorizontal,
+  Trash2,
   X,
+  ZoomIn,
 } from 'lucide-react';
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
@@ -18,7 +25,7 @@ import {
   StudioConfig,
   VisualMediaState,
 } from '../types/studio';
-import { computeClipTimelineSegments } from '../utils/audioAnalyzer';
+import { computeClipTimelineSegments, snapTimeToBeat } from '../utils/audioAnalyzer';
 import { resolveExportDimensions } from '../utils/videoExporter';
 
 interface PreviewStageProps {
@@ -30,12 +37,21 @@ interface PreviewStageProps {
   beatCutTimestamps: number[];
   config: StudioConfig;
   isPlaying: boolean;
+  isLooping: boolean;
   currentTime: number;
   onToggleLanguage: () => void;
   onTogglePlay: () => void;
+  onToggleLoop: () => void;
   onResetToTrimStart: () => void;
+  onSnapshotPng: () => void;
   onSeekAbsolute: (sec: number) => void;
   onSelectClip: (id: string) => void;
+  onReorderClip: (fromIdx: number, toIdx: number) => void;
+  onSplitClipAtPlayhead: () => void;
+  onRippleDeleteSelected: () => void;
+  onToggleSnapToBeats: () => void;
+  onAddBeatMarker: () => void;
+  onClearBeatMarkers: () => void;
   onSelectBeatPreset: (preset: BeatPresetId) => void;
   onToggleSafeZones: () => void;
   onLoadDemoBeat: () => void;
@@ -67,21 +83,38 @@ export function PreviewStage({
   beatCutTimestamps,
   config,
   isPlaying,
+  isLooping,
   currentTime,
   onToggleLanguage,
   onTogglePlay,
+  onToggleLoop,
   onResetToTrimStart,
+  onSnapshotPng,
   onSeekAbsolute,
   onSelectClip,
+  onReorderClip,
+  onSplitClipAtPlayhead,
+  onRippleDeleteSelected,
+  onToggleSnapToBeats,
+  onAddBeatMarker,
+  onClearBeatMarkers,
   onSelectBeatPreset,
   onToggleSafeZones,
   onLoadDemoBeat,
 }: PreviewStageProps) {
   const t = tFor(lang);
   const [presetDrawerOpen, setPresetDrawerOpen] = useState(false);
+  const [timelineZoom, setTimelineZoom] = useState(1);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
 
-  const dims = resolveExportDimensions(config.aspectMode, mediaItems);
+  const dims = resolveExportDimensions(
+    config.aspectMode,
+    mediaItems,
+    config.customWidth,
+    config.customHeight
+  );
   const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
   const localTime = Math.max(0, Math.min(clipDuration, currentTime - config.trimStart));
 
@@ -92,11 +125,20 @@ export function PreviewStage({
     beatCutTimestamps
   );
 
+  const absBeatPoints = useMemo(() => {
+    const autoAbs = beatCutTimestamps.map((b) => config.trimStart + b);
+    return Array.from(new Set([...autoAbs, ...config.manualBeatMarkers])).sort((a, b) => a - b);
+  }, [beatCutTimestamps, config.manualBeatMarkers, config.trimStart]);
+
   const scrubAtClientX = (clientX: number) => {
     if (!audio || !timelineRef.current) return;
     const rect = timelineRef.current.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    onSeekAbsolute(ratio * audio.duration);
+    let targetSec = ratio * audio.duration;
+    if (config.snapToBeats && absBeatPoints.length > 0) {
+      targetSec = snapTimeToBeat(targetSec, absBeatPoints, 0.25);
+    }
+    onSeekAbsolute(targetSec);
   };
 
   const handleTimelinePointerDown = (e: React.PointerEvent) => {
@@ -139,6 +181,15 @@ export function PreviewStage({
           >
             <Frame className="w-3.5 h-3.5" aria-hidden="true" />
             <span>{t.safeZonesButton}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onSnapshotPng}
+            className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-xs font-medium text-gray-300 hover:text-amber-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Camera className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{t.snapshotPngBtn}</span>
           </button>
 
           <div className="hidden xl:flex items-center gap-2 text-xs text-gray-400 font-mono tabular-nums truncate">
@@ -208,15 +259,15 @@ export function PreviewStage({
       )}
 
       {/* Dominant Viewport Canvas Stage */}
-      <div className="flex-1 min-h-[280px] p-4 md:p-5 flex items-center justify-center relative overflow-hidden">
+      <div className="flex-1 min-h-[260px] p-4 md:p-5 flex items-center justify-center relative overflow-hidden">
         <div
           className="relative flex items-center justify-center rounded-lg border border-[#262B38] bg-[#07080B] overflow-hidden shadow-xl"
           style={{
             aspectRatio: `${dims.width} / ${dims.height}`,
-            maxHeight: 'calc(100vh - 340px)',
+            maxHeight: 'calc(100vh - 375px)',
             maxWidth: '100%',
             width: dims.width >= dims.height ? 'min(100%, 820px)' : 'auto',
-            height: dims.height > dims.width ? 'min(100%, 510px)' : 'auto',
+            height: dims.height > dims.width ? 'min(100%, 500px)' : 'auto',
           }}
         >
           <canvas
@@ -245,76 +296,189 @@ export function PreviewStage({
         </div>
       </div>
 
-      {/* Dual-Track Video Editor Timeline (Clip Track + Audio Waveform Track) */}
-      <div className="border-t border-[#262B38] bg-[#0E1016] px-4 py-3 space-y-2">
-        {/* Track 1: Clip Sequence Track */}
+      {/* Dual-Track Video Editor Timeline (Toolbar + Clip Track + Audio Waveform Track) */}
+      <div className="border-t border-[#262B38] bg-[#0E1016] px-4 py-2.5 space-y-2">
+        {/* Stage 2 NLE Timeline Toolbar */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-[#1E2330]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onSplitClipAtPlayhead}
+              disabled={!audio || mediaItems.length === 0}
+              title={`${t.splitClipBtn} (S)`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 disabled:opacity-35 text-[11px] font-medium text-gray-200 cursor-pointer transition-colors"
+            >
+              <Scissors className="w-3 h-3 text-amber-400" aria-hidden="true" />
+              <span>{t.splitClipBtn}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onRippleDeleteSelected}
+              disabled={!selectedClipId && mediaItems.length === 0}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-[#262B38] bg-[#141821] hover:border-rose-500/60 disabled:opacity-35 text-[11px] font-medium text-gray-200 cursor-pointer transition-colors"
+            >
+              <Trash2 className="w-3 h-3 text-rose-400" aria-hidden="true" />
+              <span>{t.rippleDeleteBtn}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onToggleSnapToBeats}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded border text-[11px] font-medium cursor-pointer transition-colors ${
+                config.snapToBeats
+                  ? 'border-amber-500/60 bg-amber-500/15 text-amber-300'
+                  : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+              }`}
+            >
+              <Magnet className="w-3 h-3" aria-hidden="true" />
+              <span>{t.snapBeatsLabel}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onAddBeatMarker}
+              disabled={!audio}
+              title={`${t.tapTempoBtn} (M)`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-[#262B38] bg-[#141821] hover:border-cyan-400/60 disabled:opacity-35 text-[11px] font-medium text-cyan-300 cursor-pointer transition-colors"
+            >
+              <Flag className="w-3 h-3" aria-hidden="true" />
+              <span>
+                {t.tapTempoBtn}
+                {config.manualBeatMarkers.length > 0 ? ` (${config.manualBeatMarkers.length})` : ''}
+              </span>
+            </button>
+
+            {config.manualBeatMarkers.length > 0 && (
+              <button
+                type="button"
+                onClick={onClearBeatMarkers}
+                className="px-2 py-1 rounded border border-[#262B38] bg-[#141821] hover:border-rose-500/50 text-[11px] text-gray-400 hover:text-rose-300 cursor-pointer transition-colors"
+              >
+                {t.clearMarkersBtn}
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <ZoomIn className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
+            <span className="text-[11px] text-gray-400">{t.timelineZoomLabel}</span>
+            <input
+              type="range"
+              min={1}
+              max={6}
+              step={0.5}
+              value={timelineZoom}
+              onChange={(e) => setTimelineZoom(Number(e.target.value))}
+              className="w-20 studio-slider"
+              aria-label={t.timelineZoomLabel}
+            />
+            <span className="text-[11px] font-mono tabular-nums text-gray-300 w-7 text-right">
+              {timelineZoom}×
+            </span>
+          </div>
+        </div>
+
+        {/* Track 1: Clip Sequence Track (Zoomable + Drag-and-Drop Reorderable) */}
         <div className="flex items-center gap-2.5">
           <span className="text-[11px] font-medium text-gray-400 w-12 shrink-0 truncate">
             {t.timelineClipsTrackLabel}
           </span>
-          <div className="flex-1 h-10 rounded-md border border-[#262B38] bg-[#0B0D11] overflow-hidden relative flex items-center">
-            {clipSegments.length > 0 ? (
-              clipSegments.map((seg, idx) => {
-                const clip = mediaItems[seg.clipIndex];
-                if (!clip) return null;
-                const widthPct = ((seg.endSec - seg.startSec) / clipDuration) * 100;
-                const isSelected = selectedClipId === clip.id;
-                const isPlayheadInside =
-                  localTime >= seg.startSec && localTime < seg.endSec + 0.001;
-                return (
-                  <button
-                    key={`${clip.id}-${idx}`}
-                    type="button"
-                    onClick={() => {
-                      onSelectClip(clip.id);
-                      if (audio) onSeekAbsolute(config.trimStart + seg.startSec);
-                    }}
-                    style={{ width: `${Math.max(2, widthPct)}%` }}
-                    title={`${clip.fileName} (${(seg.endSec - seg.startSec).toFixed(1)}s)`}
-                    className={`h-full border-r border-[#262B38] px-1.5 flex items-center gap-1.5 overflow-hidden text-left cursor-pointer transition-colors ${
-                      isSelected
-                        ? 'bg-amber-500/20 text-amber-200'
-                        : isPlayheadInside
-                          ? 'bg-[#1D2434] text-gray-100'
-                          : 'bg-[#141821] hover:bg-[#191E2A] text-gray-300'
-                    }`}
-                  >
-                    {clip.kind === 'image' ? (
-                      <img
-                        src={clip.url}
-                        alt=""
-                        referrerPolicy="no-referrer"
-                        className="w-6 h-6 rounded-xs object-cover shrink-0"
-                      />
-                    ) : clip.kind === 'generator' ? (
-                      <Orbit className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
-                    ) : null}
-                    <span className="text-[10px] font-medium truncate">{clip.fileName}</span>
-                    <span className="text-[10px] font-mono tabular-nums text-gray-400 ml-auto shrink-0">
-                      {(seg.endSec - seg.startSec).toFixed(1)}s
-                    </span>
-                  </button>
-                );
-              })
-            ) : (
-              <div className="w-full text-center text-[11px] text-gray-500 px-2 truncate">
-                {t.timelineEmptyHint}
-              </div>
-            )}
+          <div className="flex-1 h-11 rounded-md border border-[#262B38] bg-[#0B0D11] overflow-x-auto overflow-y-hidden">
+            <div
+              className="h-full relative flex items-center"
+              style={{ width: `${timelineZoom * 100}%`, minWidth: '100%' }}
+            >
+              {clipSegments.length > 0 ? (
+                clipSegments.map((seg, idx) => {
+                  const clip = mediaItems[seg.clipIndex];
+                  if (!clip) return null;
+                  const widthPct = ((seg.endSec - seg.startSec) / clipDuration) * 100;
+                  const isSelected = selectedClipId === clip.id;
+                  const isPlayheadInside =
+                    localTime >= seg.startSec && localTime < seg.endSec + 0.001;
+                  const isDragOver = dragOverIndex === seg.clipIndex && dragIndex !== seg.clipIndex;
+                  return (
+                    <button
+                      key={`${clip.id}-${idx}`}
+                      type="button"
+                      draggable
+                      onDragStart={() => setDragIndex(seg.clipIndex)}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setDragOverIndex(seg.clipIndex);
+                      }}
+                      onDragLeave={() => setDragOverIndex(null)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragIndex !== null && dragIndex !== seg.clipIndex) {
+                          onReorderClip(dragIndex, seg.clipIndex);
+                        }
+                        setDragIndex(null);
+                        setDragOverIndex(null);
+                      }}
+                      onDragEnd={() => {
+                        setDragIndex(null);
+                        setDragOverIndex(null);
+                      }}
+                      onClick={() => {
+                        onSelectClip(clip.id);
+                        if (audio) onSeekAbsolute(config.trimStart + seg.startSec);
+                      }}
+                      style={{ width: `${Math.max(1.5, widthPct)}%` }}
+                      title={`${clip.fileName} (${(seg.endSec - seg.startSec).toFixed(1)}s)`}
+                      className={`h-full border-r border-[#262B38] px-1.5 flex items-center gap-1.5 overflow-hidden text-left cursor-pointer transition-colors ${
+                        isDragOver
+                          ? 'ring-2 ring-inset ring-amber-400 bg-amber-500/25'
+                          : isSelected
+                            ? 'bg-amber-500/20 text-amber-200'
+                            : isPlayheadInside
+                              ? 'bg-[#1D2434] text-gray-100'
+                              : 'bg-[#141821] hover:bg-[#191E2A] text-gray-300'
+                      }`}
+                    >
+                      {clip.kind === 'image' ? (
+                        <img
+                          src={clip.url}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                          className="w-6 h-6 rounded-xs object-cover shrink-0 pointer-events-none"
+                        />
+                      ) : clip.kind === 'generator' ? (
+                        <Orbit
+                          className="w-3.5 h-3.5 text-amber-400 shrink-0 pointer-events-none"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      <span className="text-[10px] font-medium truncate pointer-events-none">
+                        {clip.fileName}
+                      </span>
+                      <span className="text-[10px] font-mono tabular-nums text-gray-400 ml-auto shrink-0 pointer-events-none">
+                        {(seg.endSec - seg.startSec).toFixed(1)}s
+                      </span>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="w-full text-center text-[11px] text-gray-500 px-2 truncate">
+                  {t.timelineEmptyHint}
+                </div>
+              )}
 
-            {/* Clip Track Playhead */}
-            {audio && clipSegments.length > 0 && (
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-amber-400 pointer-events-none"
-                style={{
-                  left: `${Math.max(0, Math.min(100, (localTime / clipDuration) * 100))}%`,
-                }}
-              />
-            )}
+              {/* Clip Track Playhead */}
+              {audio && clipSegments.length > 0 && (
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-amber-400 pointer-events-none z-10"
+                  style={{
+                    left: `${Math.max(0, Math.min(100, (localTime / clipDuration) * 100))}%`,
+                  }}
+                />
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Track 2: Scrubbable Audio Waveform */}
+        {/* Track 2: Scrubbable Audio Waveform + Beat Markers */}
         <div className="flex items-center gap-2.5">
           <span className="text-[11px] font-medium text-gray-400 w-12 shrink-0 truncate">
             {t.timelineAudioTrackLabel}
@@ -373,6 +537,21 @@ export function PreviewStage({
                   ))}
             </div>
 
+            {/* Manual Beat Markers */}
+            {audio &&
+              audio.duration > 0 &&
+              config.manualBeatMarkers.map((markerSec, idx) => (
+                <div
+                  key={`${markerSec}-${idx}`}
+                  className="absolute top-0 bottom-0 w-px bg-cyan-400/90 pointer-events-none"
+                  style={{
+                    left: `${Math.max(0, Math.min(100, (markerSec / audio.duration) * 100))}%`,
+                  }}
+                >
+                  <div className="w-1.5 h-1.5 -ml-[2px] bg-cyan-300 rotate-45" />
+                </div>
+              ))}
+
             {audio && audio.duration > 0 && (
               <div
                 className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none"
@@ -416,6 +595,23 @@ export function PreviewStage({
               className="p-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-gray-500 disabled:opacity-40 text-gray-300 transition-colors cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              onClick={onToggleLoop}
+              disabled={!audio}
+              title={t.loopPlaybackLabel}
+              aria-label={t.loopPlaybackLabel}
+              aria-pressed={isLooping}
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-[11px] font-medium disabled:opacity-40 transition-colors cursor-pointer ${
+                isLooping
+                  ? 'border-amber-500/60 bg-amber-500/15 text-amber-300'
+                  : 'border-[#262B38] bg-[#141821] hover:border-gray-500 text-gray-300'
+              }`}
+            >
+              <Repeat className="w-3.5 h-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">{t.loopPlaybackLabel}</span>
             </button>
           </div>
 

@@ -1,11 +1,14 @@
 import {
   AudioFrameMetrics,
+  ClipTransform,
+  KeyframeEasing,
+  LutPresetId,
   MediaColorFilter,
   StudioConfig,
   VisualMediaState,
 } from '../types/studio';
 import { computeFadeEnvelope, resolveActiveSlideshowSlice } from './audioAnalyzer';
-import { resolveColorScheme } from './presets';
+import { DEFAULT_CLIP_TRANSFORM, resolveColorScheme } from './presets';
 import { proceduralShaderEngine } from './proceduralShaders';
 
 export interface RenderFrameParams {
@@ -13,6 +16,7 @@ export interface RenderFrameParams {
   width: number;
   height: number;
   localTime: number;
+  absTime?: number;
   clipDuration: number;
   metrics: AudioFrameMetrics;
   config: StudioConfig;
@@ -77,6 +81,65 @@ function drawCoverImage(
   ctx.drawImage(source as CanvasImageSource, x, y, drawW, drawH);
 }
 
+let cachedFilterSupport: boolean | null = null;
+
+function supportsCanvasFilter(ctx: CanvasRenderingContext2D): boolean {
+  if (cachedFilterSupport !== null) return cachedFilterSupport;
+  try {
+    if (!('filter' in ctx)) {
+      cachedFilterSupport = false;
+      return false;
+    }
+    const prev = ctx.filter;
+    ctx.filter = 'brightness(0.5)';
+    cachedFilterSupport = ctx.filter === 'brightness(0.5)';
+    ctx.filter = prev;
+    return cachedFilterSupport;
+  } catch {
+    cachedFilterSupport = false;
+    return false;
+  }
+}
+
+function applyFallbackColorAndBrightness(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  filter: MediaColorFilter,
+  brightness: number
+) {
+  if (filter === 'bw') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'saturation';
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
+  } else if (filter === 'warm_film') {
+    ctx.save();
+    ctx.fillStyle = 'rgba(180, 110, 40, 0.16)';
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
+  } else if (filter === 'cool_noir') {
+    ctx.save();
+    ctx.fillStyle = 'rgba(30, 80, 145, 0.18)';
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
+  }
+  if (brightness < 0.99) {
+    ctx.save();
+    ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(0.85, 1 - brightness)})`;
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
+  } else if (brightness > 1.02) {
+    ctx.save();
+    ctx.fillStyle = `rgba(255, 255, 255, ${Math.min(0.35, (brightness - 1) * 0.5)})`;
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
+  }
+}
+
 function drawFitBlurBackdrop(
   ctx: CanvasRenderingContext2D,
   source: HTMLImageElement | HTMLVideoElement,
@@ -87,14 +150,28 @@ function drawFitBlurBackdrop(
   scaleFactor: number,
   config: StudioConfig
 ) {
+  const hasFilter = supportsCanvasFilter(ctx);
   ctx.save();
-  ctx.filter = buildFilterString(
-    config.mediaFilter,
-    config.mediaBrightness * 0.48,
-    config.mediaBlur,
-    Math.round(Math.min(dstW, dstH) * 0.032)
-  );
+  if (hasFilter) {
+    ctx.filter = buildFilterString(
+      config.mediaFilter,
+      config.mediaBrightness * 0.48,
+      config.mediaBlur,
+      Math.round(Math.min(dstW, dstH) * 0.032)
+    );
+  }
   drawCoverImage(ctx, source, srcW, srcH, dstW, dstH, 1.14, 0, 0);
+  if (!hasFilter) {
+    applyFallbackColorAndBrightness(
+      ctx,
+      0,
+      0,
+      dstW,
+      dstH,
+      config.mediaFilter,
+      config.mediaBrightness * 0.48
+    );
+  }
   ctx.restore();
 
   const padding = Math.min(dstW, dstH) * 0.08;
@@ -117,12 +194,24 @@ function drawFitBlurBackdrop(
   const y = (dstH - drawH) / 2;
 
   ctx.save();
-  ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
+  if (hasFilter) {
+    ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
+  }
   ctx.shadowColor = 'rgba(0,0,0,0.65)';
   ctx.shadowBlur = Math.min(dstW, dstH) * 0.04;
   ctx.shadowOffsetY = Math.min(dstW, dstH) * 0.015;
   ctx.drawImage(source as CanvasImageSource, x, y, drawW, drawH);
+  if (!hasFilter) {
+    applyFallbackColorAndBrightness(ctx, x, y, drawW, drawH, config.mediaFilter, config.mediaBrightness);
+  }
   ctx.restore();
+}
+
+function applyEasing(t: number, easing: KeyframeEasing): number {
+  const clamped = Math.max(0, Math.min(1, t));
+  if (easing === 'linear') return clamped;
+  if (easing === 'ease_out') return 1 - Math.pow(1 - clamped, 2.5);
+  return clamped < 0.5 ? 2 * clamped * clamped : 1 - Math.pow(-2 * clamped + 2, 2) / 2;
 }
 
 function drawSingleClipLayer(
@@ -136,15 +225,39 @@ function drawSingleClipLayer(
   panY: number,
   config: StudioConfig,
   localTime: number,
+  clipProgress: number,
   metrics: AudioFrameMetrics,
   accentColor: string,
   secondaryColor: string,
   offsetX = 0,
   alpha = 1
 ) {
+  const tr: ClipTransform = media.transform || DEFAULT_CLIP_TRANSFORM;
+  const easedP = applyEasing(clipProgress, tr.easing);
+  const interpScale = tr.scale + (tr.endScale - tr.scale) * easedP;
+  const interpOffX = tr.offsetX + (tr.endOffsetX - tr.offsetX) * easedP;
+  const interpOffY = tr.offsetY + (tr.endOffsetY - tr.offsetY) * easedP;
+
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha * tr.opacity));
   if (offsetX !== 0) ctx.translate(offsetX, 0);
+
+  const hasTransform =
+    Math.abs(interpScale - 1) > 0.002 ||
+    Math.abs(interpOffX) > 0.001 ||
+    Math.abs(interpOffY) > 0.001 ||
+    Math.abs(tr.rotationDeg) > 0.05;
+
+  if (hasTransform) {
+    ctx.translate(width * (0.5 + interpOffX), height * (0.5 + interpOffY));
+    if (Math.abs(tr.rotationDeg) > 0.05) {
+      ctx.rotate((tr.rotationDeg * Math.PI) / 180);
+    }
+    if (Math.abs(interpScale - 1) > 0.002) {
+      ctx.scale(interpScale, interpScale);
+    }
+    ctx.translate(-width * 0.5, -height * 0.5);
+  }
 
   if (media.kind === 'generator') {
     const genEffect =
@@ -162,6 +275,12 @@ function drawSingleClipLayer(
       speed: config.generatorSpeed,
       scale: config.generatorScale,
       beatReact: config.generatorBeatReact,
+      complexity: config.generatorComplexity,
+      warp: config.generatorWarp,
+      symmetry: config.generatorSymmetry,
+      rotationSpeed: config.generatorRotationSpeed,
+      hueShiftDeg: config.generatorHueShift,
+      glow: config.generatorGlow,
     });
     ctx.restore();
     return;
@@ -182,7 +301,10 @@ function drawSingleClipLayer(
   if (config.framingMode === 'fit_blur') {
     drawFitBlurBackdrop(ctx, sourceEl, media.width, media.height, width, height, pulseScale, config);
   } else {
-    ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
+    const hasFilter = supportsCanvasFilter(ctx);
+    if (hasFilter) {
+      ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
+    }
     drawCoverImage(
       ctx,
       sourceEl,
@@ -194,8 +316,76 @@ function drawSingleClipLayer(
       panX,
       panY
     );
+    if (!hasFilter) {
+      applyFallbackColorAndBrightness(
+        ctx,
+        0,
+        0,
+        width,
+        height,
+        config.mediaFilter,
+        config.mediaBrightness
+      );
+    }
   }
   ctx.restore();
+}
+
+function drawLutAndGlitch(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  lutPreset: LutPresetId,
+  glitchStrength: number,
+  beatPulse: number,
+  localTime: number,
+  accentColor: string,
+  secondaryColor: string
+) {
+  if (lutPreset !== 'none') {
+    ctx.save();
+    if (lutPreset === 'teal_orange') {
+      ctx.globalCompositeOperation = 'soft-light';
+      const g = ctx.createLinearGradient(0, 0, width, height);
+      g.addColorStop(0, 'rgba(13, 148, 136, 0.34)');
+      g.addColorStop(1, 'rgba(234, 88, 12, 0.34)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
+    } else if (lutPreset === 'cyber_magenta') {
+      ctx.globalCompositeOperation = 'screen';
+      const g = ctx.createLinearGradient(0, height, width, 0);
+      g.addColorStop(0, 'rgba(192, 38, 211, 0.2)');
+      g.addColorStop(1, 'rgba(14, 165, 233, 0.22)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
+    } else if (lutPreset === 'vintage_gold') {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = 'rgba(245, 222, 179, 0.88)';
+      ctx.fillRect(0, 0, width, height);
+    } else if (lutPreset === 'deep_ocean') {
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.fillStyle = 'rgba(15, 76, 129, 0.32)';
+      ctx.fillRect(0, 0, width, height);
+    }
+    ctx.restore();
+  }
+
+  if (glitchStrength > 0.02 && beatPulse > 0.22) {
+    const intensity = glitchStrength * beatPulse;
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const bands = 5;
+    for (let i = 0; i < bands; i++) {
+      const seed = Math.sin(localTime * 42 + i * 17.3) * 43758.5453;
+      const frac = seed - Math.floor(seed);
+      const y = frac * height;
+      const bandH = Math.max(3, height * (0.012 + (i % 3) * 0.01));
+      const shift = (frac - 0.5) * width * 0.045 * intensity;
+      ctx.fillStyle = i % 2 === 0 ? hexToRgba(accentColor, 0.22 * intensity) : hexToRgba(secondaryColor, 0.22 * intensity);
+      ctx.fillRect(Math.max(0, shift), y, width - Math.abs(shift), bandH);
+    }
+    ctx.restore();
+  }
 }
 
 function measureTextWithSpacing(ctx: CanvasRenderingContext2D, text: string, spacingPx: number): number {
@@ -278,6 +468,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     width,
     height,
     localTime,
+    absTime = localTime,
     clipDuration,
     metrics,
     config,
@@ -318,6 +509,12 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       speed: config.generatorSpeed,
       scale: config.generatorScale,
       beatReact: config.generatorBeatReact,
+      complexity: config.generatorComplexity,
+      warp: config.generatorWarp,
+      symmetry: config.generatorSymmetry,
+      rotationSpeed: config.generatorRotationSpeed,
+      hueShiftDeg: config.generatorHueShift,
+      glow: config.generatorGlow,
     });
     ctx.restore();
   }
@@ -361,6 +558,10 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       config.kenBurnsMotion && !reducedMotion
         ? pulseScale * (1 + Math.min(0.08, slice.prevSlideLocalTime * 0.012))
         : pulseScale;
+    const activeClipDur = Math.max(0.4, activeMedia?.durationSec || clipDuration);
+    const prevClipDur = Math.max(0.4, prevMedia?.durationSec || clipDuration);
+    const activeProgress = Math.min(1, slice.slideLocalTime / activeClipDur);
+    const prevProgress = Math.min(1, slice.prevSlideLocalTime / prevClipDur);
 
     if (prevMedia && p < 0.999) {
       if (slice.transitionType === 'crossfade') {
@@ -375,6 +576,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           panY,
           config,
           localTime,
+          prevProgress,
           metrics,
           scheme.accentColor,
           scheme.visualizerSecondary,
@@ -392,6 +594,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           panY,
           config,
           localTime,
+          activeProgress,
           metrics,
           scheme.accentColor,
           scheme.visualizerSecondary,
@@ -411,6 +614,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             panY,
             config,
             localTime,
+            prevProgress,
             metrics,
             scheme.accentColor,
             scheme.visualizerSecondary,
@@ -429,6 +633,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             panY,
             config,
             localTime,
+            activeProgress,
             metrics,
             scheme.accentColor,
             scheme.visualizerSecondary,
@@ -448,6 +653,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           panY,
           config,
           localTime,
+          prevProgress,
           metrics,
           scheme.accentColor,
           scheme.visualizerSecondary,
@@ -465,6 +671,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           panY,
           config,
           localTime,
+          activeProgress,
           metrics,
           scheme.accentColor,
           scheme.visualizerSecondary,
@@ -483,6 +690,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           panY,
           config,
           localTime,
+          activeProgress,
           metrics,
           scheme.accentColor,
           scheme.visualizerSecondary
@@ -500,6 +708,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
         panY,
         config,
         localTime,
+        activeProgress,
         metrics,
         scheme.accentColor,
         scheme.visualizerSecondary
@@ -522,6 +731,12 @@ export function renderStudioFrame(params: RenderFrameParams): void {
         speed: config.generatorSpeed,
         scale: config.generatorScale,
         beatReact: config.generatorBeatReact,
+        complexity: config.generatorComplexity,
+        warp: config.generatorWarp,
+        symmetry: config.generatorSymmetry,
+        rotationSpeed: config.generatorRotationSpeed,
+        hueShiftDeg: config.generatorHueShift,
+        glow: config.generatorGlow,
       });
       ctx.restore();
     }
@@ -927,6 +1142,85 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     }
 
     ctx.restore();
+  }
+
+  // 5b. Color LUTs & Beat RGB Glitch
+  drawLutAndGlitch(
+    ctx,
+    width,
+    height,
+    config.lutPreset,
+    config.glitchStrength,
+    metrics.beatPulse,
+    localTime,
+    scheme.accentColor,
+    scheme.visualizerSecondary
+  );
+
+  // 5c. Multi-Layer Text & Image Overlays
+  if (config.overlays && config.overlays.length > 0) {
+    for (const ov of config.overlays) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0.05, Math.min(1, ov.opacity));
+      const ox = ov.xPct * width;
+      const oy = ov.yPct * height;
+      if (ov.kind === 'image' && ov.imageElement && ov.imageElement.complete && ov.imageElement.naturalWidth > 0) {
+        const baseW = minDim * 0.18 * ov.scale;
+        const aspect = ov.imageElement.naturalWidth / Math.max(1, ov.imageElement.naturalHeight);
+        const drawW = baseW;
+        const drawH = baseW / aspect;
+        ctx.drawImage(ov.imageElement, ox - drawW / 2, oy - drawH / 2, drawW, drawH);
+      } else if (ov.kind === 'text' && ov.text) {
+        const fontSize = Math.round(minDim * 0.032 * ov.scale);
+        ctx.font = `600 ${fontSize}px "${config.fontFamily}", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.7)';
+        ctx.shadowBlur = fontSize * 0.35;
+        ctx.fillStyle = ov.color || scheme.textColor;
+        ctx.fillText(ov.text, ox, oy);
+      }
+      ctx.restore();
+    }
+  }
+
+  // 5d. Synchronized Subtitles (SRT / VTT)
+  if (config.showSubtitles && config.subtitles && config.subtitles.length > 0) {
+    const activeCue = config.subtitles.find(
+      (c) => absTime >= c.startSec && absTime <= c.endSec
+    );
+    if (activeCue) {
+      ctx.save();
+      const subSize = Math.round(minDim * 0.034 * (config.subtitleSizeScale || 1));
+      ctx.font = `600 ${subSize}px "${config.fontFamily}", sans-serif`;
+      const maxSubW = width * 0.84;
+      const lines = wrapTextLines(ctx, activeCue.text, maxSubW, 0);
+      const lineH = subSize * 1.28;
+      const blockH = lines.length * lineH;
+      const padX = subSize * 0.7;
+      const padY = subSize * 0.38;
+      const subY =
+        config.textPlacement === 'bottom' && config.showText
+          ? height * (isVertical ? 0.65 : 0.72)
+          : height * (isVertical ? 0.82 : 0.88);
+      const widest = lines.reduce((m, l) => Math.max(m, ctx.measureText(l).width), 0);
+      const boxW = Math.min(maxSubW + padX * 2, widest + padX * 2);
+      const boxH = blockH + padY * 2;
+
+      ctx.fillStyle = 'rgba(8, 10, 14, 0.76)';
+      ctx.beginPath();
+      ctx.roundRect((width - boxW) / 2, subY - boxH / 2, boxW, boxH, subSize * 0.3);
+      ctx.fill();
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      lines.forEach((line, idx) => {
+        const ly = subY - ((lines.length - 1) * lineH) / 2 + idx * lineH;
+        ctx.fillText(line, width * 0.5, ly);
+      });
+      ctx.restore();
+    }
   }
 
   // 6. Synchronized Fade-In & Fade-Out Blackout Overlay
