@@ -10,15 +10,19 @@ import { tFor } from './i18n';
 import {
   AudioTrackState,
   BeatPresetId,
+  BeatSyncMode,
+  ClipOverlayGenerator,
   ExportAspectMode,
   ExportProgressState,
   GeneratorEffectId,
   InspectorTab,
   Language,
+  OverlayBlendMode,
   OverlayLayer,
   SlideTransitionType,
   StudioConfig,
   SubtitleCue,
+  TimelineGeneratorOverlay,
   TrimPresetId,
   VisualMediaState,
 } from './types/studio';
@@ -35,6 +39,8 @@ import {
   generateDemoAudioBuffer,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
+  snapFxOverlayToBeats,
+  snapTimeToBeat,
 } from './utils/audioAnalyzer';
 import { renderStudioFrame } from './utils/canvasRenderer';
 import { parseID3Tags } from './utils/id3Parser';
@@ -76,6 +82,7 @@ interface HistorySnapshot {
   config: StudioConfig;
   mediaItems: VisualMediaState[];
   selectedClipId: string | null;
+  selectedFxId: string | null;
 }
 
 function createItemId(): string {
@@ -85,7 +92,8 @@ function createItemId(): string {
 function cloneSnapshot(
   config: StudioConfig,
   mediaItems: VisualMediaState[],
-  selectedClipId: string | null
+  selectedClipId: string | null,
+  selectedFxId: string | null
 ): HistorySnapshot {
   return {
     config: {
@@ -93,13 +101,24 @@ function cloneSnapshot(
       subtitles: config.subtitles.map((s) => ({ ...s })),
       overlays: config.overlays.map((o) => ({ ...o })),
       manualBeatMarkers: [...config.manualBeatMarkers],
+      fxOverlays: (config.fxOverlays || []).map((fx) => ({
+        ...fx,
+        params: fx.params ? { ...fx.params } : undefined,
+      })),
     },
     mediaItems: mediaItems.map((m) => ({
       ...m,
       transform: { ...(m.transform || DEFAULT_CLIP_TRANSFORM) },
       generatorParams: m.generatorParams ? { ...m.generatorParams } : undefined,
+      overlayEffect: m.overlayEffect
+        ? {
+            ...m.overlayEffect,
+            params: m.overlayEffect.params ? { ...m.overlayEffect.params } : undefined,
+          }
+        : undefined,
     })),
     selectedClipId,
+    selectedFxId,
   };
 }
 
@@ -111,6 +130,7 @@ export default function App() {
   const [audio, setAudio] = useState<AudioTrackState | null>(null);
   const [mediaItems, setMediaItems] = useState<VisualMediaState[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedFxId, setSelectedFxId] = useState<string | null>(null);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   const [noticeError, setNoticeError] = useState<string | null>(null);
   const [glslError, setGlslError] = useState<string | null>(null);
@@ -139,6 +159,7 @@ export default function App() {
   const configRef = useRef<StudioConfig>(config);
   const mediaItemsRef = useRef<VisualMediaState[]>(mediaItems);
   const selectedClipIdRef = useRef<string | null>(selectedClipId);
+  const selectedFxIdRef = useRef<string | null>(selectedFxId);
   const audioRef = useRef<AudioTrackState | null>(audio);
   const errorTimerRef = useRef<number | null>(null);
 
@@ -155,6 +176,7 @@ export default function App() {
   configRef.current = config;
   mediaItemsRef.current = mediaItems;
   selectedClipIdRef.current = selectedClipId;
+  selectedFxIdRef.current = selectedFxId;
   audioRef.current = audio;
   isLoopingRef.current = isLooping;
 
@@ -188,7 +210,12 @@ export default function App() {
       pendingBaseSnapshotRef.current = null;
     }
     pastRef.current.push(
-      cloneSnapshot(configRef.current, mediaItemsRef.current, selectedClipIdRef.current)
+      cloneSnapshot(
+        configRef.current,
+        mediaItemsRef.current,
+        selectedClipIdRef.current,
+        selectedFxIdRef.current
+      )
     );
     if (pastRef.current.length > MAX_HISTORY_STEPS) {
       pastRef.current.shift();
@@ -202,7 +229,8 @@ export default function App() {
       pendingBaseSnapshotRef.current = cloneSnapshot(
         configRef.current,
         mediaItemsRef.current,
-        selectedClipIdRef.current
+        selectedClipIdRef.current,
+        selectedFxIdRef.current
       );
     }
     if (historyDebounceRef.current !== null) {
@@ -234,11 +262,17 @@ export default function App() {
     const prev = pastRef.current.pop();
     if (!prev) return;
     futureRef.current.push(
-      cloneSnapshot(configRef.current, mediaItemsRef.current, selectedClipIdRef.current)
+      cloneSnapshot(
+        configRef.current,
+        mediaItemsRef.current,
+        selectedClipIdRef.current,
+        selectedFxIdRef.current
+      )
     );
     setConfig(prev.config);
     setMediaItems(prev.mediaItems);
     setSelectedClipId(prev.selectedClipId);
+    setSelectedFxId(prev.selectedFxId);
     syncHistoryFlags();
   }, [syncHistoryFlags]);
 
@@ -246,11 +280,17 @@ export default function App() {
     const next = futureRef.current.pop();
     if (!next) return;
     pastRef.current.push(
-      cloneSnapshot(configRef.current, mediaItemsRef.current, selectedClipIdRef.current)
+      cloneSnapshot(
+        configRef.current,
+        mediaItemsRef.current,
+        selectedClipIdRef.current,
+        selectedFxIdRef.current
+      )
     );
     setConfig(next.config);
     setMediaItems(next.mediaItems);
     setSelectedClipId(next.selectedClipId);
+    setSelectedFxId(next.selectedFxId);
     syncHistoryFlags();
   }, [syncHistoryFlags]);
 
@@ -794,6 +834,10 @@ export default function App() {
           ...DEFAULT_STUDIO_CONFIG,
           ...saved.config,
           overlays: [],
+          fxOverlays: (saved.config.fxOverlays || []).map((fx) => ({
+            ...fx,
+            params: fx.params ? { ...fx.params } : undefined,
+          })),
         };
 
         // Rehydrate overlay layers (load PNG/logo blobs if stored)
@@ -872,6 +916,12 @@ export default function App() {
         // Rehydrate media clips cleanly in saved order
         const restoredClips: VisualMediaState[] = [];
         for (const sc of saved.clips || []) {
+          const restoredOverlay = sc.overlayEffect
+            ? {
+                ...sc.overlayEffect,
+                params: sc.overlayEffect.params ? { ...sc.overlayEffect.params } : undefined,
+              }
+            : undefined;
           if (sc.kind === 'generator') {
             restoredClips.push({
               id: sc.id,
@@ -887,6 +937,7 @@ export default function App() {
               transitionDurationSec: sc.transitionDurationSec,
               generatorId: sc.generatorId || 'galaxy_spiral',
               generatorParams: sc.generatorParams ? { ...sc.generatorParams } : undefined,
+              overlayEffect: restoredOverlay,
               transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
               clipAudioVolume: sc.clipAudioVolume ?? 0,
               clipAudioMuted: sc.clipAudioMuted ?? true,
@@ -918,6 +969,7 @@ export default function App() {
                   playbackRate: sc.playbackRate,
                   transitionOut: sc.transitionOut,
                   transitionDurationSec: sc.transitionDurationSec,
+                  overlayEffect: restoredOverlay,
                   transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
                   clipAudioVolume: sc.clipAudioVolume ?? 0,
                   clipAudioMuted: sc.clipAudioMuted ?? true,
@@ -957,6 +1009,7 @@ export default function App() {
                   playbackRate: sc.playbackRate,
                   transitionOut: sc.transitionOut,
                   transitionDurationSec: sc.transitionDurationSec,
+                  overlayEffect: restoredOverlay,
                   transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
                   clipAudioVolume: sc.clipAudioVolume ?? 0.8,
                   clipAudioMuted: sc.clipAudioMuted ?? true,
@@ -1153,9 +1206,24 @@ export default function App() {
     [queueDebouncedHistory]
   );
 
+  const handleSelectClip = useCallback((id: string) => {
+    setSelectedClipId(id);
+    setSelectedFxId(null);
+  }, []);
+
+  const handleSelectFx = useCallback((id: string | null) => {
+    setSelectedFxId(id);
+  }, []);
+
   const handleInspectClip = useCallback((id: string) => {
     setSelectedClipId(id);
+    setSelectedFxId(null);
     setActiveTab('clip');
+  }, []);
+
+  const handleInspectFx = useCallback((id: string) => {
+    setSelectedFxId(id);
+    setActiveTab('generator');
   }, []);
 
   const handleDuplicateClip = useCallback(
@@ -1182,6 +1250,12 @@ export default function App() {
         id: newId,
         transform: { ...(orig.transform || DEFAULT_CLIP_TRANSFORM) },
         generatorParams: orig.generatorParams ? { ...orig.generatorParams } : undefined,
+        overlayEffect: orig.overlayEffect
+          ? {
+              ...orig.overlayEffect,
+              params: orig.overlayEffect.params ? { ...orig.overlayEffect.params } : undefined,
+            }
+          : undefined,
         videoElement: orig.kind === 'video' ? clonedVideo : undefined,
       };
 
@@ -1189,8 +1263,297 @@ export default function App() {
       next.splice(idx + 1, 0, copyItem);
       setMediaItems(next);
       setSelectedClipId(newId);
+      setSelectedFxId(null);
     },
     [pushImmediateHistory]
+  );
+
+  const handleAddFxOverlay = useCallback(
+    (
+      effect: Exclude<GeneratorEffectId, 'none'>,
+      target: 'clip' | 'playhead' = 'clip',
+      snapshotGlobalParams = false,
+      explicitSpan?: { startSec: number; durationSec: number }
+    ) => {
+      const cfg = configRef.current;
+      const items = mediaItemsRef.current;
+      const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+      const segments = computeClipTimelineSegments(
+        items,
+        bounds.clipDuration,
+        cfg,
+        beatCutTimestamps
+      );
+
+      let startSec = 0;
+      let durationSec = Math.min(4.0, bounds.clipDuration);
+
+      if (explicitSpan) {
+        startSec = Math.max(0, Math.min(bounds.clipDuration - 0.4, explicitSpan.startSec));
+        durationSec = Math.max(0.4, Math.min(bounds.clipDuration - startSec, explicitSpan.durationSec));
+      } else if (target === 'clip' && items.length > 0) {
+        const targetClipIdx = items.findIndex(
+          (m) => m.id === (selectedClipIdRef.current || items[0].id)
+        );
+        const seg = segments.find((s) => s.clipIndex === targetClipIdx);
+        if (seg) {
+          startSec = seg.startSec;
+          durationSec = Math.max(0.4, seg.endSec - seg.startSec);
+        }
+      } else {
+        const relPlayhead = Math.max(
+          0,
+          Math.min(bounds.clipDuration - 0.5, currentTimeRef.current - bounds.trimBase)
+        );
+        startSec = relPlayhead;
+        if (cfg.snapToBeats && trackBeatGrid.beats.length > 1) {
+          startSec = snapTimeToBeat(startSec, [0, ...trackBeatGrid.beats], 0.35);
+        }
+        durationSec = Math.max(0.5, Math.min(4.0, bounds.clipDuration - startSec));
+      }
+
+      const meta = GENERATOR_EFFECTS.find((g) => g.id === effect);
+      const name = meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : effect;
+      const id = `fx-${createItemId()}`;
+      const newFx: TimelineGeneratorOverlay = {
+        id,
+        generatorId: effect,
+        name,
+        startSec: Number(startSec.toFixed(2)),
+        durationSec: Number(durationSec.toFixed(2)),
+        blend: 'screen',
+        opacity: 0.72,
+        fadeSec: 0.35,
+        params: snapshotGlobalParams
+          ? {
+              speed: cfg.generatorSpeed,
+              scale: cfg.generatorScale,
+              beatReact: cfg.generatorBeatReact,
+              complexity: cfg.generatorComplexity,
+              warp: cfg.generatorWarp,
+              symmetry: cfg.generatorSymmetry,
+              rotationSpeed: cfg.generatorRotationSpeed,
+              hueShift: cfg.generatorHueShift,
+              glow: cfg.generatorGlow,
+            }
+          : undefined,
+      };
+
+      pushImmediateHistory();
+      setConfig((prev) => ({
+        ...prev,
+        fxOverlays: [...(prev.fxOverlays || []), newFx],
+      }));
+      setSelectedFxId(id);
+    },
+    [beatCutTimestamps, getEffectiveTimelineBounds, lang, pushImmediateHistory, trackBeatGrid.beats]
+  );
+
+  const handleUpdateFxOverlay = useCallback(
+    (id: string, patch: Partial<TimelineGeneratorOverlay>) => {
+      queueDebouncedHistory();
+      setConfig((prev) => ({
+        ...prev,
+        fxOverlays: (prev.fxOverlays || []).map((fx) =>
+          fx.id === id ? { ...fx, ...patch } : fx
+        ),
+      }));
+    },
+    [queueDebouncedHistory]
+  );
+
+  const handleDuplicateFxOverlay = useCallback(
+    (id: string) => {
+      const list = configRef.current.fxOverlays || [];
+      const idx = list.findIndex((fx) => fx.id === id);
+      if (idx === -1) return;
+      const orig = list[idx];
+      const bounds = getEffectiveTimelineBounds(
+        configRef.current,
+        mediaItemsRef.current,
+        audioRef.current
+      );
+      const newId = `fx-${createItemId()}`;
+      const nextStart = Math.min(
+        Math.max(0, bounds.clipDuration - orig.durationSec),
+        orig.startSec + Math.min(orig.durationSec, 1.5)
+      );
+      const copy: TimelineGeneratorOverlay = {
+        ...orig,
+        id: newId,
+        startSec: Number(nextStart.toFixed(2)),
+        params: orig.params ? { ...orig.params } : undefined,
+      };
+      pushImmediateHistory();
+      const nextList = [...list];
+      nextList.splice(idx + 1, 0, copy);
+      setConfig((prev) => ({ ...prev, fxOverlays: nextList }));
+      setSelectedFxId(newId);
+    },
+    [getEffectiveTimelineBounds, pushImmediateHistory]
+  );
+
+  const handleRemoveFxOverlay = useCallback(
+    (id: string) => {
+      const list = configRef.current.fxOverlays || [];
+      if (!list.some((fx) => fx.id === id)) return;
+      pushImmediateHistory();
+      setConfig((prev) => ({
+        ...prev,
+        fxOverlays: (prev.fxOverlays || []).filter((fx) => fx.id !== id),
+      }));
+      if (selectedFxIdRef.current === id) {
+        setSelectedFxId(null);
+      }
+    },
+    [pushImmediateHistory]
+  );
+
+  const handleFitFxToSelectedClip = useCallback(
+    (fxId: string) => {
+      const items = mediaItemsRef.current;
+      if (items.length === 0) return;
+      const bounds = getEffectiveTimelineBounds(configRef.current, items, audioRef.current);
+      const segments = computeClipTimelineSegments(
+        items,
+        bounds.clipDuration,
+        configRef.current,
+        beatCutTimestamps
+      );
+      const targetIdx = items.findIndex(
+        (m) => m.id === (selectedClipIdRef.current || items[0].id)
+      );
+      const seg = segments.find((s) => s.clipIndex === targetIdx);
+      if (!seg) return;
+      pushImmediateHistory();
+      setConfig((prev) => ({
+        ...prev,
+        fxOverlays: (prev.fxOverlays || []).map((fx) =>
+          fx.id === fxId
+            ? {
+                ...fx,
+                startSec: Number(seg.startSec.toFixed(2)),
+                durationSec: Number(Math.max(0.4, seg.endSec - seg.startSec).toFixed(2)),
+              }
+            : fx
+        ),
+      }));
+    },
+    [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]
+  );
+
+  const handleSnapFxOverlaysToBeats = useCallback(() => {
+    const list = configRef.current.fxOverlays || [];
+    if (list.length === 0) return;
+    const bounds = getEffectiveTimelineBounds(
+      configRef.current,
+      mediaItemsRef.current,
+      audioRef.current
+    );
+    pushImmediateHistory();
+    setConfig((prev) => ({
+      ...prev,
+      fxOverlays: (prev.fxOverlays || []).map((fx) => {
+        const snapped = snapFxOverlayToBeats(
+          fx.startSec,
+          fx.durationSec,
+          trackBeatGrid,
+          bounds.clipDuration
+        );
+        return { ...fx, startSec: snapped.startSec, durationSec: snapped.durationSec };
+      }),
+    }));
+  }, [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]);
+
+  const handleApplyClipOverlay = useCallback(
+    (
+      clipId: string,
+      effect: GeneratorEffectId,
+      blend: OverlayBlendMode = 'screen',
+      opacity = 0.68,
+      snapshotGlobalParams = false
+    ) => {
+      pushImmediateHistory();
+      if (effect === 'none') {
+        setMediaItems((prev) =>
+          prev.map((m) => (m.id === clipId ? { ...m, overlayEffect: undefined } : m))
+        );
+        return;
+      }
+      const cfg = configRef.current;
+      const overlay: ClipOverlayGenerator = {
+        effect,
+        blend,
+        opacity,
+        params: snapshotGlobalParams
+          ? {
+              speed: cfg.generatorSpeed,
+              scale: cfg.generatorScale,
+              beatReact: cfg.generatorBeatReact,
+              complexity: cfg.generatorComplexity,
+              warp: cfg.generatorWarp,
+              symmetry: cfg.generatorSymmetry,
+              rotationSpeed: cfg.generatorRotationSpeed,
+              hueShift: cfg.generatorHueShift,
+              glow: cfg.generatorGlow,
+            }
+          : undefined,
+      };
+      setMediaItems((prev) =>
+        prev.map((m) => (m.id === clipId ? { ...m, overlayEffect: overlay } : m))
+      );
+    },
+    [pushImmediateHistory]
+  );
+
+  const handleMoveClipOverlayToFxTrack = useCallback(
+    (clipId: string) => {
+      const items = mediaItemsRef.current;
+      const clipIdx = items.findIndex((m) => m.id === clipId);
+      if (clipIdx === -1) return;
+      const clip = items[clipIdx];
+      if (!clip.overlayEffect) return;
+
+      const bounds = getEffectiveTimelineBounds(configRef.current, items, audioRef.current);
+      const segments = computeClipTimelineSegments(
+        items,
+        bounds.clipDuration,
+        configRef.current,
+        beatCutTimestamps
+      );
+      const seg = segments.find((s) => s.clipIndex === clipIdx);
+      const span = seg
+        ? { startSec: seg.startSec, durationSec: Math.max(0.4, seg.endSec - seg.startSec) }
+        : { startSec: 0, durationSec: Math.max(0.5, clip.durationSec) };
+
+      const ov = clip.overlayEffect;
+      const meta = GENERATOR_EFFECTS.find((g) => g.id === ov.effect);
+      const name = meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : ov.effect;
+      const fxId = `fx-${createItemId()}`;
+      const newFx: TimelineGeneratorOverlay = {
+        id: fxId,
+        generatorId: ov.effect,
+        name,
+        startSec: Number(span.startSec.toFixed(2)),
+        durationSec: Number(span.durationSec.toFixed(2)),
+        blend: ov.blend,
+        opacity: ov.opacity,
+        fadeSec: 0.35,
+        params: ov.params ? { ...ov.params } : undefined,
+      };
+
+      pushImmediateHistory();
+      setMediaItems((prev) =>
+        prev.map((m) => (m.id === clipId ? { ...m, overlayEffect: undefined } : m))
+      );
+      setConfig((prev) => ({
+        ...prev,
+        fxOverlays: [...(prev.fxOverlays || []), newFx],
+      }));
+      setSelectedFxId(fxId);
+      setActiveTab('generator');
+    },
+    [beatCutTimestamps, getEffectiveTimelineBounds, lang, pushImmediateHistory]
   );
 
   const handleFitClipsToAudio = useCallback(() => {
@@ -1202,32 +1565,46 @@ export default function App() {
     setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
   }, [config.trimEnd, config.trimStart, pushImmediateHistory]);
 
-  const handleAutoBeatSyncClips = useCallback(() => {
-    const items = mediaItemsRef.current;
-    const aud = audioRef.current;
-    if (!aud || items.length === 0) return;
-    pushImmediateHistory();
-    const bounds = getEffectiveTimelineBounds(configRef.current, items, aud);
-    const plan = computeAutoBeatAlignedClips(
-      items.length,
-      bounds.clipDuration,
-      trackBeatGrid,
-      configRef.current.manualBeatMarkers,
-      bounds.trimBase
-    );
-    setMediaItems((prev) =>
-      prev.map((clip, i) => {
-        const p = plan[i];
-        if (!p) return clip;
-        return {
-          ...clip,
-          durationSec: p.durationSec,
-          transitionDurationSec: p.transitionDurationSec,
-        };
-      })
-    );
-    setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
-  }, [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]);
+  const handleAutoBeatSyncClips = useCallback(
+    (mode: BeatSyncMode = 'fit_track', applyMotionAndTrans = false) => {
+      const items = mediaItemsRef.current;
+      const aud = audioRef.current;
+      if (!aud || items.length === 0) return;
+      pushImmediateHistory();
+      const bounds = getEffectiveTimelineBounds(configRef.current, items, aud);
+      const plan = computeAutoBeatAlignedClips(
+        items.length,
+        bounds.clipDuration,
+        trackBeatGrid,
+        configRef.current.manualBeatMarkers,
+        bounds.trimBase,
+        mode
+      );
+      setMediaItems((prev) =>
+        prev.map((clip, i) => {
+          const p = plan[i];
+          if (!p) return clip;
+          const baseTransform = clip.transform || DEFAULT_CLIP_TRANSFORM;
+          return {
+            ...clip,
+            durationSec: p.durationSec,
+            transitionDurationSec: p.transitionDurationSec,
+            transitionOut: applyMotionAndTrans ? p.suggestedTransition : clip.transitionOut,
+            transform: applyMotionAndTrans
+              ? {
+                  ...baseTransform,
+                  scale: p.suggestedScaleStart,
+                  endScale: p.suggestedScaleEnd,
+                  easing: 'ease_in_out',
+                }
+              : clip.transform,
+          };
+        })
+      );
+      setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+    },
+    [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]
+  );
 
   const handleFitTrimToClips = useCallback(() => {
     const aud = audioRef.current;
@@ -1251,6 +1628,26 @@ export default function App() {
     pushImmediateHistory();
     setMediaItems((prev) => [...prev].reverse());
   }, [pushImmediateHistory]);
+
+  const handleSetClipTransition = useCallback(
+    (id: string, transitionOut: SlideTransitionType, applyAll = false) => {
+      pushImmediateHistory();
+      if (applyAll || configRef.current.slideshowMode !== 'custom_durations') {
+        setConfig((prev) => ({ ...prev, transitionType: transitionOut }));
+      }
+      if (applyAll) {
+        setMediaItems((prev) => prev.map((m) => ({ ...m, transitionOut })));
+      } else {
+        setMediaItems((prev) =>
+          prev.map((m) => (m.id === id ? { ...m, transitionOut } : m))
+        );
+        if (mediaItemsRef.current.length > 1 && configRef.current.slideshowMode !== 'custom_durations') {
+          setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+        }
+      }
+    },
+    [pushImmediateHistory]
+  );
 
   const handleCycleClipTransition = useCallback(
     (id: string) => {
@@ -1356,6 +1753,12 @@ export default function App() {
       ...targetClip,
       durationSec: firstDur,
       generatorParams: targetClip.generatorParams ? { ...targetClip.generatorParams } : undefined,
+      overlayEffect: targetClip.overlayEffect
+        ? {
+            ...targetClip.overlayEffect,
+            params: targetClip.overlayEffect.params ? { ...targetClip.overlayEffect.params } : undefined,
+          }
+        : undefined,
     };
     const secondClip: VisualMediaState = {
       ...targetClip,
@@ -1368,12 +1771,19 @@ export default function App() {
       videoElement: secondVideo,
       transform: { ...(targetClip.transform || DEFAULT_CLIP_TRANSFORM) },
       generatorParams: targetClip.generatorParams ? { ...targetClip.generatorParams } : undefined,
+      overlayEffect: targetClip.overlayEffect
+        ? {
+            ...targetClip.overlayEffect,
+            params: targetClip.overlayEffect.params ? { ...targetClip.overlayEffect.params } : undefined,
+          }
+        : undefined,
     };
 
     const next = [...items];
     next.splice(seg.clipIndex, 1, firstClip, secondClip);
     setMediaItems(next);
     setSelectedClipId(newId);
+    setSelectedFxId(null);
     if (configRef.current.slideshowMode !== 'custom_durations') {
       setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
     }
@@ -1398,11 +1808,15 @@ export default function App() {
   );
 
   const handleRippleDeleteSelected = useCallback(() => {
+    if (selectedFxIdRef.current) {
+      handleRemoveFxOverlay(selectedFxIdRef.current);
+      return;
+    }
     const items = mediaItemsRef.current;
     if (items.length === 0) return;
     const targetId = selectedClipIdRef.current || items[0].id;
     handleRemoveVisual(targetId);
-  }, [handleRemoveVisual]);
+  }, [handleRemoveFxOverlay, handleRemoveVisual]);
 
   const handleClearVisuals = useCallback(() => {
     if (mediaItemsRef.current.length === 0) return;
@@ -1478,6 +1892,26 @@ export default function App() {
       };
     });
   }, [pushImmediateHistory]);
+
+  const handleToggleBeatMarkerAt = useCallback(
+    (absSec: number) => {
+      pushImmediateHistory();
+      const targetSec = Number(Math.max(0, absSec).toFixed(2));
+      setConfig((prev) => {
+        const nearIdx = prev.manualBeatMarkers.findIndex((m) => Math.abs(m - targetSec) < 0.22);
+        if (nearIdx !== -1) {
+          const next = [...prev.manualBeatMarkers];
+          next.splice(nearIdx, 1);
+          return { ...prev, manualBeatMarkers: next };
+        }
+        return {
+          ...prev,
+          manualBeatMarkers: [...prev.manualBeatMarkers, targetSec].sort((a, b) => a - b),
+        };
+      });
+    },
+    [pushImmediateHistory]
+  );
 
   const handleClearBeatMarkers = useCallback(() => {
     if (configRef.current.manualBeatMarkers.length === 0) return;
@@ -1643,8 +2077,13 @@ export default function App() {
           overlays: (parsed.config.overlays || [])
             .filter((o) => o.kind === 'text')
             .map((o) => ({ ...o })),
+          fxOverlays: (parsed.config.fxOverlays || []).map((fx) => ({
+            ...fx,
+            params: fx.params ? { ...fx.params } : undefined,
+          })),
         };
         setConfig(mergedConfig);
+        setSelectedFxId(null);
         if (mergedConfig.customGlslCode) {
           const res = proceduralShaderEngine.updateCustomShader(mergedConfig.customGlslCode);
           setGlslError(res.error);
@@ -1653,6 +2092,12 @@ export default function App() {
         // Restore generator clips cleanly + any local IDB blobs if available
         const nextClips: VisualMediaState[] = [];
         for (const sc of parsed.clips || []) {
+          const restoredOverlay = sc.overlayEffect
+            ? {
+                ...sc.overlayEffect,
+                params: sc.overlayEffect.params ? { ...sc.overlayEffect.params } : undefined,
+              }
+            : undefined;
           if (sc.kind === 'generator') {
             nextClips.push({
               id: sc.id || createItemId(),
@@ -1668,6 +2113,7 @@ export default function App() {
               transitionDurationSec: sc.transitionDurationSec || 0.65,
               generatorId: sc.generatorId || 'galaxy_spiral',
               generatorParams: sc.generatorParams ? { ...sc.generatorParams } : undefined,
+              overlayEffect: restoredOverlay,
               transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
               clipAudioVolume: sc.clipAudioVolume ?? 0,
               clipAudioMuted: sc.clipAudioMuted ?? true,
@@ -1693,6 +2139,7 @@ export default function App() {
                 playbackRate: 1,
                 transitionOut: sc.transitionOut || 'crossfade',
                 transitionDurationSec: sc.transitionDurationSec || 0.65,
+                overlayEffect: restoredOverlay,
                 transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
                 clipAudioVolume: 0,
                 clipAudioMuted: true,
@@ -1719,6 +2166,7 @@ export default function App() {
     audioBlobKeyRef.current = undefined;
     setMediaItems([]);
     setSelectedClipId(null);
+    setSelectedFxId(null);
     setAudio(null);
     monoDataRef.current = new Float32Array(0);
     setConfig(DEFAULT_STUDIO_CONFIG);
@@ -2052,7 +2500,9 @@ export default function App() {
       }
       if ((e.ctrlKey || e.metaKey) && e.code === 'KeyD') {
         e.preventDefault();
-        if (selectedClipIdRef.current) {
+        if (selectedFxIdRef.current) {
+          handleDuplicateFxOverlay(selectedFxIdRef.current);
+        } else if (selectedClipIdRef.current) {
           handleDuplicateClip(selectedClipIdRef.current);
         }
         return;
@@ -2112,6 +2562,7 @@ export default function App() {
   }, [
     handleAddBeatMarker,
     handleDuplicateClip,
+    handleDuplicateFxOverlay,
     handleRedo,
     handleRippleDeleteSelected,
     handleSeekAbsolute,
@@ -2377,7 +2828,7 @@ export default function App() {
           onLoadDemoBeat={handleLoadDemoBeat}
           onVisualFiles={handleVisualFiles}
           onAddGeneratorScene={handleAddGeneratorScene}
-          onSelectClip={setSelectedClipId}
+          onSelectClip={handleSelectClip}
           onInspectClip={handleInspectClip}
           onDuplicateClip={handleDuplicateClip}
           onMoveVisual={handleMoveVisual}
@@ -2431,14 +2882,24 @@ export default function App() {
           audio={audio}
           mediaItems={mediaItems}
           selectedClipId={selectedClipId}
+          selectedFxId={selectedFxId}
           config={config}
           glslError={glslError}
           onChangeTab={setActiveTab}
-          onSelectClip={setSelectedClipId}
+          onSelectClip={handleSelectClip}
+          onSelectFx={handleSelectFx}
           onUpdateClip={handleUpdateClip}
+          onApplyClipOverlay={handleApplyClipOverlay}
+          onMoveClipOverlayToFxTrack={handleMoveClipOverlayToFxTrack}
           onDuplicateClip={handleDuplicateClip}
           onRemoveVisual={handleRemoveVisual}
+          onSetClipTransition={handleSetClipTransition}
           onUpdateConfig={handleUpdateConfig}
+          onAddFxOverlay={handleAddFxOverlay}
+          onUpdateFxOverlay={handleUpdateFxOverlay}
+          onDuplicateFxOverlay={handleDuplicateFxOverlay}
+          onRemoveFxOverlay={handleRemoveFxOverlay}
+          onFitFxToSelectedClip={handleFitFxToSelectedClip}
           onApplyMoodPreset={handleApplyMoodPreset}
           onResetGenerator={handleResetGenerator}
           onCompileCustomGlsl={handleCompileCustomGlsl}
@@ -2453,23 +2914,35 @@ export default function App() {
         audio={audio}
         mediaItems={mediaItems}
         selectedClipId={selectedClipId}
+        selectedFxId={selectedFxId}
         beatCutTimestamps={beatCutTimestamps}
         config={config}
         currentTime={currentTime}
         onSeekAbsolute={handleSeekAbsolute}
-        onSelectClip={setSelectedClipId}
+        onSelectClip={handleSelectClip}
+        onSelectFx={handleSelectFx}
         onInspectClip={handleInspectClip}
+        onInspectFx={handleInspectFx}
         onUpdateClip={handleUpdateClip}
+        onApplyClipOverlay={handleApplyClipOverlay}
         onVisualFiles={handleVisualFiles}
         onDuplicateClip={handleDuplicateClip}
         onReorderClip={handleReorderClip}
         onReverseClips={handleReverseClips}
         onCycleClipTransition={handleCycleClipTransition}
+        onSetClipTransition={handleSetClipTransition}
         onAddGeneratorScene={handleAddGeneratorScene}
+        onAddFxOverlay={handleAddFxOverlay}
+        onUpdateFxOverlay={handleUpdateFxOverlay}
+        onDuplicateFxOverlay={handleDuplicateFxOverlay}
+        onRemoveFxOverlay={handleRemoveFxOverlay}
+        onFitFxToSelectedClip={handleFitFxToSelectedClip}
+        onSnapFxOverlaysToBeats={handleSnapFxOverlaysToBeats}
         onSplitClipAtPlayhead={handleSplitClipAtPlayhead}
         onRippleDeleteSelected={handleRippleDeleteSelected}
         onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
         onAddBeatMarker={handleAddBeatMarker}
+        onToggleBeatMarkerAt={handleToggleBeatMarkerAt}
         onClearBeatMarkers={handleClearBeatMarkers}
         onAutoBeatSyncClips={handleAutoBeatSyncClips}
         trackBpm={trackBeatGrid.bpm}

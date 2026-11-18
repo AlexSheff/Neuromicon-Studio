@@ -22,6 +22,7 @@ import React, { useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
+  BeatSyncMode,
   GeneratorEffectId,
   Language,
   MediaFramingMode,
@@ -60,7 +61,7 @@ interface MediaInputPanelProps {
   onClearVisuals: () => void;
   onFitClipsToAudio: () => void;
   onFitTrimToClips: () => void;
-  onAutoBeatSyncClips: () => void;
+  onAutoBeatSyncClips: (mode?: BeatSyncMode, applyMotionAndTrans?: boolean) => void;
   trackBpm: number;
   onUseEmbeddedCover: () => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
@@ -131,6 +132,7 @@ export function MediaInputPanel({
   const [audioDragOver, setAudioDragOver] = useState(false);
   const [visualDragOver, setVisualDragOver] = useState(false);
   const [genToAdd, setGenToAdd] = useState<Exclude<GeneratorEffectId, 'none'>>('galaxy_spiral');
+  const [syncWithMotion, setSyncWithMotion] = useState(true);
   const [srtDraft, setSrtDraft] = useState('');
 
   const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
@@ -446,6 +448,11 @@ export function MediaInputPanel({
                           <p className="text-[10px] text-gray-400 font-mono tabular-nums flex items-center gap-1 mt-0.5">
                             {item.kind === 'video' && <Film className="w-2.5 h-2.5 text-amber-400" />}
                             <span className="text-amber-300">{item.durationSec.toFixed(1)}s</span>
+                            {item.overlayEffect && (
+                              <span className="px-1 rounded bg-cyan-500/20 border border-cyan-500/40 text-[9px] text-cyan-200">
+                                FX
+                              </span>
+                            )}
                             {item.kind !== 'generator' && (
                               <>
                                 <span>·</span>
@@ -815,7 +822,7 @@ export function MediaInputPanel({
                     <>
                       <button
                         type="button"
-                        onClick={onAutoBeatSyncClips}
+                        onClick={() => onAutoBeatSyncClips('fit_track', syncWithMotion)}
                         title={t.autoBeatSyncHint}
                         className="w-full py-1.5 px-2.5 rounded border border-amber-500/60 bg-amber-500/15 hover:bg-amber-500/25 text-[11px] font-semibold text-amber-300 cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
                       >
@@ -827,6 +834,33 @@ export function MediaInputPanel({
                           </span>
                         )}
                       </button>
+                      <div className="w-full grid grid-cols-3 gap-1">
+                        {(
+                          [
+                            { id: 'beats_2', label: t.beatSync2Beats },
+                            { id: 'beats_4', label: t.beatSync4Beats },
+                            { id: 'beats_8', label: t.beatSync8Beats },
+                          ] as { id: BeatSyncMode; label: string }[]
+                        ).map((bm) => (
+                          <button
+                            key={bm.id}
+                            type="button"
+                            onClick={() => onAutoBeatSyncClips(bm.id, syncWithMotion)}
+                            className="py-1 px-1.5 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-[10px] font-medium text-gray-300 hover:text-amber-300 cursor-pointer truncate"
+                          >
+                            {bm.label}
+                          </button>
+                        ))}
+                      </div>
+                      <label className="w-full flex items-center justify-between text-[11px] text-gray-300 cursor-pointer py-0.5">
+                        <span>{t.beatSyncAutoMotion}</span>
+                        <input
+                          type="checkbox"
+                          checked={syncWithMotion}
+                          onChange={(e) => setSyncWithMotion(e.target.checked)}
+                          className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                        />
+                      </label>
                       <button
                         type="button"
                         onClick={onFitClipsToAudio}

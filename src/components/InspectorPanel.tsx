@@ -30,12 +30,14 @@ import {
   Language,
   LutPresetId,
   MediaColorFilter,
+  OverlayBlendMode,
   SlideTransitionType,
   StudioConfig,
   TextAlignMode,
   TextAnimationId,
   TextBackdropMode,
   TextPlacement,
+  TimelineGeneratorOverlay,
   VisualMediaState,
   VisualizerPlacement,
 } from '../types/studio';
@@ -54,14 +56,34 @@ interface InspectorPanelProps {
   audio: AudioTrackState | null;
   mediaItems: VisualMediaState[];
   selectedClipId: string | null;
+  selectedFxId: string | null;
   config: StudioConfig;
   glslError: string | null;
   onChangeTab: (tab: InspectorTab) => void;
   onSelectClip: (id: string) => void;
+  onSelectFx: (id: string | null) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
+  onApplyClipOverlay: (
+    clipId: string,
+    effect: GeneratorEffectId,
+    blend?: OverlayBlendMode,
+    opacity?: number,
+    snapshotGlobalParams?: boolean
+  ) => void;
+  onMoveClipOverlayToFxTrack: (clipId: string) => void;
   onDuplicateClip: (id: string) => void;
   onRemoveVisual: (id: string) => void;
+  onSetClipTransition: (id: string, tr: SlideTransitionType, applyAll?: boolean) => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
+  onAddFxOverlay: (
+    effect: Exclude<GeneratorEffectId, 'none'>,
+    target?: 'clip' | 'playhead',
+    snapshotGlobalParams?: boolean
+  ) => void;
+  onUpdateFxOverlay: (id: string, patch: Partial<TimelineGeneratorOverlay>) => void;
+  onDuplicateFxOverlay: (id: string) => void;
+  onRemoveFxOverlay: (id: string) => void;
+  onFitFxToSelectedClip: (fxId: string) => void;
   onApplyMoodPreset: (patch: Partial<StudioConfig>) => void;
   onResetGenerator: () => void;
   onCompileCustomGlsl: () => void;
@@ -94,14 +116,24 @@ export function InspectorPanel({
   audio,
   mediaItems,
   selectedClipId,
+  selectedFxId,
   config,
   glslError,
   onChangeTab,
   onSelectClip,
+  onSelectFx,
   onUpdateClip,
+  onApplyClipOverlay,
+  onMoveClipOverlayToFxTrack,
   onDuplicateClip,
   onRemoveVisual,
+  onSetClipTransition,
   onUpdateConfig,
+  onAddFxOverlay,
+  onUpdateFxOverlay,
+  onDuplicateFxOverlay,
+  onRemoveFxOverlay,
+  onFitFxToSelectedClip,
   onApplyMoodPreset,
   onResetGenerator,
   onCompileCustomGlsl,
@@ -121,6 +153,8 @@ export function InspectorPanel({
   const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
   const clipTransform: ClipTransform = selectedClip?.transform || DEFAULT_CLIP_TRANSFORM;
   const clipGenParams: ClipGeneratorParams = selectedClip?.generatorParams || {};
+  const fxOverlays = config.fxOverlays || [];
+  const selectedFx = selectedFxId ? fxOverlays.find((fx) => fx.id === selectedFxId) || null : null;
 
   const updateSelectedTransform = (patch: Partial<ClipTransform>) => {
     if (!selectedClip) return;
@@ -133,6 +167,23 @@ export function InspectorPanel({
     if (!selectedClip) return;
     onUpdateClip(selectedClip.id, {
       generatorParams: { ...clipGenParams, ...patch },
+    });
+  };
+
+  const updateClipOverlayParams = (patch: Partial<ClipGeneratorParams>) => {
+    if (!selectedClip || !selectedClip.overlayEffect) return;
+    onUpdateClip(selectedClip.id, {
+      overlayEffect: {
+        ...selectedClip.overlayEffect,
+        params: { ...(selectedClip.overlayEffect.params || {}), ...patch },
+      },
+    });
+  };
+
+  const updateSelectedFxParams = (patch: Partial<ClipGeneratorParams>) => {
+    if (!selectedFx) return;
+    onUpdateFxOverlay(selectedFx.id, {
+      params: { ...(selectedFx.params || {}), ...patch },
     });
   };
 
@@ -799,52 +850,210 @@ export function InspectorPanel({
                   </div>
                 </div>
 
+                {/* Generator Overlay Directly On This Clip */}
+                <div className="pt-3 border-t border-[#262B38] space-y-2.5">
+                  <div>
+                    <span className="text-xs font-semibold text-gray-200 flex items-center gap-1.5">
+                      <Orbit className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
+                      <span>{t.clipOverlayTitle}</span>
+                    </span>
+                    <p className="text-[10px] text-gray-400 mt-0.5 leading-snug">
+                      {t.clipOverlayDesc}
+                    </p>
+                  </div>
+
+                  <select
+                    value={selectedClip.overlayEffect?.effect || 'none'}
+                    onChange={(e) => {
+                      const nextEff = e.target.value as GeneratorEffectId;
+                      onApplyClipOverlay(
+                        selectedClip.id,
+                        nextEff,
+                        selectedClip.overlayEffect?.blend || 'screen',
+                        selectedClip.overlayEffect?.opacity ?? 0.68
+                      );
+                    }}
+                    aria-label={t.clipOverlayTitle}
+                    className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs text-gray-100 focus:border-cyan-500 focus:outline-none"
+                  >
+                    <option value="none">{t.clipOverlayNone}</option>
+                    {GENERATOR_EFFECTS.filter((g) => g.id !== 'none').map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {lang === 'ru' ? g.nameRu : g.nameEn}
+                      </option>
+                    ))}
+                  </select>
+
+                  {selectedClip.overlayEffect && (
+                    <div className="rounded-lg border border-cyan-500/35 bg-[#111722] p-2.5 space-y-2.5">
+                      <div className="grid grid-cols-3 gap-1">
+                        {(
+                          [
+                            { id: 'screen', label: t.overlayBlendScreen },
+                            { id: 'lighter', label: t.overlayBlendLighter },
+                            { id: 'soft-light', label: t.overlayBlendSoft },
+                          ] as { id: OverlayBlendMode; label: string }[]
+                        ).map((b) => (
+                          <button
+                            key={b.id}
+                            type="button"
+                            onClick={() =>
+                              onUpdateClip(selectedClip.id, {
+                                overlayEffect: { ...selectedClip.overlayEffect!, blend: b.id },
+                              })
+                            }
+                            className={`py-1 px-1 rounded border text-[10px] font-medium cursor-pointer truncate ${
+                              selectedClip.overlayEffect!.blend === b.id
+                                ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200'
+                                : 'border-[#262B38] bg-[#0E1016] text-gray-300'
+                            }`}
+                          >
+                            {b.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="space-y-0.5">
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-gray-300">{t.overlayOpacityLabel}</span>
+                          <span className="font-mono tabular-nums text-cyan-200">
+                            {Math.round(selectedClip.overlayEffect.opacity * 100)}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.1}
+                          max={1.0}
+                          step={0.05}
+                          value={selectedClip.overlayEffect.opacity}
+                          onChange={(e) =>
+                            onUpdateClip(selectedClip.id, {
+                              overlayEffect: {
+                                ...selectedClip.overlayEffect!,
+                                opacity: Number(e.target.value),
+                              },
+                            })
+                          }
+                          className="w-full studio-slider"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorSpeedLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(selectedClip.overlayEffect.params?.speed ?? config.generatorSpeed).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.2}
+                            max={2.5}
+                            step={0.05}
+                            value={selectedClip.overlayEffect.params?.speed ?? config.generatorSpeed}
+                            onChange={(e) => updateClipOverlayParams({ speed: Number(e.target.value) })}
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift}°
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={-180}
+                            max={180}
+                            step={5}
+                            value={selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift}
+                            onChange={(e) => updateClipOverlayParams({ hueShift: Number(e.target.value) })}
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onMoveClipOverlayToFxTrack(selectedClip.id)}
+                          className="py-1 px-2 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-[10px] font-medium text-cyan-200 cursor-pointer truncate"
+                        >
+                          {t.fxAddFromGlobalBtn}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onApplyClipOverlay(selectedClip.id, 'none')}
+                          className="py-1 px-2 rounded border border-[#262B38] bg-[#0E1016] hover:border-rose-500/50 text-[10px] font-medium text-gray-400 hover:text-rose-300 cursor-pointer truncate"
+                        >
+                          {t.clipOverlayNone}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Outgoing Transition */}
                 {mediaItems.length > 1 && (
-                  <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-[#262B38]">
-                    <div className="space-y-1">
-                      <span className="text-[10px] text-gray-400 block">
-                        {t.clipTransitionLabel}
-                      </span>
-                      <select
-                        value={selectedClip.transitionOut}
-                        onChange={(e) =>
-                          onUpdateClip(selectedClip.id, {
-                            transitionOut: e.target.value as SlideTransitionType,
-                          })
-                        }
-                        className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-[11px] text-gray-100"
-                      >
-                        <option value="crossfade">{t.transitionCrossfade}</option>
-                        <option value="zoom_cross">{t.transitionZoomCross}</option>
-                        <option value="wipe_right">{t.transitionWipeRight}</option>
-                        <option value="dip_black">{t.transitionDipBlack}</option>
-                        <option value="slide">{t.transitionSlide}</option>
-                        <option value="cut">{t.transitionCut}</option>
-                      </select>
-                    </div>
+                  <div className="space-y-2 pt-3 border-t border-[#262B38]">
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-gray-400 block">
+                          {t.clipTransitionLabel}
+                        </span>
+                        <select
+                          value={selectedClip.transitionOut}
+                          onChange={(e) =>
+                            onSetClipTransition(
+                              selectedClip.id,
+                              e.target.value as SlideTransitionType,
+                              false
+                            )
+                          }
+                          className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-[11px] text-gray-100"
+                        >
+                          <option value="crossfade">{t.transitionCrossfade}</option>
+                          <option value="zoom_cross">{t.transitionZoomCross}</option>
+                          <option value="wipe_right">{t.transitionWipeRight}</option>
+                          <option value="dip_black">{t.transitionDipBlack}</option>
+                          <option value="slide">{t.transitionSlide}</option>
+                          <option value="cut">{t.transitionCut}</option>
+                        </select>
+                      </div>
 
-                    <label className="space-y-1 block">
-                      <span className="text-[10px] text-gray-400 block">
-                        {t.clipTransDurationLabel}
-                      </span>
-                      <input
-                        type="number"
-                        min={0.1}
-                        max={2.5}
-                        step={0.1}
-                        value={Number(selectedClip.transitionDurationSec.toFixed(1))}
-                        onChange={(e) =>
-                          onUpdateClip(selectedClip.id, {
-                            transitionDurationSec: Math.max(
-                              0.1,
-                              Math.min(2.5, Number(e.target.value) || 0.6)
-                            ),
-                          })
-                        }
-                        className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
-                      />
-                    </label>
+                      <label className="space-y-1 block">
+                        <span className="text-[10px] text-gray-400 block">
+                          {t.clipTransDurationLabel}
+                        </span>
+                        <input
+                          type="number"
+                          min={0.1}
+                          max={2.5}
+                          step={0.1}
+                          value={Number(selectedClip.transitionDurationSec.toFixed(1))}
+                          onChange={(e) =>
+                            onUpdateClip(selectedClip.id, {
+                              transitionDurationSec: Math.max(
+                                0.1,
+                                Math.min(2.5, Number(e.target.value) || 0.6)
+                              ),
+                            })
+                          }
+                          className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
+                        />
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onSetClipTransition(selectedClip.id, selectedClip.transitionOut, true)
+                      }
+                      className="w-full py-1 px-2.5 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/50 text-[10px] font-medium text-gray-300 hover:text-amber-300 cursor-pointer"
+                    >
+                      {t.applyTransToAllBtn}
+                    </button>
                   </div>
                 )}
               </div>
@@ -1201,6 +1410,238 @@ export function InspectorPanel({
 
         {activeTab === 'generator' && (
           <>
+            {/* Selected Timeline FX Overlay Inspector */}
+            {selectedFx && (
+              <div className="rounded-lg border border-cyan-500/50 bg-[#101824] p-3 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-cyan-200 flex items-center gap-1.5 min-w-0">
+                    <Layers className="w-3.5 h-3.5 text-cyan-300 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{t.fxSelectedTitle}</span>
+                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onDuplicateFxOverlay(selectedFx.id)}
+                      title={t.fxDuplicateBtn}
+                      aria-label={t.fxDuplicateBtn}
+                      className="p-1 rounded border border-[#262B38] bg-[#0B0D11] hover:border-cyan-400 text-gray-300 hover:text-cyan-200 cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveFxOverlay(selectedFx.id)}
+                      title={t.fxDeleteBtn}
+                      aria-label={t.fxDeleteBtn}
+                      className="p-1 rounded border border-[#262B38] bg-[#0B0D11] hover:border-rose-500 text-gray-300 hover:text-rose-400 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelectFx(null)}
+                      className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#0B0D11] text-[10px] text-gray-300 hover:text-white cursor-pointer"
+                    >
+                      {t.fxBackToGlobalBtn}
+                    </button>
+                  </div>
+                </div>
+
+                <select
+                  value={selectedFx.generatorId}
+                  onChange={(e) => {
+                    const nextEff = e.target.value as Exclude<GeneratorEffectId, 'none'>;
+                    const meta = GENERATOR_EFFECTS.find((g) => g.id === nextEff);
+                    onUpdateFxOverlay(selectedFx.id, {
+                      generatorId: nextEff,
+                      name: meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : nextEff,
+                    });
+                  }}
+                  className="w-full rounded bg-[#0B0D11] border border-[#262B38] px-2.5 py-1.5 text-xs text-gray-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  {GENERATOR_EFFECTS.filter((g) => g.id !== 'none').map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {lang === 'ru' ? g.nameRu : g.nameEn}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="grid grid-cols-3 gap-1">
+                  {(
+                    [
+                      { id: 'screen', label: t.overlayBlendScreen },
+                      { id: 'lighter', label: t.overlayBlendLighter },
+                      { id: 'soft-light', label: t.overlayBlendSoft },
+                    ] as { id: OverlayBlendMode; label: string }[]
+                  ).map((b) => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      onClick={() => onUpdateFxOverlay(selectedFx.id, { blend: b.id })}
+                      className={`py-1 px-1.5 rounded border text-[10px] font-medium cursor-pointer truncate ${
+                        selectedFx.blend === b.id
+                          ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200'
+                          : 'border-[#262B38] bg-[#0B0D11] text-gray-300'
+                      }`}
+                    >
+                      {b.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-0.5 block">
+                    <span className="text-[10px] text-gray-400 block">{t.overlayStartLabel}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(0, clipDuration - 0.4)}
+                      step={0.1}
+                      value={Number(selectedFx.startSec.toFixed(2))}
+                      onChange={(e) =>
+                        onUpdateFxOverlay(selectedFx.id, {
+                          startSec: Math.max(
+                            0,
+                            Math.min(clipDuration - 0.4, Number(e.target.value) || 0)
+                          ),
+                        })
+                      }
+                      className="w-full rounded bg-[#0B0D11] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
+                    />
+                  </label>
+                  <label className="space-y-0.5 block">
+                    <span className="text-[10px] text-gray-400 block">{t.clipDurationLabel}</span>
+                    <input
+                      type="number"
+                      min={0.4}
+                      max={clipDuration}
+                      step={0.1}
+                      value={Number(selectedFx.durationSec.toFixed(2))}
+                      onChange={(e) =>
+                        onUpdateFxOverlay(selectedFx.id, {
+                          durationSec: Math.max(
+                            0.4,
+                            Math.min(clipDuration - selectedFx.startSec, Number(e.target.value) || 1)
+                          ),
+                        })
+                      }
+                      className="w-full rounded bg-[#0B0D11] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-0.5 block">
+                    <div className="flex justify-between text-[10px]">
+                      <span className="text-gray-300">{t.overlayOpacityLabel}</span>
+                      <span className="font-mono text-cyan-200">
+                        {Math.round(selectedFx.opacity * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={1.0}
+                      step={0.05}
+                      value={selectedFx.opacity}
+                      onChange={(e) =>
+                        onUpdateFxOverlay(selectedFx.id, { opacity: Number(e.target.value) })
+                      }
+                      className="w-full studio-slider"
+                    />
+                  </label>
+                  <label className="space-y-0.5 block">
+                    <div className="flex justify-between text-[10px]">
+                      <span className="text-gray-300">{t.overlayFadeLabel}</span>
+                      <span className="font-mono text-cyan-200">{selectedFx.fadeSec.toFixed(2)}s</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1.5}
+                      step={0.05}
+                      value={selectedFx.fadeSec}
+                      onChange={(e) =>
+                        onUpdateFxOverlay(selectedFx.id, { fadeSec: Number(e.target.value) })
+                      }
+                      className="w-full studio-slider"
+                    />
+                  </label>
+                  <label className="space-y-0.5 block">
+                    <div className="flex justify-between text-[10px]">
+                      <span className="text-gray-400">{t.generatorSpeedLabel}</span>
+                      <span className="font-mono text-gray-200">
+                        {(selectedFx.params?.speed ?? config.generatorSpeed).toFixed(2)}×
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.2}
+                      max={2.5}
+                      step={0.05}
+                      value={selectedFx.params?.speed ?? config.generatorSpeed}
+                      onChange={(e) => updateSelectedFxParams({ speed: Number(e.target.value) })}
+                      className="w-full studio-slider"
+                    />
+                  </label>
+                  <label className="space-y-0.5 block">
+                    <div className="flex justify-between text-[10px]">
+                      <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
+                      <span className="font-mono text-gray-200">
+                        {selectedFx.params?.hueShift ?? config.generatorHueShift}°
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-180}
+                      max={180}
+                      step={5}
+                      value={selectedFx.params?.hueShift ?? config.generatorHueShift}
+                      onChange={(e) => updateSelectedFxParams({ hueShift: Number(e.target.value) })}
+                      className="w-full studio-slider"
+                    />
+                  </label>
+                </div>
+
+                {selectedClip && (
+                  <button
+                    type="button"
+                    onClick={() => onFitFxToSelectedClip(selectedFx.id)}
+                    className="w-full py-1 px-2.5 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-[11px] font-medium text-cyan-200 cursor-pointer"
+                  >
+                    {t.fxSnapToClipBtn} (#{mediaItems.findIndex((m) => m.id === selectedClip.id) + 1})
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Quick List of Existing Timeline FX Overlays */}
+            {fxOverlays.length > 0 && !selectedFx && (
+              <div className="rounded-lg border border-[#262B38] bg-[#141821] p-2.5 space-y-1.5">
+                <span className="text-[11px] font-semibold text-cyan-200 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-cyan-300" aria-hidden="true" />
+                  <span>
+                    {t.timelineFxTrackLabel} ({fxOverlays.length})
+                  </span>
+                </span>
+                <div className="space-y-1 max-h-28 overflow-y-auto">
+                  {fxOverlays.map((fx) => (
+                    <button
+                      key={fx.id}
+                      type="button"
+                      onClick={() => onSelectFx(fx.id)}
+                      className="w-full flex items-center justify-between px-2 py-1 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/50 text-[11px] text-gray-200 cursor-pointer"
+                    >
+                      <span className="truncate">{fx.name}</span>
+                      <span className="font-mono text-[10px] text-cyan-300 shrink-0 ml-2">
+                        {fx.startSec.toFixed(1)}s · {fx.durationSec.toFixed(1)}s
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div>
               <h3 className="text-xs font-semibold text-gray-100">{t.generatorTitle}</h3>
               <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">
@@ -1235,6 +1676,40 @@ export function InspectorPanel({
 
             {config.generatorEffect !== 'none' && (
               <div className="space-y-3.5 pt-2 border-t border-[#262B38]">
+                <div className="grid grid-cols-1 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onAddFxOverlay(
+                        config.generatorEffect as Exclude<GeneratorEffectId, 'none'>,
+                        selectedClip ? 'clip' : 'playhead',
+                        true
+                      )
+                    }
+                    className="w-full py-1.5 px-2.5 rounded-md border border-cyan-500/50 bg-cyan-500/12 hover:bg-cyan-500/20 text-[11px] font-semibold text-cyan-200 cursor-pointer truncate"
+                  >
+                    {t.fxAddFromGlobalBtn}
+                  </button>
+                  {selectedClip && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onApplyClipOverlay(
+                          selectedClip.id,
+                          config.generatorEffect,
+                          'screen',
+                          0.68,
+                          true
+                        )
+                      }
+                      className="w-full py-1.5 px-2.5 rounded-md border border-amber-500/45 bg-amber-500/10 hover:bg-amber-500/20 text-[11px] font-medium text-amber-300 cursor-pointer truncate"
+                    >
+                      {t.fxApplyToSelectedClipBtn} (#
+                      {mediaItems.findIndex((m) => m.id === selectedClip.id) + 1})
+                    </button>
+                  )}
+                </div>
+
                 <div className="space-y-1.5">
                   <span className="text-xs font-semibold text-gray-200 block">
                     {t.generatorModeLabel}

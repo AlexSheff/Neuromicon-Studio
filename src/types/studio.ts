@@ -24,6 +24,10 @@ export type GeneratorEffectId =
 
 export type GeneratorBlendMode = 'backdrop' | 'screen' | 'lighter';
 
+export type OverlayBlendMode = 'screen' | 'lighter' | 'soft-light';
+
+export type BeatSyncMode = 'fit_track' | 'beats_1' | 'beats_2' | 'beats_4' | 'beats_8';
+
 export type TextAnimationId =
   | 'fade_rise'
   | 'beat_pop'
@@ -113,6 +117,25 @@ export interface ClipGeneratorParams {
   glow?: number;
 }
 
+export interface ClipOverlayGenerator {
+  effect: Exclude<GeneratorEffectId, 'none'>;
+  blend: OverlayBlendMode;
+  opacity: number; // 0.1 .. 1.0
+  params?: ClipGeneratorParams;
+}
+
+export interface TimelineGeneratorOverlay {
+  id: string;
+  generatorId: Exclude<GeneratorEffectId, 'none'>;
+  name: string;
+  startSec: number; // relative to trimStart (0 .. clipDuration)
+  durationSec: number; // >= 0.4
+  blend: OverlayBlendMode;
+  opacity: number; // 0.1 .. 1.0
+  fadeSec: number; // 0 .. 1.5
+  params?: ClipGeneratorParams;
+}
+
 export interface SubtitleCue {
   id: string;
   startSec: number;
@@ -182,6 +205,7 @@ export interface VisualMediaState {
   transitionDurationSec: number;
   generatorId?: GeneratorEffectId;
   generatorParams?: ClipGeneratorParams;
+  overlayEffect?: ClipOverlayGenerator;
   // Stage 2: Transforms, keyframes & per-clip audio
   transform: ClipTransform;
   clipAudioVolume: number; // 0 .. 1.5
@@ -215,6 +239,7 @@ export interface StudioConfig {
   generatorHueShift: number; // -180 .. 180 degrees
   generatorGlow: number; // 0.4 .. 2.2
   customGlslCode: string;
+  fxOverlays: TimelineGeneratorOverlay[];
 
   // Multi-clip sequence & background styling
   slideshowMode: SlideshowMode;

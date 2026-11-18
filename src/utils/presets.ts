@@ -333,6 +333,7 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   generatorHueShift: 0,
   generatorGlow: 1.1,
   customGlslCode: DEFAULT_CUSTOM_GLSL,
+  fxOverlays: [],
 
   slideshowMode: 'custom_durations',
   slideDurationSec: 4.0,

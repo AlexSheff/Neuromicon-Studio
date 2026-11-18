@@ -1,5 +1,6 @@
 import {
   ClipGeneratorParams,
+  ClipOverlayGenerator,
   ClipTransform,
   SlideTransitionType,
   StudioConfig,
@@ -27,6 +28,7 @@ export interface SerializedClip {
   transitionDurationSec: number;
   generatorId?: VisualMediaState['generatorId'];
   generatorParams?: ClipGeneratorParams;
+  overlayEffect?: ClipOverlayGenerator;
   transform: ClipTransform;
   clipAudioVolume: number;
   clipAudioMuted: boolean;
@@ -173,6 +175,12 @@ export function serializeStudioState(
       transitionDurationSec: m.transitionDurationSec,
       generatorId: m.generatorId,
       generatorParams: m.generatorParams ? { ...m.generatorParams } : undefined,
+      overlayEffect: m.overlayEffect
+        ? {
+            ...m.overlayEffect,
+            params: m.overlayEffect.params ? { ...m.overlayEffect.params } : undefined,
+          }
+        : undefined,
       transform: m.transform || { ...DEFAULT_CLIP_TRANSFORM },
       clipAudioVolume: m.clipAudioVolume ?? 0,
       clipAudioMuted: m.clipAudioMuted ?? true,

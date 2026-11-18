@@ -332,6 +332,35 @@ function drawSingleClipLayer(
       hueShiftDeg: gp?.hueShift ?? config.generatorHueShift,
       glow: gp?.glow ?? config.generatorGlow,
     });
+    if (media.overlayEffect) {
+      ctx.save();
+      ctx.filter = 'none';
+      ctx.globalCompositeOperation = media.overlayEffect.blend;
+      ctx.globalAlpha = Math.max(
+        0,
+        Math.min(1, alpha * tr.opacity * media.overlayEffect.opacity)
+      );
+      const ogp = media.overlayEffect.params;
+      proceduralShaderEngine.renderToCanvas2D(ctx, {
+        effect: media.overlayEffect.effect,
+        width,
+        height,
+        time: localTime,
+        metrics,
+        accentHex: accentColor,
+        secondaryHex: secondaryColor,
+        speed: ogp?.speed ?? config.generatorSpeed,
+        scale: ogp?.scale ?? config.generatorScale,
+        beatReact: ogp?.beatReact ?? config.generatorBeatReact,
+        complexity: ogp?.complexity ?? config.generatorComplexity,
+        warp: ogp?.warp ?? config.generatorWarp,
+        symmetry: ogp?.symmetry ?? config.generatorSymmetry,
+        rotationSpeed: ogp?.rotationSpeed ?? config.generatorRotationSpeed,
+        hueShiftDeg: ogp?.hueShift ?? config.generatorHueShift,
+        glow: ogp?.glow ?? config.generatorGlow,
+      });
+      ctx.restore();
+    }
     ctx.restore();
     return;
   }
@@ -406,6 +435,39 @@ function drawSingleClipLayer(
       );
     }
   }
+
+  if (media.overlayEffect) {
+    ctx.save();
+    ctx.filter = 'none';
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.globalCompositeOperation = media.overlayEffect.blend;
+    ctx.globalAlpha = Math.max(
+      0,
+      Math.min(1, alpha * tr.opacity * media.overlayEffect.opacity)
+    );
+    const ogp = media.overlayEffect.params;
+    proceduralShaderEngine.renderToCanvas2D(ctx, {
+      effect: media.overlayEffect.effect,
+      width,
+      height,
+      time: localTime,
+      metrics,
+      accentHex: accentColor,
+      secondaryHex: secondaryColor,
+      speed: ogp?.speed ?? config.generatorSpeed,
+      scale: ogp?.scale ?? config.generatorScale,
+      beatReact: ogp?.beatReact ?? config.generatorBeatReact,
+      complexity: ogp?.complexity ?? config.generatorComplexity,
+      warp: ogp?.warp ?? config.generatorWarp,
+      symmetry: ogp?.symmetry ?? config.generatorSymmetry,
+      rotationSpeed: ogp?.rotationSpeed ?? config.generatorRotationSpeed,
+      hueShiftDeg: ogp?.hueShift ?? config.generatorHueShift,
+      glow: ogp?.glow ?? config.generatorGlow,
+    });
+    ctx.restore();
+  }
+
   ctx.restore();
 }
 
@@ -1005,6 +1067,41 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       ctx.moveTo(0, gy);
       ctx.lineTo(width, gy);
       ctx.stroke();
+    }
+  }
+
+  // 2b. Timeline FX Generator Overlays Track (plays smoothly over clips across any range)
+  if (config.fxOverlays && config.fxOverlays.length > 0) {
+    for (const fx of config.fxOverlays) {
+      if (localTime < fx.startSec || localTime > fx.startSec + fx.durationSec) continue;
+      const relT = localTime - fx.startSec;
+      const env = computeFadeEnvelope(relT, fx.durationSec, fx.fadeSec, fx.fadeSec);
+      const effAlpha = fx.opacity * env;
+      if (effAlpha <= 0.005) continue;
+      const fxp = fx.params;
+      ctx.save();
+      ctx.filter = 'none';
+      ctx.globalCompositeOperation = fx.blend;
+      ctx.globalAlpha = Math.max(0, Math.min(1, effAlpha));
+      proceduralShaderEngine.renderToCanvas2D(ctx, {
+        effect: fx.generatorId,
+        width,
+        height,
+        time: localTime,
+        metrics,
+        accentHex: scheme.accentColor,
+        secondaryHex: scheme.visualizerSecondary,
+        speed: fxp?.speed ?? config.generatorSpeed,
+        scale: fxp?.scale ?? config.generatorScale,
+        beatReact: fxp?.beatReact ?? config.generatorBeatReact,
+        complexity: fxp?.complexity ?? config.generatorComplexity,
+        warp: fxp?.warp ?? config.generatorWarp,
+        symmetry: fxp?.symmetry ?? config.generatorSymmetry,
+        rotationSpeed: fxp?.rotationSpeed ?? config.generatorRotationSpeed,
+        hueShiftDeg: fxp?.hueShift ?? config.generatorHueShift,
+        glow: fxp?.glow ?? config.generatorGlow,
+      });
+      ctx.restore();
     }
   }
 

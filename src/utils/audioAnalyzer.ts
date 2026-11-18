@@ -1,5 +1,6 @@
 import {
   AudioFrameMetrics,
+  BeatSyncMode,
   SlideTransitionType,
   StudioConfig,
   VisualMediaState,
@@ -292,6 +293,7 @@ export interface TimelineClipSegment {
   clipIndex: number;
   startSec: number;
   endSec: number;
+  isLoopRepeat?: boolean;
 }
 
 /**
@@ -306,7 +308,7 @@ export function computeClipTimelineSegments(
   const count = mediaItems.length;
   if (count === 0 || clipDuration <= 0) return [];
   if (count === 1) {
-    return [{ clipIndex: 0, startSec: 0, endSec: clipDuration }];
+    return [{ clipIndex: 0, startSec: 0, endSec: clipDuration, isLoopRepeat: false }];
   }
 
   const segments: TimelineClipSegment[] = [];
@@ -319,7 +321,7 @@ export function computeClipTimelineSegments(
       const dur = Math.max(0.4, mediaItems[clipIndex].durationSec || 4);
       const rawEnd = cursor + dur;
       const endSec = clipDuration - rawEnd < 0.01 ? clipDuration : Math.min(clipDuration, rawEnd);
-      segments.push({ clipIndex, startSec: cursor, endSec });
+      segments.push({ clipIndex, startSec: cursor, endSec, isLoopRepeat: step >= count });
       cursor = endSec;
       step++;
     }
@@ -333,6 +335,7 @@ export function computeClipTimelineSegments(
         clipIndex: i,
         startSec: i * segLen,
         endSec: i === count - 1 ? clipDuration : (i + 1) * segLen,
+        isLoopRepeat: false,
       });
     }
     return segments;
@@ -344,7 +347,12 @@ export function computeClipTimelineSegments(
     let step = 0;
     while (cursor < clipDuration - 0.01 && step < 400) {
       const endSec = Math.min(clipDuration, cursor + segLen);
-      segments.push({ clipIndex: step % count, startSec: cursor, endSec });
+      segments.push({
+        clipIndex: step % count,
+        startSec: cursor,
+        endSec,
+        isLoopRepeat: step >= count,
+      });
       cursor = endSec;
       step++;
     }
@@ -361,6 +369,7 @@ export function computeClipTimelineSegments(
       clipIndex: i % count,
       startSec,
       endSec: nextStart,
+      isLoopRepeat: i >= count,
     });
   }
   return segments;
@@ -495,22 +504,47 @@ export function detectTrackBpmAndBeats(
 export interface BeatAlignedClipPlan {
   durationSec: number;
   transitionDurationSec: number;
+  suggestedTransition: SlideTransitionType;
+  suggestedScaleStart: number;
+  suggestedScaleEnd: number;
 }
 
 /**
- * Aligns every clip's duration and outgoing transition length to musical beats across [0..clipDuration].
+ * Aligns every clip's duration, outgoing transition, and optional gentle motion keyframes
+ * to musical beats across [0..clipDuration].
  */
 export function computeAutoBeatAlignedClips(
   clipCount: number,
   clipDuration: number,
   beatGrid: TrackBeatGrid,
   manualMarkersAbs: number[],
-  trimStart: number
+  trimStart: number,
+  mode: BeatSyncMode = 'fit_track'
 ): BeatAlignedClipPlan[] {
   if (clipCount <= 0) return [];
   const beatSec = beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
+  const rhythmicTransitions: SlideTransitionType[] = ['crossfade', 'zoom_cross', 'wipe_right', 'crossfade'];
 
-  // Prefer manual markers if >=2 exist inside trim range, otherwise use detected beat grid
+  const makeMotionAndTrans = (idx: number, dur: number): BeatAlignedClipPlan => {
+    const idealTrans = Math.max(0.16, Math.min(0.75, beatSec * 0.45, dur * 0.34));
+    const pushIn = idx % 2 === 0;
+    return {
+      durationSec: Number(dur.toFixed(2)),
+      transitionDurationSec: Number(idealTrans.toFixed(2)),
+      suggestedTransition: rhythmicTransitions[idx % rhythmicTransitions.length],
+      suggestedScaleStart: pushIn ? 1.0 : 1.09,
+      suggestedScaleEnd: pushIn ? 1.09 : 1.0,
+    };
+  };
+
+  if (mode !== 'fit_track') {
+    const beatMult =
+      mode === 'beats_1' ? 1 : mode === 'beats_2' ? 2 : mode === 'beats_8' ? 8 : 4;
+    const rawDur = Math.max(0.5, Math.min(30, beatSec * beatMult));
+    return Array.from({ length: clipCount }, (_, i) => makeMotionAndTrans(i, rawDur));
+  }
+
+  // Prefer manual markers if >=clipCount exist inside trim range, otherwise use detected beat grid
   const manualRel = manualMarkersAbs
     .map((m) => Number((m - trimStart).toFixed(3)))
     .filter((t) => t > 0.15 && t < clipDuration - 0.15)
@@ -533,33 +567,50 @@ export function computeAutoBeatAlignedClips(
       const idx = Math.min(uniqueGrid.length - 1, Math.max(i, Math.round(i * step)));
       const candidate = uniqueGrid[idx];
       const prev = cutPoints[cutPoints.length - 1];
-      cutPoints.push(candidate > prev + 0.45 ? candidate : Number((prev + Math.max(0.5, beatSec)).toFixed(2)));
+      cutPoints.push(
+        candidate > prev + 0.45 ? candidate : Number((prev + Math.max(0.5, beatSec)).toFixed(2))
+      );
     }
     cutPoints.push(clipDuration);
 
     return Array.from({ length: clipCount }, (_, i) => {
       const rawDur = Math.max(0.5, Math.min(30, cutPoints[i + 1] - cutPoints[i]));
-      const dur = Number(rawDur.toFixed(2));
-      const idealTrans = Math.max(0.18, Math.min(0.75, beatSec * 0.45, dur * 0.32));
-      return {
-        durationSec: dur,
-        transitionDurationSec: Number(idealTrans.toFixed(2)),
-      };
+      return makeMotionAndTrans(i, rawDur);
     });
   }
 
   // Fallback: quantize target duration per clip to integer number of beats
   const rawPerClip = clipDuration / clipCount;
   const beatsPerClip = Math.max(1, Math.round(rawPerClip / beatSec));
-  const quantizedDur = Math.max(0.5, Math.min(30, Number((beatsPerClip * beatSec).toFixed(2))));
-  const transDur = Number(
-    Math.max(0.18, Math.min(0.75, beatSec * 0.45, quantizedDur * 0.32)).toFixed(2)
-  );
+  const quantizedDur = Math.max(0.5, Math.min(30, beatsPerClip * beatSec));
 
-  return Array.from({ length: clipCount }, () => ({
-    durationSec: quantizedDur,
-    transitionDurationSec: transDur,
-  }));
+  return Array.from({ length: clipCount }, (_, i) => makeMotionAndTrans(i, quantizedDur));
+}
+
+export function snapFxOverlayToBeats(
+  startSec: number,
+  durationSec: number,
+  beatGrid: TrackBeatGrid,
+  clipDuration: number
+): { startSec: number; durationSec: number } {
+  const beatSec = beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
+  const points = beatGrid.beats.length >= 2 ? [0, ...beatGrid.beats, clipDuration] : [];
+  let snappedStart = Math.max(0, Math.min(clipDuration - 0.4, startSec));
+  if (points.length > 0) {
+    snappedStart = snapTimeToBeat(snappedStart, points, Math.max(0.35, beatSec * 0.6));
+  }
+  const endTarget = Math.min(clipDuration, snappedStart + Math.max(0.4, durationSec));
+  let snappedEnd =
+    points.length > 0
+      ? snapTimeToBeat(endTarget, points, Math.max(0.35, beatSec * 0.6))
+      : endTarget;
+  if (snappedEnd - snappedStart < Math.max(0.4, beatSec)) {
+    snappedEnd = Math.min(clipDuration, snappedStart + beatSec * 2);
+  }
+  return {
+    startSec: Number(Math.max(0, snappedStart).toFixed(2)),
+    durationSec: Number(Math.max(0.4, snappedEnd - snappedStart).toFixed(2)),
+  };
 }
 
 export interface ActiveSlideshowSlice {
