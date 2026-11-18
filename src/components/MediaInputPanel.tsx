@@ -25,6 +25,7 @@ import React, { useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
+  ClipGeneratorParams,
   ClipTransform,
   GeneratorEffectId,
   KeyframeEasing,
@@ -50,14 +51,19 @@ interface MediaInputPanelProps {
   onAudioFile: (file: File) => void;
   onLoadDemoBeat: () => void;
   onVisualFiles: (files: File[]) => void;
-  onAddGeneratorScene: (effect: Exclude<GeneratorEffectId, 'none'>) => void;
+  onAddGeneratorScene: (
+    effect: Exclude<GeneratorEffectId, 'none'>,
+    snapshotGlobalParams?: boolean
+  ) => void;
   onSelectClip: (id: string) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
   onDuplicateClip: (id: string) => void;
   onMoveVisual: (index: number, direction: -1 | 1) => void;
+  onReverseClips: () => void;
   onRemoveVisual: (id: string) => void;
   onClearVisuals: () => void;
   onFitClipsToAudio: () => void;
+  onFitTrimToClips: () => void;
   onUseEmbeddedCover: () => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
   onSelectTrimPreset: (preset: TrimPresetId) => void;
@@ -95,9 +101,11 @@ export function MediaInputPanel({
   onUpdateClip,
   onDuplicateClip,
   onMoveVisual,
+  onReverseClips,
   onRemoveVisual,
   onClearVisuals,
   onFitClipsToAudio,
+  onFitTrimToClips,
   onUseEmbeddedCover,
   onUpdateConfig,
   onSelectTrimPreset,
@@ -121,6 +129,8 @@ export function MediaInputPanel({
 
   const [audioDragOver, setAudioDragOver] = useState(false);
   const [visualDragOver, setVisualDragOver] = useState(false);
+  const [genToAdd, setGenToAdd] = useState<Exclude<GeneratorEffectId, 'none'>>('galaxy_spiral');
+  const [genOverridesOpen, setGenOverridesOpen] = useState(false);
   const [transformOpen, setTransformOpen] = useState(false);
   const [subsOpen, setSubsOpen] = useState(false);
   const [overlaysOpen, setOverlaysOpen] = useState(false);
@@ -128,11 +138,19 @@ export function MediaInputPanel({
 
   const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
   const clipTransform: ClipTransform = selectedClip?.transform || DEFAULT_CLIP_TRANSFORM;
+  const clipGenParams: ClipGeneratorParams = selectedClip?.generatorParams || {};
 
   const updateSelectedTransform = (patch: Partial<ClipTransform>) => {
     if (!selectedClip) return;
     onUpdateClip(selectedClip.id, {
       transform: { ...clipTransform, ...patch },
+    });
+  };
+
+  const updateSelectedGenParams = (patch: Partial<ClipGeneratorParams>) => {
+    if (!selectedClip) return;
+    onUpdateClip(selectedClip.id, {
+      generatorParams: { ...clipGenParams, ...patch },
     });
   };
 
@@ -313,14 +331,41 @@ export function MediaInputPanel({
           )}
         </div>
 
-        <button
-          type="button"
-          onClick={() => onAddGeneratorScene('galaxy_spiral')}
-          className="w-full py-2 px-3 rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-xs font-medium text-amber-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
-        >
-          <Orbit className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>{t.addGenSceneBtn}</span>
-        </button>
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <select
+              value={genToAdd}
+              onChange={(e) =>
+                setGenToAdd(e.target.value as Exclude<GeneratorEffectId, 'none'>)
+              }
+              aria-label={t.clipGeneratorSceneLabel}
+              className="flex-1 min-w-0 rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-2 text-xs text-gray-100 focus:border-amber-500 focus:outline-none"
+            >
+              {GENERATOR_EFFECTS.filter((g) => g.id !== 'none').map((g) => (
+                <option key={g.id} value={g.id}>
+                  {lang === 'ru' ? g.nameRu : g.nameEn}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => onAddGeneratorScene(genToAdd)}
+              className="py-2 px-3 rounded-md border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-xs font-medium text-amber-300 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Orbit className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{t.addSelectedGenBtn}</span>
+            </button>
+          </div>
+          {config.generatorEffect !== 'none' && (
+            <button
+              type="button"
+              onClick={() => onAddGeneratorScene(config.generatorEffect as Exclude<GeneratorEffectId, 'none'>, true)}
+              className="w-full py-1.5 px-2.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/50 text-[11px] font-medium text-gray-300 hover:text-amber-300 transition-colors cursor-pointer truncate"
+            >
+              {t.addActiveFxSceneBtn}
+            </button>
+          )}
+        </div>
 
         {/* Clip Sequence List */}
         {mediaItems.length > 0 && (
@@ -427,28 +472,223 @@ export function MediaInputPanel({
             </div>
 
             {selectedClip.kind === 'generator' && (
-              <div className="space-y-1">
-                <span className="text-[11px] text-gray-400 block">
-                  {t.clipGeneratorSceneLabel}
-                </span>
-                <select
-                  value={selectedClip.generatorId || 'galaxy_spiral'}
-                  onChange={(e) => {
-                    const nextEff = e.target.value as Exclude<GeneratorEffectId, 'none'>;
-                    const meta = GENERATOR_EFFECTS.find((g) => g.id === nextEff);
-                    onUpdateClip(selectedClip.id, {
-                      generatorId: nextEff,
-                      fileName: meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : nextEff,
-                    });
-                  }}
-                  className="w-full rounded-md bg-[#0E1016] border border-[#262B38] px-2.5 py-1.5 text-xs text-gray-100 focus:border-amber-500 focus:outline-none"
-                >
-                  {GENERATOR_EFFECTS.filter((g) => g.id !== 'none').map((g) => (
-                    <option key={g.id} value={g.id}>
-                      {lang === 'ru' ? g.nameRu : g.nameEn}
-                    </option>
-                  ))}
-                </select>
+              <div className="space-y-2">
+                <div className="space-y-1">
+                  <span className="text-[11px] text-gray-400 block">
+                    {t.clipGeneratorSceneLabel}
+                  </span>
+                  <select
+                    value={selectedClip.generatorId || 'galaxy_spiral'}
+                    onChange={(e) => {
+                      const nextEff = e.target.value as Exclude<GeneratorEffectId, 'none'>;
+                      const meta = GENERATOR_EFFECTS.find((g) => g.id === nextEff);
+                      onUpdateClip(selectedClip.id, {
+                        generatorId: nextEff,
+                        fileName: meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : nextEff,
+                      });
+                    }}
+                    className="w-full rounded-md bg-[#0E1016] border border-[#262B38] px-2.5 py-1.5 text-xs text-gray-100 focus:border-amber-500 focus:outline-none"
+                  >
+                    {GENERATOR_EFFECTS.filter((g) => g.id !== 'none').map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {lang === 'ru' ? g.nameRu : g.nameEn}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Per-Clip Generator Shader Overrides */}
+                <div className="pt-1.5 border-t border-[#262B38]">
+                  <button
+                    type="button"
+                    onClick={() => setGenOverridesOpen((v) => !v)}
+                    className="w-full flex items-center justify-between text-[11px] font-medium text-gray-300 hover:text-white cursor-pointer"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Orbit className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                      <span>{t.clipGenParamsTitle}</span>
+                    </span>
+                    {genOverridesOpen ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
+                    )}
+                  </button>
+
+                  {genOverridesOpen && (
+                    <div className="pt-2 space-y-2">
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateClip(selectedClip.id, {
+                              generatorParams: {
+                                speed: config.generatorSpeed,
+                                scale: config.generatorScale,
+                                beatReact: config.generatorBeatReact,
+                                complexity: config.generatorComplexity,
+                                warp: config.generatorWarp,
+                                symmetry: config.generatorSymmetry,
+                                rotationSpeed: config.generatorRotationSpeed,
+                                hueShift: config.generatorHueShift,
+                                glow: config.generatorGlow,
+                              },
+                            })
+                          }
+                          className="py-1 px-2 rounded border border-[#262B38] bg-[#0E1016] hover:border-amber-500/60 text-[10px] font-medium text-amber-300 cursor-pointer truncate"
+                        >
+                          {t.clipGenCopyGlobal}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateClip(selectedClip.id, { generatorParams: undefined })
+                          }
+                          className="py-1 px-2 rounded border border-[#262B38] bg-[#0E1016] hover:border-gray-500 text-[10px] font-medium text-gray-400 hover:text-gray-200 cursor-pointer truncate"
+                        >
+                          {t.clipGenUseGlobal}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-5 gap-1">
+                        {([1, 2, 4, 6, 8] as const).map((sym) => {
+                          const curSym = clipGenParams.symmetry ?? config.generatorSymmetry;
+                          return (
+                            <button
+                              key={sym}
+                              type="button"
+                              onClick={() => updateSelectedGenParams({ symmetry: sym })}
+                              className={`py-1 rounded border text-[10px] font-mono tabular-nums cursor-pointer ${
+                                curSym === sym
+                                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                                  : 'border-[#262B38] bg-[#0E1016] text-gray-300'
+                              }`}
+                            >
+                              {sym}×
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorSpeedLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.speed ?? config.generatorSpeed).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.2}
+                            max={2.5}
+                            step={0.05}
+                            value={clipGenParams.speed ?? config.generatorSpeed}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ speed: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorScaleLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.scale ?? config.generatorScale).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.5}
+                            max={2.0}
+                            step={0.05}
+                            value={clipGenParams.scale ?? config.generatorScale}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ scale: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorComplexityLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.complexity ?? config.generatorComplexity).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.4}
+                            max={2.0}
+                            step={0.05}
+                            value={clipGenParams.complexity ?? config.generatorComplexity}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ complexity: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorWarpLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {Math.round((clipGenParams.warp ?? config.generatorWarp) * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1.5}
+                            step={0.05}
+                            value={clipGenParams.warp ?? config.generatorWarp}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ warp: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {clipGenParams.hueShift ?? config.generatorHueShift}°
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={-180}
+                            max={180}
+                            step={5}
+                            value={clipGenParams.hueShift ?? config.generatorHueShift}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ hueShift: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorGlowLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.glow ?? config.generatorGlow).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.4}
+                            max={2.2}
+                            step={0.05}
+                            value={clipGenParams.glow ?? config.generatorGlow}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ glow: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
@@ -865,15 +1105,38 @@ export function MediaInputPanel({
                 <Layers className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
                 <span>{t.sequenceSectionTitle}</span>
               </h3>
+              <span className="text-[11px] font-mono tabular-nums text-gray-400">
+                {t.seqDurationBadge}:{' '}
+                {mediaItems.reduce((acc, m) => acc + (m.durationSec || 0), 0).toFixed(1)}s
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
               {audio && (
-                <button
-                  type="button"
-                  onClick={onFitClipsToAudio}
-                  className="text-[11px] font-medium text-amber-400 hover:text-amber-300 cursor-pointer whitespace-nowrap"
-                >
-                  {t.fitClipsToAudioBtn}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={onFitClipsToAudio}
+                    className="flex-1 py-1 px-2 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-[11px] font-medium text-amber-400 cursor-pointer whitespace-nowrap"
+                  >
+                    {t.fitClipsToAudioBtn}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onFitTrimToClips}
+                    className="flex-1 py-1 px-2 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-[11px] font-medium text-gray-300 hover:text-amber-300 cursor-pointer whitespace-nowrap"
+                  >
+                    {t.fitTrimToClipsBtn}
+                  </button>
+                </>
               )}
+              <button
+                type="button"
+                onClick={onReverseClips}
+                className="py-1 px-2.5 rounded border border-[#262B38] bg-[#141821] hover:border-gray-500 text-[11px] font-medium text-gray-300 cursor-pointer whitespace-nowrap"
+              >
+                {t.reverseClipsBtn}
+              </button>
             </div>
 
             <div className="grid grid-cols-2 gap-1">

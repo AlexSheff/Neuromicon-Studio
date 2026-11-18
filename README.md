@@ -4,12 +4,18 @@
 
 ## Features
 
-### Multi-Clip NLE & Dual-Track Timeline
-- **Dual-Track Timeline**: Interactive **Clips** track (zoomable `1×–6×`, drag-and-drop clip reordering, proportional durations, thumbnails, playhead tracking, click-to-jump) stacked above a scrubbable **Audio** waveform track with trim bounds, fade-out envelope, and beat markers.
+### Multi-Clip NLE & Synchronized Multi-Track Timeline
+- **Master Overview & Zoomable Sequence (`1×–8×`)**: Full-track waveform overview with draggable **Trim In (`[`)** / **Trim Out (`]`)** handles paired with a synchronized timeline featuring a clickable **Time Ruler**, **Clips** track, **Zoomed Audio Slice + Beat Markers**, **Subtitles Lane**, and a continuous vertical playhead.
+- **Direct Timeline Manipulation**:
+  - **Edge-Trim Resize**: Drag the right handle of any clip directly on the timeline to adjust its duration (`0.5s – 30s`)
+  - **Inline Transition Pills**: Click boundary tags (`CF` Crossfade / `DIP` Dip Black / `SLD` Slide / `CUT` Hard Cut) between clips to cycle transitions directly on the track
+  - **Drag-and-Drop Reorder** & **Reverse Order** button, plus **Fit Clips to Audio** and **Fit Trim to Clips**
+  - **Silent Timeline Playback**: Preview and sequence clips or multi-generator shows even before loading an audio file
 - **Non-Linear Editing Tools**:
-  - **Split at Playhead (`S`)** & **Ripple Delete (`Del` / `Backspace`)**
+  - **Split at Playhead (`S`)**, **Duplicate Clip (`Ctrl+D`)**, & **Ripple Delete (`Del` / `Backspace`)**
+  - **Set Trim In (`I`) / Out (`O`)** at playhead, **Step Frame (`-1f` / `+1f` via `,` / `.`)**, & **Jump Prev/Next Cut**
   - **Tap-Tempo Beat Markers (`M`)** & **Snap-to-Beats** scrubbing
-  - **Undo / Redo (`Ctrl+Z` / `Ctrl+Y`)** with 30-step history
+  - **Undo / Redo (`Ctrl+Z` / `Ctrl+Y`)** with 30-step history and a quick **`Keys`** shortcuts popover
   - **Transport Loop**: Toggle **Loop Trim Region** for seamless section previewing, plus **PNG Snapshot** to capture a clean full-resolution frame (excluding preview safe-zone guides)
 - **Per-Clip Keyframes, Audio & Transitions**:
   - Edit clip duration (`0.5s – 30s`), video trim-in offset, playback speed (`0.5× – 2.0×`), **Clip Audio Volume / Mute**, and **Music Auto-Ducking**
@@ -18,7 +24,7 @@
 - **Framing, Color LUTs & Optics**: Switch between **Zoom to Fill** and **Fit + Blur Backdrop**, toggle **Slow Ken Burns Drift**, apply **Color LUTs** (*Teal & Orange*, *Cyber Magenta*, *Vintage Gold*, *Deep Ocean*), filters (*Mono B&W*, *Warm Film*, *Cool Noir*, *Punch*), **Beat RGB Glitch**, blur, vignette, and contrast scrim.
 
 ### Procedural Visual Generators (10 WebGL2 Shaders + Custom GLSL Sandbox)
-Add generative scenes onto the timeline as standalone clips or composite them globally using **Backdrop**, **Screen**, or **Additive Glow** blending (with automatic 2D Canvas fallback on WebGL context loss):
+Add **any** of the 11 procedural generators onto the timeline from the **`+ Generator`** menu (or snapshot your active **Space & FX** scene onto the timeline), customize **per-clip shader overrides** (Symmetry, Speed, Scale, Complexity, Warp, Hue Shift, Glow) so each generator clip has its own look, or composite globally using **Backdrop**, **Screen**, or **Additive Glow** blending (with automatic 2D Canvas fallback on WebGL context loss):
 1. **Julia Fractal** — Morphing complex-plane fractal driven by bass energy
 2. **Fractal Kaleidoscope** — Symmetric IFS geometry with beat-reactive reflections
 3. **Mandelbrot Orbit** — Continuous logarithmic fractal zoom with harmonic color bands
@@ -65,7 +71,10 @@ Add generative scenes onto the timeline as standalone clips or composite them gl
 | :--- | :--- |
 | `Space` | Play / Pause |
 | `S` | Split clip at playhead |
+| `Ctrl+D` | Duplicate selected clip |
+| `I` / `O` | Set Trim In (`[`) / Trim Out (`]`) at playhead |
 | `M` | Drop manual beat marker at playhead |
+| `,` / `.` | Step `-1` / `+1` frame |
 | `Delete` / `Backspace` | Ripple delete selected clip |
 | `←` / `→` | Seek `-0.5s` / `+0.5s` (`Shift` for `±2.0s`) |
 | `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` | Undo / Redo |

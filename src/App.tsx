@@ -15,6 +15,7 @@ import {
   InspectorTab,
   Language,
   OverlayLayer,
+  SlideTransitionType,
   StudioConfig,
   SubtitleCue,
   TrimPresetId,
@@ -93,6 +94,7 @@ function cloneSnapshot(
     mediaItems: mediaItems.map((m) => ({
       ...m,
       transform: { ...(m.transform || DEFAULT_CLIP_TRANSFORM) },
+      generatorParams: m.generatorParams ? { ...m.generatorParams } : undefined,
     })),
     selectedClipId,
   };
@@ -122,6 +124,7 @@ export default function App() {
   const monoDataRef = useRef<Float32Array>(new Float32Array(0));
   const smoothStateRef = useRef(createSmoothState());
   const playStartCtxTimeRef = useRef(0);
+  const playStartPerfMsRef = useRef(0);
   const playStartAudioRef = useRef(0);
   const playSessionRef = useRef(0);
   const currentTimeRef = useRef(0);
@@ -325,9 +328,34 @@ export default function App() {
     [getAudioContext]
   );
 
+  const getEffectiveTimelineBounds = useCallback(
+    (cfg: StudioConfig, items: VisualMediaState[], aud: AudioTrackState | null) => {
+      if (aud) {
+        const start = cfg.trimStart;
+        const end = cfg.trimEnd;
+        return {
+          trimBase: start,
+          trimEnd: end,
+          clipDuration: Math.max(0.5, end - start),
+          maxSeek: aud.duration,
+        };
+      }
+      const rawClipsTotal = items.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+      const clipDuration = Math.max(4, rawClipsTotal > 0 ? rawClipsTotal : 12);
+      return {
+        trimBase: 0,
+        trimEnd: clipDuration,
+        clipDuration,
+        maxSeek: clipDuration,
+      };
+    },
+    []
+  );
+
   // Precompute deterministic beat-cut timestamps (merging manual beat markers when present)
   const beatCutTimestamps = useMemo(() => {
-    const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+    const bounds = getEffectiveTimelineBounds(config, mediaItems, audio);
+    const clipDuration = bounds.clipDuration;
     const autoCuts =
       audio && config.slideshowMode === 'beat_cut' && mediaItems.length > 1
         ? computeBeatCutTimestamps(
@@ -342,18 +370,14 @@ export default function App() {
     return resolveBeatCutPoints(
       autoCuts,
       config.manualBeatMarkers,
-      config.trimStart,
+      bounds.trimBase,
       clipDuration
     );
   }, [
     audio,
-    config.beatSensitivity,
-    config.manualBeatMarkers,
-    config.minBeatCutSec,
-    config.slideshowMode,
-    config.trimEnd,
-    config.trimStart,
-    mediaItems.length,
+    config,
+    getEffectiveTimelineBounds,
+    mediaItems,
   ]);
 
   const stopPlayback = useCallback(() => {
@@ -380,11 +404,11 @@ export default function App() {
     (localTime: number, shouldPlay: boolean) => {
       const items = mediaItemsRef.current;
       if (items.length === 0) return;
-      const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+      const bounds = getEffectiveTimelineBounds(config, items, audioRef.current);
       const slice = resolveActiveSlideshowSlice(
         items,
         localTime,
-        clipDuration,
+        bounds.clipDuration,
         config,
         beatCutTimestamps
       );
@@ -431,14 +455,29 @@ export default function App() {
         }
       });
     },
-    [beatCutTimestamps, config]
+    [beatCutTimestamps, config, getEffectiveTimelineBounds]
   );
 
   const startPlaybackAt = useCallback(
     async (startAbsSec: number) => {
       const currentAudio = audioRef.current;
-      if (!currentAudio) return;
       stopPlayback();
+
+      if (!currentAudio) {
+        const bounds = getEffectiveTimelineBounds(
+          configRef.current,
+          mediaItemsRef.current,
+          null
+        );
+        const clampedStart = Math.max(0, Math.min(bounds.clipDuration - 0.1, startAbsSec));
+        playStartPerfMsRef.current = performance.now();
+        playStartAudioRef.current = clampedStart;
+        currentTimeRef.current = clampedStart;
+        setCurrentTime(clampedStart);
+        setIsPlaying(true);
+        syncVideosAtLocalTime(clampedStart, true);
+        return;
+      }
 
       const session = playSessionRef.current;
       const ctx = getAudioContext();
@@ -510,6 +549,7 @@ export default function App() {
 
       sourceNodeRef.current = src;
       playStartCtxTimeRef.current = startCtxTime;
+      playStartPerfMsRef.current = performance.now();
       playStartAudioRef.current = clampedStart;
       currentTimeRef.current = clampedStart;
       setCurrentTime(clampedStart);
@@ -522,6 +562,7 @@ export default function App() {
       beatCutTimestamps,
       config,
       getAudioContext,
+      getEffectiveTimelineBounds,
       stopPlayback,
       syncVideosAtLocalTime,
     ]
@@ -792,6 +833,7 @@ export default function App() {
               transitionOut: sc.transitionOut,
               transitionDurationSec: sc.transitionDurationSec,
               generatorId: sc.generatorId || 'galaxy_spiral',
+              generatorParams: sc.generatorParams ? { ...sc.generatorParams } : undefined,
               transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
               clipAudioVolume: sc.clipAudioVolume ?? 0,
               clipAudioMuted: sc.clipAudioMuted ?? true,
@@ -996,11 +1038,25 @@ export default function App() {
   );
 
   const handleAddGeneratorScene = useCallback(
-    (effect: Exclude<GeneratorEffectId, 'none'>) => {
+    (effect: Exclude<GeneratorEffectId, 'none'>, snapshotGlobalParams = false) => {
       pushImmediateHistory();
       const id = createItemId();
       const meta = GENERATOR_EFFECTS.find((g) => g.id === effect);
       const fileName = meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : effect;
+      const cfg = configRef.current;
+      const generatorParams = snapshotGlobalParams
+        ? {
+            speed: cfg.generatorSpeed,
+            scale: cfg.generatorScale,
+            beatReact: cfg.generatorBeatReact,
+            complexity: cfg.generatorComplexity,
+            warp: cfg.generatorWarp,
+            symmetry: cfg.generatorSymmetry,
+            rotationSpeed: cfg.generatorRotationSpeed,
+            hueShift: cfg.generatorHueShift,
+            glow: cfg.generatorGlow,
+          }
+        : undefined;
       setMediaItems((prev) => [
         ...prev,
         {
@@ -1016,6 +1072,7 @@ export default function App() {
           transitionOut: 'crossfade',
           transitionDurationSec: 0.65,
           generatorId: effect,
+          generatorParams,
           transform: { ...DEFAULT_CLIP_TRANSFORM },
           clipAudioVolume: 0,
           clipAudioMuted: true,
@@ -1057,6 +1114,7 @@ export default function App() {
         ...orig,
         id: newId,
         transform: { ...(orig.transform || DEFAULT_CLIP_TRANSFORM) },
+        generatorParams: orig.generatorParams ? { ...orig.generatorParams } : undefined,
         videoElement: orig.kind === 'video' ? clonedVideo : undefined,
       };
 
@@ -1076,6 +1134,44 @@ export default function App() {
     setMediaItems((prev) => prev.map((item) => ({ ...item, durationSec: perClip })));
     setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
   }, [config.trimEnd, config.trimStart, pushImmediateHistory]);
+
+  const handleFitTrimToClips = useCallback(() => {
+    const aud = audioRef.current;
+    const items = mediaItemsRef.current;
+    if (!aud || items.length === 0) return;
+    pushImmediateHistory();
+    const totalClips = items.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+    setConfig((prev) => {
+      const nextEnd = Math.min(aud.duration, prev.trimStart + Math.max(0.5, totalClips));
+      return {
+        ...prev,
+        trimPreset: 'custom',
+        trimEnd: Number(nextEnd.toFixed(2)),
+        slideshowMode: 'custom_durations',
+      };
+    });
+  }, [pushImmediateHistory]);
+
+  const handleReverseClips = useCallback(() => {
+    if (mediaItemsRef.current.length < 2) return;
+    pushImmediateHistory();
+    setMediaItems((prev) => [...prev].reverse());
+  }, [pushImmediateHistory]);
+
+  const handleCycleClipTransition = useCallback(
+    (id: string) => {
+      const order: SlideTransitionType[] = ['crossfade', 'dip_black', 'slide', 'cut'];
+      pushImmediateHistory();
+      setMediaItems((prev) =>
+        prev.map((m) => {
+          if (m.id !== id) return m;
+          const idx = order.indexOf(m.transitionOut);
+          return { ...m, transitionOut: order[(idx + 1) % order.length] };
+        })
+      );
+    },
+    [pushImmediateHistory]
+  );
 
   const handleMoveVisual = useCallback(
     (index: number, direction: -1 | 1) => {
@@ -1111,9 +1207,10 @@ export default function App() {
 
   const handleSplitClipAtPlayhead = useCallback(() => {
     const items = mediaItemsRef.current;
-    if (items.length === 0 || !audioRef.current) return;
-    const clipDuration = Math.max(0.5, configRef.current.trimEnd - configRef.current.trimStart);
-    const localTime = Math.max(0, Math.min(clipDuration, currentTimeRef.current - configRef.current.trimStart));
+    if (items.length === 0) return;
+    const bounds = getEffectiveTimelineBounds(configRef.current, items, audioRef.current);
+    const clipDuration = bounds.clipDuration;
+    const localTime = Math.max(0, Math.min(clipDuration, currentTimeRef.current - bounds.trimBase));
     const segments = computeClipTimelineSegments(
       items,
       clipDuration,
@@ -1150,6 +1247,7 @@ export default function App() {
     const firstClip: VisualMediaState = {
       ...targetClip,
       durationSec: firstDur,
+      generatorParams: targetClip.generatorParams ? { ...targetClip.generatorParams } : undefined,
     };
     const secondClip: VisualMediaState = {
       ...targetClip,
@@ -1161,6 +1259,7 @@ export default function App() {
           : targetClip.sourceStartSec,
       videoElement: secondVideo,
       transform: { ...(targetClip.transform || DEFAULT_CLIP_TRANSFORM) },
+      generatorParams: targetClip.generatorParams ? { ...targetClip.generatorParams } : undefined,
     };
 
     const next = [...items];
@@ -1170,7 +1269,7 @@ export default function App() {
     if (configRef.current.slideshowMode !== 'custom_durations') {
       setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
     }
-  }, [beatCutTimestamps, pushImmediateHistory]);
+  }, [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]);
 
   const handleRemoveVisual = useCallback(
     (id: string) => {
@@ -1260,7 +1359,6 @@ export default function App() {
   }, [pushImmediateHistory]);
 
   const handleAddBeatMarker = useCallback(() => {
-    if (!audioRef.current) return;
     pushImmediateHistory();
     const markerSec = Number(currentTimeRef.current.toFixed(2));
     setConfig((prev) => {
@@ -1461,6 +1559,7 @@ export default function App() {
               transitionOut: sc.transitionOut || 'crossfade',
               transitionDurationSec: sc.transitionDurationSec || 0.65,
               generatorId: sc.generatorId || 'galaxy_spiral',
+              generatorParams: sc.generatorParams ? { ...sc.generatorParams } : undefined,
               transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
               clipAudioVolume: sc.clipAudioVolume ?? 0,
               clipAudioMuted: sc.clipAudioMuted ?? true,
@@ -1561,42 +1660,127 @@ export default function App() {
     startPlaybackAt(previewOffset);
   }, [config.fadeOutSec, config.trimEnd, config.trimStart, startPlaybackAt]);
 
+  const handleSetTrimStart = useCallback(
+    (sec: number) => {
+      if (!audioRef.current) return;
+      queueDebouncedHistory();
+      setConfig((prev) => {
+        const clamped = Math.max(0, Math.min(prev.trimEnd - 0.5, sec));
+        return {
+          ...prev,
+          trimPreset: 'custom',
+          trimStart: Number(clamped.toFixed(2)),
+        };
+      });
+    },
+    [queueDebouncedHistory]
+  );
+
+  const handleSetTrimEnd = useCallback(
+    (sec: number) => {
+      const aud = audioRef.current;
+      if (!aud) return;
+      queueDebouncedHistory();
+      setConfig((prev) => {
+        const clamped = Math.min(aud.duration, Math.max(prev.trimStart + 0.5, sec));
+        return {
+          ...prev,
+          trimPreset: 'custom',
+          trimEnd: Number(clamped.toFixed(2)),
+        };
+      });
+    },
+    [queueDebouncedHistory]
+  );
+
   const handleSeekAbsolute = useCallback(
     (sec: number) => {
-      const currentAudio = audioRef.current;
-      if (!currentAudio) return;
-      const clamped = Math.max(0, Math.min(currentAudio.duration, sec));
+      const bounds = getEffectiveTimelineBounds(
+        configRef.current,
+        mediaItemsRef.current,
+        audioRef.current
+      );
+      const clamped = Math.max(0, Math.min(bounds.maxSeek, sec));
       currentTimeRef.current = clamped;
       setCurrentTime(clamped);
       if (isPlaying) {
         startPlaybackAt(clamped);
       } else {
-        syncVideosAtLocalTime(Math.max(0, clamped - config.trimStart), false);
+        syncVideosAtLocalTime(Math.max(0, clamped - bounds.trimBase), false);
       }
     },
-    [config.trimStart, isPlaying, startPlaybackAt, syncVideosAtLocalTime]
+    [getEffectiveTimelineBounds, isPlaying, startPlaybackAt, syncVideosAtLocalTime]
   );
 
   const handleTogglePlay = useCallback(() => {
-    if (!audioRef.current) return;
     if (isPlaying) {
       stopPlayback();
     } else {
+      const bounds = getEffectiveTimelineBounds(
+        configRef.current,
+        mediaItemsRef.current,
+        audioRef.current
+      );
       const startAt =
-        currentTimeRef.current >= config.trimStart &&
-        currentTimeRef.current < config.trimEnd - 0.15
+        currentTimeRef.current >= bounds.trimBase &&
+        currentTimeRef.current < bounds.trimEnd - 0.15
           ? currentTimeRef.current
-          : config.trimStart;
+          : bounds.trimBase;
       startPlaybackAt(startAt);
     }
-  }, [config.trimEnd, config.trimStart, isPlaying, startPlaybackAt, stopPlayback]);
+  }, [getEffectiveTimelineBounds, isPlaying, startPlaybackAt, stopPlayback]);
 
   const handleResetToTrimStart = useCallback(() => {
     stopPlayback();
-    currentTimeRef.current = config.trimStart;
-    setCurrentTime(config.trimStart);
+    const bounds = getEffectiveTimelineBounds(
+      configRef.current,
+      mediaItemsRef.current,
+      audioRef.current
+    );
+    currentTimeRef.current = bounds.trimBase;
+    setCurrentTime(bounds.trimBase);
     syncVideosAtLocalTime(0, false);
-  }, [config.trimStart, stopPlayback, syncVideosAtLocalTime]);
+  }, [getEffectiveTimelineBounds, stopPlayback, syncVideosAtLocalTime]);
+
+  const handleStepFrame = useCallback(
+    (deltaFrames: -1 | 1) => {
+      if (isPlaying) stopPlayback();
+      const fps = Math.max(1, configRef.current.fps || 30);
+      handleSeekAbsolute(currentTimeRef.current + deltaFrames * (1 / fps));
+    },
+    [handleSeekAbsolute, isPlaying, stopPlayback]
+  );
+
+  const handleJumpCut = useCallback(
+    (direction: -1 | 1) => {
+      const bounds = getEffectiveTimelineBounds(
+        configRef.current,
+        mediaItemsRef.current,
+        audioRef.current
+      );
+      const segments = computeClipTimelineSegments(
+        mediaItemsRef.current,
+        bounds.clipDuration,
+        configRef.current,
+        beatCutTimestamps
+      );
+      const points = new Set<number>([bounds.trimBase, bounds.trimEnd]);
+      for (const seg of segments) {
+        points.add(Number((bounds.trimBase + seg.startSec).toFixed(3)));
+        points.add(Number((bounds.trimBase + seg.endSec).toFixed(3)));
+      }
+      const sorted = Array.from(points).sort((a, b) => a - b);
+      const cur = currentTimeRef.current;
+      if (direction < 0) {
+        const prev = [...sorted].reverse().find((p) => p < cur - 0.05);
+        handleSeekAbsolute(prev ?? bounds.trimBase);
+      } else {
+        const next = sorted.find((p) => p > cur + 0.05);
+        handleSeekAbsolute(next ?? bounds.trimEnd);
+      }
+    },
+    [beatCutTimestamps, getEffectiveTimelineBounds, handleSeekAbsolute]
+  );
 
   const drawOnce = useCallback(
     (dtSec = 1 / 60) => {
@@ -1625,9 +1809,10 @@ export default function App() {
         canvas.height = targetH;
       }
 
-      const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+      const bounds = getEffectiveTimelineBounds(config, mediaItems, audio);
+      const clipDuration = bounds.clipDuration;
       const absTime = currentTimeRef.current;
-      const localTime = Math.max(0, Math.min(clipDuration, absTime - config.trimStart));
+      const localTime = Math.max(0, Math.min(clipDuration, absTime - bounds.trimBase));
 
       const metrics = analyzeAudioAtTime(
         monoDataRef.current,
@@ -1654,7 +1839,7 @@ export default function App() {
         isExport: false,
       });
     },
-    [audio?.sampleRate, beatCutTimestamps, config, isPlaying, mediaItems]
+    [audio, beatCutTimestamps, config, getEffectiveTimelineBounds, isPlaying, mediaItems]
   );
 
   useEffect(() => {
@@ -1678,31 +1863,52 @@ export default function App() {
       const dtSec = Math.max(0.001, (now - prevRafNow) / 1000);
       prevRafNow = now;
 
-      const ctx = audioCtxRef.current;
-      const latency = ctx ? Math.max(0, ctx.outputLatency || 0) : 0;
-      const elapsedSec = ctx
-        ? Math.max(0, ctx.currentTime - latency - playStartCtxTimeRef.current)
-        : 0;
-      const absSec = playStartAudioRef.current + elapsedSec;
-      currentTimeRef.current = Math.min(config.trimEnd, absSec);
+      const bounds = getEffectiveTimelineBounds(
+        configRef.current,
+        mediaItemsRef.current,
+        audioRef.current
+      );
+      const hasAudioSource = Boolean(
+        audioRef.current && sourceNodeRef.current && audioCtxRef.current
+      );
+      let elapsedSec = 0;
+      if (hasAudioSource && audioCtxRef.current) {
+        const ctx = audioCtxRef.current;
+        const latency = Math.max(0, ctx.outputLatency || 0);
+        elapsedSec = Math.max(0, ctx.currentTime - latency - playStartCtxTimeRef.current);
+      } else {
+        elapsedSec = Math.max(0, (now - playStartPerfMsRef.current) / 1000);
+      }
 
-      const localTime = Math.max(0, currentTimeRef.current - config.trimStart);
+      const absSec = playStartAudioRef.current + elapsedSec;
+      currentTimeRef.current = Math.min(bounds.trimEnd, absSec);
+
+      const localTime = Math.max(0, currentTimeRef.current - bounds.trimBase);
       syncVideosAtLocalTime(localTime, true);
 
-      if (now - lastUiSync > 50) {
+      if (now - lastUiSync > 50 || absSec >= bounds.trimEnd) {
         setCurrentTime(currentTimeRef.current);
         lastUiSync = now;
       }
 
       drawOnce(dtSec);
-      if (absSec < config.trimEnd) {
+      if (absSec < bounds.trimEnd) {
         rafId = requestAnimationFrame(loop);
+      } else if (!hasAudioSource) {
+        if (isLoopingRef.current) {
+          startPlaybackAtRef.current(bounds.trimBase);
+        } else {
+          setIsPlaying(false);
+          currentTimeRef.current = bounds.trimBase;
+          setCurrentTime(bounds.trimBase);
+          syncVideosAtLocalTime(0, false);
+        }
       }
     };
 
     rafId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafId);
-  }, [config.trimEnd, config.trimStart, drawOnce, isPlaying, syncVideosAtLocalTime]);
+  }, [drawOnce, getEffectiveTimelineBounds, isPlaying, syncVideosAtLocalTime]);
 
   useEffect(() => {
     if (!isPlaying) {
@@ -1735,6 +1941,13 @@ export default function App() {
         handleRedo();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyD') {
+        e.preventDefault();
+        if (selectedClipIdRef.current) {
+          handleDuplicateClip(selectedClipIdRef.current);
+        }
+        return;
+      }
       if (e.code === 'Space') {
         e.preventDefault();
         handleTogglePlay();
@@ -1745,9 +1958,29 @@ export default function App() {
         handleSplitClipAtPlayhead();
         return;
       }
+      if (e.code === 'KeyI' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        handleSetTrimStart(currentTimeRef.current);
+        return;
+      }
+      if (e.code === 'KeyO' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        handleSetTrimEnd(currentTimeRef.current);
+        return;
+      }
       if (e.code === 'KeyM') {
         e.preventDefault();
         handleAddBeatMarker();
+        return;
+      }
+      if (e.code === 'Comma') {
+        e.preventDefault();
+        handleStepFrame(-1);
+        return;
+      }
+      if (e.code === 'Period') {
+        e.preventDefault();
+        handleStepFrame(1);
         return;
       }
       if (e.code === 'Delete' || e.code === 'Backspace') {
@@ -1769,10 +2002,14 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
     handleAddBeatMarker,
+    handleDuplicateClip,
     handleRedo,
     handleRippleDeleteSelected,
     handleSeekAbsolute,
+    handleSetTrimEnd,
+    handleSetTrimStart,
     handleSplitClipAtPlayhead,
+    handleStepFrame,
     handleTogglePlay,
     handleUndo,
   ]);
@@ -1902,9 +2139,10 @@ export default function App() {
     const ctx = snapCanvas.getContext('2d');
     if (!ctx) return;
 
-    const clipDuration = Math.max(0.5, cfg.trimEnd - cfg.trimStart);
+    const bounds = getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current);
+    const clipDuration = bounds.clipDuration;
     const absTime = currentTimeRef.current;
-    const localTime = Math.max(0, Math.min(clipDuration, absTime - cfg.trimStart));
+    const localTime = Math.max(0, Math.min(clipDuration, absTime - bounds.trimBase));
 
     const metrics = analyzeAudioAtTime(
       monoDataRef.current,
@@ -2025,9 +2263,11 @@ export default function App() {
           onUpdateClip={handleUpdateClip}
           onDuplicateClip={handleDuplicateClip}
           onMoveVisual={handleMoveVisual}
+          onReverseClips={handleReverseClips}
           onRemoveVisual={handleRemoveVisual}
           onClearVisuals={handleClearVisuals}
           onFitClipsToAudio={handleFitClipsToAudio}
+          onFitTrimToClips={handleFitTrimToClips}
           onUseEmbeddedCover={handleUseEmbeddedCover}
           onUpdateConfig={handleUpdateConfig}
           onSelectTrimPreset={handleSelectTrimPreset}
@@ -2062,12 +2302,21 @@ export default function App() {
           onSnapshotPng={handleSnapshotPng}
           onSeekAbsolute={handleSeekAbsolute}
           onSelectClip={setSelectedClipId}
+          onUpdateClip={handleUpdateClip}
+          onDuplicateClip={handleDuplicateClip}
           onReorderClip={handleReorderClip}
+          onReverseClips={handleReverseClips}
+          onCycleClipTransition={handleCycleClipTransition}
+          onAddGeneratorScene={handleAddGeneratorScene}
           onSplitClipAtPlayhead={handleSplitClipAtPlayhead}
           onRippleDeleteSelected={handleRippleDeleteSelected}
           onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
           onAddBeatMarker={handleAddBeatMarker}
           onClearBeatMarkers={handleClearBeatMarkers}
+          onSetTrimStart={handleSetTrimStart}
+          onSetTrimEnd={handleSetTrimEnd}
+          onStepFrame={handleStepFrame}
+          onJumpCut={handleJumpCut}
           onSelectBeatPreset={(preset: BeatPresetId) => handleUpdateConfig({ beatPreset: preset })}
           onToggleSafeZones={() => handleUpdateConfig({ showSafeZones: !config.showSafeZones })}
           onLoadDemoBeat={handleLoadDemoBeat}

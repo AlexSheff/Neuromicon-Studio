@@ -264,6 +264,7 @@ function drawSingleClipLayer(
       media.generatorId && media.generatorId !== 'none'
         ? media.generatorId
         : 'galaxy_spiral';
+    const gp = media.generatorParams;
     proceduralShaderEngine.renderToCanvas2D(ctx, {
       effect: genEffect,
       width,
@@ -272,15 +273,15 @@ function drawSingleClipLayer(
       metrics,
       accentHex: accentColor,
       secondaryHex: secondaryColor,
-      speed: config.generatorSpeed,
-      scale: config.generatorScale,
-      beatReact: config.generatorBeatReact,
-      complexity: config.generatorComplexity,
-      warp: config.generatorWarp,
-      symmetry: config.generatorSymmetry,
-      rotationSpeed: config.generatorRotationSpeed,
-      hueShiftDeg: config.generatorHueShift,
-      glow: config.generatorGlow,
+      speed: gp?.speed ?? config.generatorSpeed,
+      scale: gp?.scale ?? config.generatorScale,
+      beatReact: gp?.beatReact ?? config.generatorBeatReact,
+      complexity: gp?.complexity ?? config.generatorComplexity,
+      warp: gp?.warp ?? config.generatorWarp,
+      symmetry: gp?.symmetry ?? config.generatorSymmetry,
+      rotationSpeed: gp?.rotationSpeed ?? config.generatorRotationSpeed,
+      hueShiftDeg: gp?.hueShift ?? config.generatorHueShift,
+      glow: gp?.glow ?? config.generatorGlow,
     });
     ctx.restore();
     return;

@@ -1,4 +1,10 @@
-import { ClipTransform, SlideTransitionType, StudioConfig, VisualMediaState } from '../types/studio';
+import {
+  ClipGeneratorParams,
+  ClipTransform,
+  SlideTransitionType,
+  StudioConfig,
+  VisualMediaState,
+} from '../types/studio';
 import { DEFAULT_CLIP_TRANSFORM } from './presets';
 
 const DB_NAME = 'neuromicon_studio_db';
@@ -20,6 +26,7 @@ export interface SerializedClip {
   transitionOut: SlideTransitionType;
   transitionDurationSec: number;
   generatorId?: VisualMediaState['generatorId'];
+  generatorParams?: ClipGeneratorParams;
   transform: ClipTransform;
   clipAudioVolume: number;
   clipAudioMuted: boolean;
@@ -165,6 +172,7 @@ export function serializeStudioState(
       transitionOut: m.transitionOut,
       transitionDurationSec: m.transitionDurationSec,
       generatorId: m.generatorId,
+      generatorParams: m.generatorParams ? { ...m.generatorParams } : undefined,
       transform: m.transform || { ...DEFAULT_CLIP_TRANSFORM },
       clipAudioVolume: m.clipAudioVolume ?? 0,
       clipAudioMuted: m.clipAudioMuted ?? true,

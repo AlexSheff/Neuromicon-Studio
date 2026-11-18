@@ -95,6 +95,18 @@ export interface ClipTransform {
   easing: KeyframeEasing;
 }
 
+export interface ClipGeneratorParams {
+  speed?: number;
+  scale?: number;
+  beatReact?: number;
+  complexity?: number;
+  warp?: number;
+  symmetry?: 1 | 2 | 4 | 6 | 8;
+  rotationSpeed?: number;
+  hueShift?: number;
+  glow?: number;
+}
+
 export interface SubtitleCue {
   id: string;
   startSec: number;
@@ -163,6 +175,7 @@ export interface VisualMediaState {
   transitionOut: SlideTransitionType;
   transitionDurationSec: number;
   generatorId?: GeneratorEffectId;
+  generatorParams?: ClipGeneratorParams;
   // Stage 2: Transforms, keyframes & per-clip audio
   transform: ClipTransform;
   clipAudioVolume: number; // 0 .. 1.5
