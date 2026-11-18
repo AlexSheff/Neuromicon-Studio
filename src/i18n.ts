@@ -53,6 +53,8 @@ export const TRANSLATIONS = {
     minBeatHoldLabel: 'Мин. пауза между склейками (с)',
     transitionTypeLabel: 'Переход по умолчанию',
     transitionCrossfade: 'Кроссфейд',
+    transitionZoomCross: 'Зум-фейд',
+    transitionWipeRight: 'Шторка',
     transitionDipBlack: 'Через чёрный',
     transitionSlide: 'Сдвиг',
     transitionCut: 'Склейка',
@@ -290,6 +292,9 @@ export const TRANSLATIONS = {
     timelinePrevClip: 'Предыдущий клип',
     timelineNextClip: 'Следующий клип',
     inspectClipBtn: 'Настроить',
+    autoBeatSyncBtn: 'Авто по битам',
+    autoBeatSyncHint: 'Выровнять клипы и переходы по битам трека',
+    detectedBpmLabel: 'BPM',
 
     presets: {
       spectrum_bars: { name: 'Спектр-бары', desc: 'Эквалайзер с реакцией на бас и верх' },
@@ -357,6 +362,8 @@ export const TRANSLATIONS = {
     minBeatHoldLabel: 'Min Hold Between Cuts (s)',
     transitionTypeLabel: 'Default Transition',
     transitionCrossfade: 'Crossfade',
+    transitionZoomCross: 'Zoom Fade',
+    transitionWipeRight: 'Soft Wipe',
     transitionDipBlack: 'Dip Black',
     transitionSlide: 'Slide',
     transitionCut: 'Hard Cut',
@@ -585,6 +592,9 @@ export const TRANSLATIONS = {
     timelinePrevClip: 'Previous clip',
     timelineNextClip: 'Next clip',
     inspectClipBtn: 'Inspect',
+    autoBeatSyncBtn: 'Beat Sync',
+    autoBeatSyncHint: 'Auto-align all clip durations and transitions to track beats',
+    detectedBpmLabel: 'BPM',
 
     presets: {
       spectrum_bars: { name: 'Spectrum Bars', desc: 'Bass-and-treble reactive frequency bars' },

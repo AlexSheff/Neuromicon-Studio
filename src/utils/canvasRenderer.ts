@@ -26,6 +26,54 @@ export interface RenderFrameParams {
   isExport?: boolean;
 }
 
+let txCanvasA: HTMLCanvasElement | null = null;
+let txCanvasB: HTMLCanvasElement | null = null;
+const videoFrameCache = new WeakMap<HTMLVideoElement, HTMLCanvasElement>();
+
+function getOffscreenContext(
+  slot: 'a' | 'b',
+  width: number,
+  height: number
+): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+  let canvas = slot === 'a' ? txCanvasA : txCanvasB;
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    if (slot === 'a') txCanvasA = canvas;
+    else txCanvasB = canvas;
+  }
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const ctx = canvas.getContext('2d', { alpha: false });
+  if (!ctx) return null;
+  return { canvas, ctx };
+}
+
+function updateVideoFrameCache(video: HTMLVideoElement, srcW: number, srcH: number): void {
+  if (srcW <= 0 || srcH <= 0) return;
+  let cached = videoFrameCache.get(video);
+  if (!cached) {
+    cached = document.createElement('canvas');
+    videoFrameCache.set(video, cached);
+  }
+  const maxCacheW = 960;
+  const scale = srcW > maxCacheW ? maxCacheW / srcW : 1;
+  const cw = Math.max(2, Math.round(srcW * scale));
+  const ch = Math.max(2, Math.round(srcH * scale));
+  if (cached.width !== cw || cached.height !== ch) {
+    cached.width = cw;
+    cached.height = ch;
+  }
+  const cctx = cached.getContext('2d');
+  if (!cctx) return;
+  try {
+    cctx.drawImage(video, 0, 0, cw, ch);
+  } catch {
+    // ignore transient decode errors
+  }
+}
+
 function buildFilterString(
   filter: MediaColorFilter,
   brightness: number,
@@ -54,7 +102,7 @@ function buildFilterString(
 
 function drawCoverImage(
   ctx: CanvasRenderingContext2D,
-  source: HTMLImageElement | HTMLVideoElement,
+  source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement,
   srcW: number,
   srcH: number,
   dstW: number,
@@ -142,7 +190,7 @@ function applyFallbackColorAndBrightness(
 
 function drawFitBlurBackdrop(
   ctx: CanvasRenderingContext2D,
-  source: HTMLImageElement | HTMLVideoElement,
+  source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement,
   srcW: number,
   srcH: number,
   dstW: number,
@@ -230,7 +278,8 @@ function drawSingleClipLayer(
   accentColor: string,
   secondaryColor: string,
   offsetX = 0,
-  alpha = 1
+  alpha = 1,
+  isExport = false
 ) {
   const tr: ClipTransform = media.transform || DEFAULT_CLIP_TRANSFORM;
   const easedP = applyEasing(clipProgress, tr.easing);
@@ -287,20 +336,48 @@ function drawSingleClipLayer(
     return;
   }
 
-  const sourceEl = media.kind === 'video' ? media.videoElement : media.imageElement;
-  const mediaReady =
-    sourceEl &&
-    (media.kind === 'image'
-      ? (sourceEl as HTMLImageElement).complete && (sourceEl as HTMLImageElement).naturalWidth > 0
-      : (sourceEl as HTMLVideoElement).readyState >= 2);
+  let drawSource: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | undefined =
+    media.kind === 'video' ? media.videoElement : media.imageElement;
+  let drawSrcW = media.width;
+  let drawSrcH = media.height;
 
-  if (!sourceEl || !mediaReady || media.width <= 0 || media.height <= 0) {
+  if (media.kind === 'image') {
+    const imgEl = drawSource as HTMLImageElement | undefined;
+    if (!imgEl || !imgEl.complete || imgEl.naturalWidth <= 0 || drawSrcW <= 0 || drawSrcH <= 0) {
+      ctx.restore();
+      return;
+    }
+  } else {
+    const vidEl = drawSource as HTMLVideoElement | undefined;
+    if (!vidEl || drawSrcW <= 0 || drawSrcH <= 0) {
+      ctx.restore();
+      return;
+    }
+    const videoReady = vidEl.readyState >= 2 && (!vidEl.seeking || isExport);
+    if (videoReady) {
+      if (!isExport) {
+        updateVideoFrameCache(vidEl, drawSrcW, drawSrcH);
+      }
+    } else {
+      const cached = videoFrameCache.get(vidEl);
+      if (cached && cached.width > 0 && cached.height > 0) {
+        drawSource = cached;
+        drawSrcW = cached.width;
+        drawSrcH = cached.height;
+      } else if (vidEl.readyState < 2) {
+        ctx.restore();
+        return;
+      }
+    }
+  }
+
+  if (!drawSource) {
     ctx.restore();
     return;
   }
 
   if (config.framingMode === 'fit_blur') {
-    drawFitBlurBackdrop(ctx, sourceEl, media.width, media.height, width, height, pulseScale, config);
+    drawFitBlurBackdrop(ctx, drawSource, drawSrcW, drawSrcH, width, height, pulseScale, config);
   } else {
     const hasFilter = supportsCanvasFilter(ctx);
     if (hasFilter) {
@@ -308,9 +385,9 @@ function drawSingleClipLayer(
     }
     drawCoverImage(
       ctx,
-      sourceEl,
-      media.width,
-      media.height,
+      drawSource,
+      drawSrcW,
+      drawSrcH,
       width,
       height,
       totalScale,
@@ -330,6 +407,48 @@ function drawSingleClipLayer(
     }
   }
   ctx.restore();
+}
+
+function drawBackdropIntoContext(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  localTime: number,
+  metrics: AudioFrameMetrics,
+  config: StudioConfig,
+  mediaCount: number,
+  accentColor: string,
+  secondaryColor: string
+) {
+  ctx.fillStyle = '#090b10';
+  ctx.fillRect(0, 0, width, height);
+
+  if (
+    config.generatorEffect !== 'none' &&
+    (mediaCount === 0 || config.generatorBlend === 'backdrop')
+  ) {
+    ctx.save();
+    ctx.globalAlpha = mediaCount === 0 ? Math.max(0.45, config.generatorOpacity) : config.generatorOpacity;
+    proceduralShaderEngine.renderToCanvas2D(ctx, {
+      effect: config.generatorEffect,
+      width,
+      height,
+      time: localTime,
+      metrics,
+      accentHex: accentColor,
+      secondaryHex: secondaryColor,
+      speed: config.generatorSpeed,
+      scale: config.generatorScale,
+      beatReact: config.generatorBeatReact,
+      complexity: config.generatorComplexity,
+      warp: config.generatorWarp,
+      symmetry: config.generatorSymmetry,
+      rotationSpeed: config.generatorRotationSpeed,
+      hueShiftDeg: config.generatorHueShift,
+      glow: config.generatorGlow,
+    });
+    ctx.restore();
+  }
 }
 
 function drawLutAndGlitch(
@@ -490,35 +609,17 @@ export function renderStudioFrame(params: RenderFrameParams): void {
   ctx.clearRect(0, 0, width, height);
 
   // 1. Base Canvas & Generative Backdrop (when no media or generatorBlend === 'backdrop')
-  ctx.fillStyle = '#090b10';
-  ctx.fillRect(0, 0, width, height);
-
-  if (
-    config.generatorEffect !== 'none' &&
-    (mediaItems.length === 0 || config.generatorBlend === 'backdrop')
-  ) {
-    ctx.save();
-    ctx.globalAlpha = mediaItems.length === 0 ? Math.max(0.45, config.generatorOpacity) : config.generatorOpacity;
-    proceduralShaderEngine.renderToCanvas2D(ctx, {
-      effect: config.generatorEffect,
-      width,
-      height,
-      time: localTime,
-      metrics,
-      accentHex: scheme.accentColor,
-      secondaryHex: scheme.visualizerSecondary,
-      speed: config.generatorSpeed,
-      scale: config.generatorScale,
-      beatReact: config.generatorBeatReact,
-      complexity: config.generatorComplexity,
-      warp: config.generatorWarp,
-      symmetry: config.generatorSymmetry,
-      rotationSpeed: config.generatorRotationSpeed,
-      hueShiftDeg: config.generatorHueShift,
-      glow: config.generatorGlow,
-    });
-    ctx.restore();
-  }
+  drawBackdropIntoContext(
+    ctx,
+    width,
+    height,
+    localTime,
+    metrics,
+    config,
+    mediaItems.length,
+    scheme.accentColor,
+    scheme.visualizerSecondary
+  );
 
   const pulseScale =
     config.beatPreset === 'beat_zoom'
@@ -559,31 +660,21 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       config.kenBurnsMotion && !reducedMotion
         ? pulseScale * (1 + Math.min(0.08, slice.prevSlideLocalTime * 0.012))
         : pulseScale;
-    const activeClipDur = Math.max(0.4, activeMedia?.durationSec || clipDuration);
-    const prevClipDur = Math.max(0.4, prevMedia?.durationSec || clipDuration);
+    const activeClipDur = Math.max(0.2, slice.activeSegmentDuration || activeMedia?.durationSec || clipDuration);
+    const prevClipDur = Math.max(0.2, slice.prevSegmentDuration || prevMedia?.durationSec || clipDuration);
     const activeProgress = Math.min(1, slice.slideLocalTime / activeClipDur);
     const prevProgress = Math.min(1, slice.prevSlideLocalTime / prevClipDur);
 
-    if (prevMedia && p < 0.999) {
-      if (slice.transitionType === 'crossfade') {
-        drawSingleClipLayer(
-          ctx,
-          prevMedia,
-          width,
-          height,
-          mediaItems.length > 1 ? slideKenPrev : totalScale,
-          pulseScale,
-          panX,
-          panY,
-          config,
-          localTime,
-          prevProgress,
-          metrics,
-          scheme.accentColor,
-          scheme.visualizerSecondary,
-          0,
-          1 - p
-        );
+    if (prevMedia && activeMedia && p < 0.999 && slice.transitionType !== 'cut') {
+      if (slice.transitionType === 'crossfade' || slice.transitionType === 'zoom_cross') {
+        // Render incoming clip into main canvas cleanly at full alpha
+        const incomingZoom = slice.transitionType === 'zoom_cross' ? 1 + (1 - p) * 0.08 : 1;
+        if (incomingZoom !== 1) {
+          ctx.save();
+          ctx.translate(width * 0.5, height * 0.5);
+          ctx.scale(incomingZoom, incomingZoom);
+          ctx.translate(-width * 0.5, -height * 0.5);
+        }
         drawSingleClipLayer(
           ctx,
           activeMedia,
@@ -600,8 +691,127 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           scheme.accentColor,
           scheme.visualizerSecondary,
           0,
-          p
+          1,
+          Boolean(isExport)
         );
+        if (incomingZoom !== 1) ctx.restore();
+
+        // Render outgoing clip into isolated offscreen buffer at alpha=1, then composite (1-p)
+        // Guarantees (1-p)*Prev + p*Next with zero dark dip and zero filter+alpha artifacts
+        const bufA = getOffscreenContext('a', width, height);
+        if (bufA) {
+          drawBackdropIntoContext(
+            bufA.ctx,
+            width,
+            height,
+            localTime,
+            metrics,
+            config,
+            mediaItems.length,
+            scheme.accentColor,
+            scheme.visualizerSecondary
+          );
+          drawSingleClipLayer(
+            bufA.ctx,
+            prevMedia,
+            width,
+            height,
+            mediaItems.length > 1 ? slideKenPrev : totalScale,
+            pulseScale,
+            panX,
+            panY,
+            config,
+            localTime,
+            prevProgress,
+            metrics,
+            scheme.accentColor,
+            scheme.visualizerSecondary,
+            0,
+            1,
+            Boolean(isExport)
+          );
+          ctx.save();
+          ctx.filter = 'none';
+          ctx.globalAlpha = Math.max(0, Math.min(1, 1 - p));
+          if (slice.transitionType === 'zoom_cross') {
+            const outZoom = 1 + p * 0.14;
+            ctx.translate(width * 0.5, height * 0.5);
+            ctx.scale(outZoom, outZoom);
+            ctx.translate(-width * 0.5, -height * 0.5);
+          }
+          ctx.drawImage(bufA.canvas, 0, 0, width, height);
+          ctx.restore();
+        }
+      } else if (slice.transitionType === 'wipe_right') {
+        drawSingleClipLayer(
+          ctx,
+          prevMedia,
+          width,
+          height,
+          mediaItems.length > 1 ? slideKenPrev : totalScale,
+          pulseScale,
+          panX,
+          panY,
+          config,
+          localTime,
+          prevProgress,
+          metrics,
+          scheme.accentColor,
+          scheme.visualizerSecondary,
+          0,
+          1,
+          Boolean(isExport)
+        );
+        const bufA = getOffscreenContext('a', width, height);
+        if (bufA) {
+          drawBackdropIntoContext(
+            bufA.ctx,
+            width,
+            height,
+            localTime,
+            metrics,
+            config,
+            mediaItems.length,
+            scheme.accentColor,
+            scheme.visualizerSecondary
+          );
+          drawSingleClipLayer(
+            bufA.ctx,
+            activeMedia,
+            width,
+            height,
+            mediaItems.length > 1 ? slideKenActive : totalScale,
+            pulseScale,
+            panX,
+            panY,
+            config,
+            localTime,
+            activeProgress,
+            metrics,
+            scheme.accentColor,
+            scheme.visualizerSecondary,
+            0,
+            1,
+            Boolean(isExport)
+          );
+          const edgeX = width * p;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, 0, edgeX, height);
+          ctx.clip();
+          ctx.filter = 'none';
+          ctx.drawImage(bufA.canvas, 0, 0, width, height);
+          ctx.restore();
+
+          // Soft accent feather along the wipe boundary
+          const seamW = Math.max(8, minDim * 0.024);
+          const seamGrad = ctx.createLinearGradient(edgeX - seamW, 0, edgeX + seamW * 0.35, 0);
+          seamGrad.addColorStop(0, 'rgba(255,255,255,0)');
+          seamGrad.addColorStop(0.75, hexToRgba(scheme.accentColor, 0.24 * (1 - p * 0.4)));
+          seamGrad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = seamGrad;
+          ctx.fillRect(edgeX - seamW, 0, seamW * 1.35, height);
+        }
       } else if (slice.transitionType === 'dip_black') {
         if (p < 0.5) {
           drawSingleClipLayer(
@@ -620,8 +830,11 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             scheme.accentColor,
             scheme.visualizerSecondary,
             0,
-            1 - p * 2
+            1,
+            Boolean(isExport)
           );
+          ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(1, p * 2)})`;
+          ctx.fillRect(0, 0, width, height);
         } else {
           drawSingleClipLayer(
             ctx,
@@ -639,63 +852,82 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             scheme.accentColor,
             scheme.visualizerSecondary,
             0,
-            (p - 0.5) * 2
+            1,
+            Boolean(isExport)
           );
+          ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(1, (1 - p) * 2)})`;
+          ctx.fillRect(0, 0, width, height);
         }
       } else if (slice.transitionType === 'slide') {
-        drawSingleClipLayer(
-          ctx,
-          prevMedia,
-          width,
-          height,
-          slideKenPrev,
-          pulseScale,
-          panX,
-          panY,
-          config,
-          localTime,
-          prevProgress,
-          metrics,
-          scheme.accentColor,
-          scheme.visualizerSecondary,
-          -p * width,
-          1
-        );
-        drawSingleClipLayer(
-          ctx,
-          activeMedia,
-          width,
-          height,
-          slideKenActive,
-          pulseScale,
-          panX,
-          panY,
-          config,
-          localTime,
-          activeProgress,
-          metrics,
-          scheme.accentColor,
-          scheme.visualizerSecondary,
-          (1 - p) * width,
-          1
-        );
-      } else {
-        drawSingleClipLayer(
-          ctx,
-          activeMedia,
-          width,
-          height,
-          slideKenActive,
-          pulseScale,
-          panX,
-          panY,
-          config,
-          localTime,
-          activeProgress,
-          metrics,
-          scheme.accentColor,
-          scheme.visualizerSecondary
-        );
+        const bufA = getOffscreenContext('a', width, height);
+        const bufB = getOffscreenContext('b', width, height);
+        if (bufA && bufB) {
+          drawBackdropIntoContext(
+            bufA.ctx,
+            width,
+            height,
+            localTime,
+            metrics,
+            config,
+            mediaItems.length,
+            scheme.accentColor,
+            scheme.visualizerSecondary
+          );
+          drawSingleClipLayer(
+            bufA.ctx,
+            prevMedia,
+            width,
+            height,
+            slideKenPrev,
+            pulseScale,
+            panX,
+            panY,
+            config,
+            localTime,
+            prevProgress,
+            metrics,
+            scheme.accentColor,
+            scheme.visualizerSecondary,
+            0,
+            1,
+            Boolean(isExport)
+          );
+          drawBackdropIntoContext(
+            bufB.ctx,
+            width,
+            height,
+            localTime,
+            metrics,
+            config,
+            mediaItems.length,
+            scheme.accentColor,
+            scheme.visualizerSecondary
+          );
+          drawSingleClipLayer(
+            bufB.ctx,
+            activeMedia,
+            width,
+            height,
+            slideKenActive,
+            pulseScale,
+            panX,
+            panY,
+            config,
+            localTime,
+            activeProgress,
+            metrics,
+            scheme.accentColor,
+            scheme.visualizerSecondary,
+            0,
+            1,
+            Boolean(isExport)
+          );
+          ctx.save();
+          ctx.filter = 'none';
+          ctx.drawImage(bufA.canvas, -p * width, 0, width, height);
+          ctx.drawImage(bufB.canvas, (1 - p) * width, 0, width, height);
+          ctx.restore();
+        }
       }
     } else if (activeMedia) {
       drawSingleClipLayer(
@@ -712,7 +944,10 @@ export function renderStudioFrame(params: RenderFrameParams): void {
         activeProgress,
         metrics,
         scheme.accentColor,
-        scheme.visualizerSecondary
+        scheme.visualizerSecondary,
+        0,
+        1,
+        Boolean(isExport)
       );
     }
 

@@ -9,7 +9,8 @@
 - **Direct Timeline Manipulation**:
   - **Inline Clip & Duration Bar**: Select any clip (`<` / dropdown / `>`), edit exact duration (`-0.5s` / numeric input / `+0.5s` or `2s / 4s / 6s / 10s` chips), and jump to its **Clip** inspector directly from the bottom timeline dock
   - **Edge-Trim Resize**: Drag the right handle of any clip directly on the timeline to adjust its duration (`0.5s – 30s`)
-  - **Inline Transition Pills**: Click boundary tags (`CF` Crossfade / `DIP` Dip Black / `SLD` Slide / `CUT` Hard Cut) between clips to cycle transitions directly on the track
+  - **Auto Beat-Sync & BPM Grid**: Estimate track BPM via onset autocorrelation and align all clip durations and outgoing transitions directly to musical beats in one click
+  - **Inline Transition Pills**: Click boundary tags (`CF` Crossfade / `ZM` Zoom Fade / `WP` Soft Wipe / `DIP` Dip Black / `SLD` Slide / `CUT` Hard Cut) between clips to cycle transitions directly on the track
   - **Drag-and-Drop Reorder** & **Reverse Order** button, plus **Fit Clips to Audio** and **Fit Trim to Clips**
   - **Silent Timeline Playback**: Preview and sequence clips or multi-generator shows even before loading an audio file
 - **Non-Linear Editing Tools**:
@@ -21,7 +22,7 @@
 - **Per-Clip Keyframes, Audio & Transitions**:
   - Edit clip duration (`0.5s – 30s`), video trim-in offset, playback speed (`0.5× – 2.0×`), **Clip Audio Volume / Mute**, and **Music Auto-Ducking**
   - **Transform & Keyframes**: Animate start/end scale, X/Y offset, rotation (`-45° .. +45°`), opacity, and motion easing (`Linear`, `Ease In-Out`, `Ease Out`) with one-click reset
-  - **Sequencing & Transitions**: **Per-Clip**, **Even Split**, **Interval**, or **Beat Cut** with **Crossfade**, **Dip Black**, **Slide**, or **Hard Cut**
+  - **Sequencing & Transitions**: **Per-Clip**, **Even Split**, **Interval**, or **Beat Cut** with isolated offscreen compositing (**Crossfade**, **Zoom Fade**, **Soft Wipe**, **Dip Black**, **Slide**, or **Hard Cut**)
 - **Framing, Color LUTs & Optics**: Switch between **Zoom to Fill** and **Fit + Blur Backdrop**, toggle **Slow Ken Burns Drift**, apply **Color LUTs** (*Teal & Orange*, *Cyber Magenta*, *Vintage Gold*, *Deep Ocean*), filters (*Mono B&W*, *Warm Film*, *Cool Noir*, *Punch*), **Beat RGB Glitch**, blur, vignette, and contrast scrim.
 
 ### Procedural Visual Generators (10 WebGL2 Shaders + Custom GLSL Sandbox)

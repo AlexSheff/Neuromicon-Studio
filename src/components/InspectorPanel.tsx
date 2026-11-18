@@ -816,6 +816,8 @@ export function InspectorPanel({
                         className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-[11px] text-gray-100"
                       >
                         <option value="crossfade">{t.transitionCrossfade}</option>
+                        <option value="zoom_cross">{t.transitionZoomCross}</option>
+                        <option value="wipe_right">{t.transitionWipeRight}</option>
                         <option value="dip_black">{t.transitionDipBlack}</option>
                         <option value="slide">{t.transitionSlide}</option>
                         <option value="cut">{t.transitionCut}</option>

@@ -60,6 +60,8 @@ interface MediaInputPanelProps {
   onClearVisuals: () => void;
   onFitClipsToAudio: () => void;
   onFitTrimToClips: () => void;
+  onAutoBeatSyncClips: () => void;
+  trackBpm: number;
   onUseEmbeddedCover: () => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
   onSelectTrimPreset: (preset: TrimPresetId) => void;
@@ -102,6 +104,8 @@ export function MediaInputPanel({
   onClearVisuals,
   onFitClipsToAudio,
   onFitTrimToClips,
+  onAutoBeatSyncClips,
+  trackBpm,
   onUseEmbeddedCover,
   onUpdateConfig,
   onSelectTrimPreset,
@@ -811,6 +815,20 @@ export function MediaInputPanel({
                     <>
                       <button
                         type="button"
+                        onClick={onAutoBeatSyncClips}
+                        title={t.autoBeatSyncHint}
+                        className="w-full py-1.5 px-2.5 rounded border border-amber-500/60 bg-amber-500/15 hover:bg-amber-500/25 text-[11px] font-semibold text-amber-300 cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>{t.autoBeatSyncBtn}</span>
+                        {trackBpm > 0 && (
+                          <span className="font-mono text-[10px] px-1 py-0.2 rounded bg-[#0B0D11]/80 text-amber-200">
+                            {trackBpm} {t.detectedBpmLabel}
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
                         onClick={onFitClipsToAudio}
                         className="flex-1 py-1 px-2 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-[11px] font-medium text-amber-400 cursor-pointer whitespace-nowrap"
                       >
@@ -910,6 +928,8 @@ export function MediaInputPanel({
                       {(
                         [
                           { id: 'crossfade', label: t.transitionCrossfade },
+                          { id: 'zoom_cross', label: t.transitionZoomCross },
+                          { id: 'wipe_right', label: t.transitionWipeRight },
                           { id: 'dip_black', label: t.transitionDipBlack },
                           { id: 'slide', label: t.transitionSlide },
                           { id: 'cut', label: t.transitionCut },

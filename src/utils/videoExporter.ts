@@ -221,7 +221,8 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 
 async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Promise<void> {
   const dur = video.duration || 1;
-  const wrapped = Math.max(0, targetSec % dur);
+  const maxSafe = Math.max(0, dur - 0.04);
+  const wrapped = Math.min(maxSafe, Math.max(0, targetSec % dur));
   if (!video.seeking && Math.abs(video.currentTime - wrapped) < 0.004) return;
 
   await new Promise<void>((resolve) => {

@@ -63,7 +63,13 @@ export type MediaFramingMode = 'cover' | 'fit_blur';
 
 export type SlideshowMode = 'custom_durations' | 'even' | 'fixed' | 'beat_cut';
 
-export type SlideTransitionType = 'crossfade' | 'dip_black' | 'slide' | 'cut';
+export type SlideTransitionType =
+  | 'crossfade'
+  | 'zoom_cross'
+  | 'wipe_right'
+  | 'dip_black'
+  | 'slide'
+  | 'cut';
 
 export type MediaColorFilter = 'none' | 'bw' | 'warm_film' | 'cool_noir' | 'high_contrast';
 

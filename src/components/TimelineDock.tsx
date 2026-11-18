@@ -10,6 +10,7 @@ import {
   Plus,
   Scissors,
   SlidersHorizontal,
+  Sparkles,
   Trash2,
   ZoomIn,
 } from 'lucide-react';
@@ -52,6 +53,9 @@ interface TimelineDockProps {
   onToggleSnapToBeats: () => void;
   onAddBeatMarker: () => void;
   onClearBeatMarkers: () => void;
+  onAutoBeatSyncClips: () => void;
+  trackBpm: number;
+  beatGridPoints: number[];
   onSetTrimStart: (sec: number) => void;
   onSetTrimEnd: (sec: number) => void;
 }
@@ -71,6 +75,10 @@ function transitionShortTag(tr: SlideTransitionType): string {
   switch (tr) {
     case 'crossfade':
       return 'CF';
+    case 'zoom_cross':
+      return 'ZM';
+    case 'wipe_right':
+      return 'WP';
     case 'dip_black':
       return 'DIP';
     case 'slide':
@@ -103,6 +111,9 @@ export function TimelineDock({
   onToggleSnapToBeats,
   onAddBeatMarker,
   onClearBeatMarkers,
+  onAutoBeatSyncClips,
+  trackBpm,
+  beatGridPoints,
   onSetTrimStart,
   onSetTrimEnd,
 }: TimelineDockProps) {
@@ -153,8 +164,11 @@ export function TimelineDock({
 
   const absBeatPoints = useMemo(() => {
     const autoAbs = beatCutTimestamps.map((b) => trimBase + b);
-    return Array.from(new Set([...autoAbs, ...config.manualBeatMarkers])).sort((a, b) => a - b);
-  }, [beatCutTimestamps, config.manualBeatMarkers, trimBase]);
+    const gridAbs = beatGridPoints.map((b) => trimBase + b);
+    return Array.from(new Set([...autoAbs, ...gridAbs, ...config.manualBeatMarkers])).sort(
+      (a, b) => a - b
+    );
+  }, [beatCutTimestamps, beatGridPoints, config.manualBeatMarkers, trimBase]);
 
   const rulerTicks = useMemo(() => {
     const visibleSec = clipDuration / timelineZoom;
@@ -540,6 +554,24 @@ export function TimelineDock({
             </>
           )}
 
+          {audio && (
+            <button
+              type="button"
+              onClick={onAutoBeatSyncClips}
+              disabled={mediaItems.length === 0}
+              title={t.autoBeatSyncHint}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-amber-500/55 bg-amber-500/15 hover:bg-amber-500/25 disabled:opacity-35 text-[11px] font-semibold text-amber-300 cursor-pointer transition-colors"
+            >
+              <Sparkles className="w-3 h-3" aria-hidden="true" />
+              <span>{t.autoBeatSyncBtn}</span>
+              {trackBpm > 0 && (
+                <span className="font-mono text-[10px] text-amber-200/90 hidden xl:inline">
+                  · {trackBpm}
+                </span>
+              )}
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onToggleSnapToBeats}
@@ -901,12 +933,22 @@ export function TimelineDock({
                     ))}
               </div>
 
+              {beatGridPoints
+                .filter((b) => b > 0.05 && b < clipDuration)
+                .map((b, idx) => (
+                  <div
+                    key={`grid-${idx}-${b}`}
+                    className="absolute bottom-0 h-1.5 w-px bg-gray-400/35 pointer-events-none"
+                    style={{ left: `${(b / clipDuration) * 100}%` }}
+                  />
+                ))}
+
               {beatCutTimestamps
                 .filter((b) => b > 0.05 && b < clipDuration)
                 .map((b, idx) => (
                   <div
                     key={`auto-${idx}-${b}`}
-                    className="absolute top-0 h-2 w-px bg-amber-400/65 pointer-events-none"
+                    className="absolute top-0 h-2 w-px bg-amber-400/75 pointer-events-none"
                     style={{ left: `${(b / clipDuration) * 100}%` }}
                   />
                 ))}

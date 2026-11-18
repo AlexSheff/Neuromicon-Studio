@@ -366,6 +366,202 @@ export function computeClipTimelineSegments(
   return segments;
 }
 
+export interface TrackBeatGrid {
+  bpm: number;
+  beatSec: number;
+  beats: number[]; // relative to trimStart (0..clipDuration)
+}
+
+/**
+ * Estimates track tempo (BPM) from low-frequency + RMS onset flux and constructs
+ * a phase-aligned musical beat grid across [trimStart .. trimEnd].
+ */
+export function detectTrackBpmAndBeats(
+  mono: Float32Array,
+  sampleRate: number,
+  trimStart: number,
+  trimEnd: number,
+  sensitivity: number
+): TrackBeatGrid {
+  const clipDuration = Math.max(0.5, trimEnd - trimStart);
+  if (mono.length === 0) {
+    return { bpm: 0, beatSec: 0.5, beats: [] };
+  }
+
+  const hopSec = 0.04; // 25 Hz analysis grid
+  const sampleWin = Math.max(256, Math.floor(sampleRate * hopSec));
+  const startIdx = Math.max(0, Math.floor(trimStart * sampleRate));
+  const totalSteps = Math.max(4, Math.floor(clipDuration / hopSec));
+  const onsets = new Float32Array(totalSteps);
+
+  let prevLowEnergy = 0;
+  let maxOnset = 0;
+  for (let s = 0; s < totalSteps; s++) {
+    const base = startIdx + s * sampleWin;
+    if (base >= mono.length) break;
+    const end = Math.min(mono.length, base + sampleWin);
+    let sq = 0;
+    let lowAcc = 0;
+    let lp = 0;
+    const count = Math.max(1, end - base);
+    for (let i = base; i < end; i++) {
+      const v = mono[i];
+      sq += v * v;
+      lp = lp * 0.88 + v * 0.12;
+      lowAcc += lp * lp;
+    }
+    const energy = (Math.sqrt(lowAcc / count) * 0.72 + Math.sqrt(sq / count) * 0.28) * sensitivity;
+    const flux = Math.max(0, energy - prevLowEnergy * 0.92);
+    prevLowEnergy = energy;
+    onsets[s] = flux;
+    if (flux > maxOnset) maxOnset = flux;
+  }
+
+  if (maxOnset < 0.002) {
+    return { bpm: 0, beatSec: 0.5, beats: [] };
+  }
+
+  // Autocorrelation over musical BPM range (68 .. 176 BPM)
+  const minLag = Math.max(4, Math.round(60 / 176 / hopSec));
+  const maxLag = Math.min(Math.floor(totalSteps / 2), Math.round(60 / 68 / hopSec));
+  let bestLag = Math.round(0.5 / hopSec); // 120 BPM default if short
+  let bestScore = -1;
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let sum = 0;
+    for (let i = 0; i < totalSteps - lag; i++) {
+      sum += onsets[i] * onsets[i + lag];
+    }
+    // Slight preference toward standard 95-138 BPM window to avoid half/double-time drift
+    const candBpm = 60 / (lag * hopSec);
+    const weight = candBpm >= 92 && candBpm <= 142 ? 1.12 : 1.0;
+    const score = (sum / Math.max(1, totalSteps - lag)) * weight;
+    if (score > bestScore) {
+      bestScore = score;
+      bestLag = lag;
+    }
+  }
+
+  const rawBpm = 60 / (bestLag * hopSec);
+  const bpm = Math.max(60, Math.min(185, Math.round(rawBpm)));
+  const beatSec = 60 / bpm;
+
+  // Find strongest initial phase offset within the first 2 beats
+  const phaseSteps = Math.max(1, Math.min(totalSteps, Math.round((beatSec * 1.5) / hopSec)));
+  let bestPhase = 0;
+  let bestPhaseScore = -1;
+  for (let ph = 0; ph < phaseSteps; ph++) {
+    let score = 0;
+    let hits = 0;
+    for (let t = ph * hopSec; t < clipDuration; t += beatSec) {
+      const idx = Math.min(totalSteps - 1, Math.round(t / hopSec));
+      const localPeak = Math.max(
+        onsets[Math.max(0, idx - 1)],
+        onsets[idx],
+        onsets[Math.min(totalSteps - 1, idx + 1)]
+      );
+      score += localPeak;
+      hits++;
+    }
+    const avgScore = hits > 0 ? score / hits : 0;
+    if (avgScore > bestPhaseScore) {
+      bestPhaseScore = avgScore;
+      bestPhase = ph * hopSec;
+    }
+  }
+
+  const beats: number[] = [];
+  // Refine each steady beat slightly toward local onset peak within ±60ms
+  for (let t = bestPhase; t < clipDuration - 0.05; t += beatSec) {
+    const centerIdx = Math.round(t / hopSec);
+    let peakIdx = centerIdx;
+    let peakVal = onsets[Math.max(0, Math.min(totalSteps - 1, centerIdx))] || 0;
+    for (let d = -1; d <= 1; d++) {
+      const idx = Math.max(0, Math.min(totalSteps - 1, centerIdx + d));
+      if (onsets[idx] > peakVal * 1.15) {
+        peakVal = onsets[idx];
+        peakIdx = idx;
+      }
+    }
+    const snapped = Number((peakIdx * hopSec).toFixed(3));
+    if (beats.length === 0 || snapped - beats[beats.length - 1] > beatSec * 0.45) {
+      beats.push(snapped);
+    }
+  }
+
+  return { bpm, beatSec, beats };
+}
+
+export interface BeatAlignedClipPlan {
+  durationSec: number;
+  transitionDurationSec: number;
+}
+
+/**
+ * Aligns every clip's duration and outgoing transition length to musical beats across [0..clipDuration].
+ */
+export function computeAutoBeatAlignedClips(
+  clipCount: number,
+  clipDuration: number,
+  beatGrid: TrackBeatGrid,
+  manualMarkersAbs: number[],
+  trimStart: number
+): BeatAlignedClipPlan[] {
+  if (clipCount <= 0) return [];
+  const beatSec = beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
+
+  // Prefer manual markers if >=2 exist inside trim range, otherwise use detected beat grid
+  const manualRel = manualMarkersAbs
+    .map((m) => Number((m - trimStart).toFixed(3)))
+    .filter((t) => t > 0.15 && t < clipDuration - 0.15)
+    .sort((a, b) => a - b);
+
+  const grid =
+    manualRel.length >= clipCount
+      ? [0, ...manualRel]
+      : beatGrid.beats.length >= 2
+        ? [0, ...beatGrid.beats.filter((b) => b > 0.25 && b < clipDuration - 0.2)]
+        : [0];
+
+  const uniqueGrid = Array.from(new Set(grid)).sort((a, b) => a - b);
+
+  if (uniqueGrid.length > clipCount) {
+    // Pick evenly spaced beat indices across the musical grid so every cut hits a beat
+    const step = (uniqueGrid.length - 1) / clipCount;
+    const cutPoints: number[] = [0];
+    for (let i = 1; i < clipCount; i++) {
+      const idx = Math.min(uniqueGrid.length - 1, Math.max(i, Math.round(i * step)));
+      const candidate = uniqueGrid[idx];
+      const prev = cutPoints[cutPoints.length - 1];
+      cutPoints.push(candidate > prev + 0.45 ? candidate : Number((prev + Math.max(0.5, beatSec)).toFixed(2)));
+    }
+    cutPoints.push(clipDuration);
+
+    return Array.from({ length: clipCount }, (_, i) => {
+      const rawDur = Math.max(0.5, Math.min(30, cutPoints[i + 1] - cutPoints[i]));
+      const dur = Number(rawDur.toFixed(2));
+      const idealTrans = Math.max(0.18, Math.min(0.75, beatSec * 0.45, dur * 0.32));
+      return {
+        durationSec: dur,
+        transitionDurationSec: Number(idealTrans.toFixed(2)),
+      };
+    });
+  }
+
+  // Fallback: quantize target duration per clip to integer number of beats
+  const rawPerClip = clipDuration / clipCount;
+  const beatsPerClip = Math.max(1, Math.round(rawPerClip / beatSec));
+  const quantizedDur = Math.max(0.5, Math.min(30, Number((beatsPerClip * beatSec).toFixed(2))));
+  const transDur = Number(
+    Math.max(0.18, Math.min(0.75, beatSec * 0.45, quantizedDur * 0.32)).toFixed(2)
+  );
+
+  return Array.from({ length: clipCount }, () => ({
+    durationSec: quantizedDur,
+    transitionDurationSec: transDur,
+  }));
+}
+
 export interface ActiveSlideshowSlice {
   activeIndex: number;
   prevIndex: number | null;
@@ -373,6 +569,8 @@ export interface ActiveSlideshowSlice {
   transitionType: SlideTransitionType;
   slideLocalTime: number;
   prevSlideLocalTime: number;
+  activeSegmentDuration: number;
+  prevSegmentDuration: number;
 }
 
 export function resolveActiveSlideshowSlice(
@@ -391,6 +589,8 @@ export function resolveActiveSlideshowSlice(
       transitionType: 'cut',
       slideLocalTime: localTime,
       prevSlideLocalTime: 0,
+      activeSegmentDuration: clipDuration,
+      prevSegmentDuration: clipDuration,
     };
   }
 
@@ -403,6 +603,8 @@ export function resolveActiveSlideshowSlice(
       transitionType: 'cut',
       slideLocalTime: localTime,
       prevSlideLocalTime: 0,
+      activeSegmentDuration: clipDuration,
+      prevSegmentDuration: clipDuration,
     };
   }
 
@@ -416,6 +618,8 @@ export function resolveActiveSlideshowSlice(
 
   const currentSeg = segments[segPos];
   const prevSeg = segPos > 0 ? segments[segPos - 1] : null;
+  const currentSegLen = Math.max(0.1, currentSeg.endSec - currentSeg.startSec);
+  const prevSegLen = prevSeg ? Math.max(0.1, prevSeg.endSec - prevSeg.startSec) : currentSegLen;
   const timeInSlide = Math.max(0, localTime - currentSeg.startSec);
   const prevTimeInSlide = prevSeg ? Math.max(0, localTime - prevSeg.startSec) : 0;
 
@@ -427,6 +631,8 @@ export function resolveActiveSlideshowSlice(
       transitionType: 'cut',
       slideLocalTime: timeInSlide,
       prevSlideLocalTime: 0,
+      activeSegmentDuration: currentSegLen,
+      prevSegmentDuration: currentSegLen,
     };
   }
 
@@ -435,7 +641,7 @@ export function resolveActiveSlideshowSlice(
     config.slideshowMode === 'custom_durations' && prevClip
       ? prevClip.transitionOut
       : config.transitionType;
-  const tDur =
+  const requestedTDur =
     tType === 'cut'
       ? 0
       : Math.max(
@@ -445,6 +651,11 @@ export function resolveActiveSlideshowSlice(
             : config.transitionDurationSec
         );
 
+  // Strictly clamp transition duration within both adjacent segment lengths so transitions
+  // always finish cleanly before the next cut boundary (prevents abrupt mid-fade pops).
+  const maxAllowedTDur = Math.min(currentSegLen * 0.85, prevSegLen * 0.85);
+  const tDur = tType === 'cut' || maxAllowedTDur < 0.05 ? 0 : Math.min(requestedTDur, maxAllowedTDur);
+
   if (tDur <= 0 || timeInSlide >= tDur) {
     return {
       activeIndex: currentSeg.clipIndex,
@@ -453,11 +664,14 @@ export function resolveActiveSlideshowSlice(
       transitionType: tType,
       slideLocalTime: timeInSlide,
       prevSlideLocalTime: prevTimeInSlide,
+      activeSegmentDuration: currentSegLen,
+      prevSegmentDuration: prevSegLen,
     };
   }
 
   const rawP = Math.max(0, Math.min(1, timeInSlide / tDur));
-  const easedP = rawP < 0.5 ? 4 * rawP * rawP * rawP : 1 - Math.pow(-2 * rawP + 2, 3) / 2;
+  // Quintic smootherstep for ultra-smooth onset and finish with zero velocity kink
+  const easedP = rawP * rawP * rawP * (rawP * (rawP * 6 - 15) + 10);
 
   return {
     activeIndex: currentSeg.clipIndex,
@@ -466,6 +680,8 @@ export function resolveActiveSlideshowSlice(
     transitionType: tType,
     slideLocalTime: timeInSlide,
     prevSlideLocalTime: prevTimeInSlide,
+    activeSegmentDuration: currentSegLen,
+    prevSegmentDuration: prevSegLen,
   };
 }
 

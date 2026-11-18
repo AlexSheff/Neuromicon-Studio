@@ -25,11 +25,13 @@ import {
 import {
   analyzeAudioAtTime,
   buildMonoAudioData,
+  computeAutoBeatAlignedClips,
   computeBeatCutTimestamps,
   computeClipTimelineSegments,
   computeFadeEnvelope,
   computeWaveformPeaks,
   createSmoothState,
+  detectTrackBpmAndBeats,
   generateDemoAudioBuffer,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
@@ -381,6 +383,19 @@ export default function App() {
     mediaItems,
   ]);
 
+  const trackBeatGrid = useMemo(() => {
+    if (!audio || monoDataRef.current.length === 0) {
+      return { bpm: 0, beatSec: 0.5, beats: [] as number[] };
+    }
+    return detectTrackBpmAndBeats(
+      monoDataRef.current,
+      audio.sampleRate,
+      config.trimStart,
+      config.trimEnd,
+      config.beatSensitivity
+    );
+  }, [audio, config.beatSensitivity, config.trimEnd, config.trimStart]);
+
   const stopPlayback = useCallback(() => {
     playSessionRef.current++;
     if (sourceNodeRef.current) {
@@ -398,6 +413,7 @@ export default function App() {
         item.videoElement.muted = true;
       }
     }
+    smoothStateRef.current = createSmoothState();
     setIsPlaying(false);
   }, []);
 
@@ -406,6 +422,12 @@ export default function App() {
       const items = mediaItemsRef.current;
       if (items.length === 0) return;
       const bounds = getEffectiveTimelineBounds(config, items, audioRef.current);
+      const segments = computeClipTimelineSegments(
+        items,
+        bounds.clipDuration,
+        config,
+        beatCutTimestamps
+      );
       const slice = resolveActiveSlideshowSlice(
         items,
         localTime,
@@ -420,14 +442,33 @@ export default function App() {
         activeIds.add(items[slice.prevIndex].id);
       }
 
+      // Pre-warm the next upcoming video clip up to 0.85s before its boundary so it never flashes black on cut
+      let prewarmClipId: string | null = null;
+      let prewarmTargetSec = 0;
+      const currentSegIdx = segments.findIndex((s) => localTime < s.endSec);
+      const nextSeg =
+        currentSegIdx >= 0 && currentSegIdx + 1 < segments.length
+          ? segments[currentSegIdx + 1]
+          : null;
+      if (nextSeg && nextSeg.startSec - localTime <= 0.85 && nextSeg.startSec - localTime > 0) {
+        const upcoming = items[nextSeg.clipIndex];
+        if (upcoming && upcoming.kind === 'video' && !activeIds.has(upcoming.id)) {
+          prewarmClipId = upcoming.id;
+          const vDur = upcoming.videoDuration || 1;
+          const maxSafe = Math.max(0, vDur - 0.04);
+          prewarmTargetSec = Math.min(maxSafe, Math.max(0, upcoming.sourceStartSec % vDur));
+        }
+      }
+
       items.forEach((item) => {
         if (item.kind !== 'video' || !item.videoElement) return;
         const v = item.videoElement;
         const vDur = item.videoDuration || 1;
+        const maxSafe = Math.max(0, vDur - 0.04);
         const rate = item.playbackRate || 1;
         const isActive = item.id === activeItem?.id;
         const clipOffset = isActive ? slice.slideLocalTime : slice.prevSlideLocalTime;
-        const targetSec = (item.sourceStartSec + clipOffset * rate) % vDur;
+        const targetSec = Math.min(maxSafe, Math.max(0, (item.sourceStartSec + clipOffset * rate) % vDur));
 
         if (Math.abs(v.playbackRate - rate) > 0.01) {
           v.playbackRate = rate;
@@ -440,15 +481,26 @@ export default function App() {
             if (v.paused) {
               v.currentTime = targetSec;
               v.play().catch(() => {});
-            } else if (Math.abs(v.currentTime - targetSec) > 0.35) {
-              v.currentTime = targetSec;
+            } else {
+              const rawDiff = Math.abs(v.currentTime - targetSec);
+              const modDiff = Math.min(rawDiff, Math.max(0, vDur - rawDiff));
+              // Only seek on large drift so playback never stutters or flashes seeking frames right after cuts
+              if (modDiff > 0.75 && !v.seeking) {
+                v.currentTime = targetSec;
+              }
             }
           } else {
             v.muted = true;
             v.pause();
-            if (Math.abs(v.currentTime - targetSec) > 0.03) {
+            if (!v.seeking && Math.abs(v.currentTime - targetSec) > 0.04) {
               v.currentTime = targetSec;
             }
+          }
+        } else if (item.id === prewarmClipId) {
+          v.muted = true;
+          if (!v.paused) v.pause();
+          if (!v.seeking && Math.abs(v.currentTime - prewarmTargetSec) > 0.08) {
+            v.currentTime = prewarmTargetSec;
           }
         } else {
           v.muted = true;
@@ -1089,7 +1141,9 @@ export default function App() {
       queueDebouncedHistory();
       setMediaItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
       if (
-        patch.durationSec !== undefined &&
+        (patch.durationSec !== undefined ||
+          patch.transitionOut !== undefined ||
+          patch.transitionDurationSec !== undefined) &&
         mediaItemsRef.current.length > 1 &&
         configRef.current.slideshowMode !== 'custom_durations'
       ) {
@@ -1148,6 +1202,33 @@ export default function App() {
     setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
   }, [config.trimEnd, config.trimStart, pushImmediateHistory]);
 
+  const handleAutoBeatSyncClips = useCallback(() => {
+    const items = mediaItemsRef.current;
+    const aud = audioRef.current;
+    if (!aud || items.length === 0) return;
+    pushImmediateHistory();
+    const bounds = getEffectiveTimelineBounds(configRef.current, items, aud);
+    const plan = computeAutoBeatAlignedClips(
+      items.length,
+      bounds.clipDuration,
+      trackBeatGrid,
+      configRef.current.manualBeatMarkers,
+      bounds.trimBase
+    );
+    setMediaItems((prev) =>
+      prev.map((clip, i) => {
+        const p = plan[i];
+        if (!p) return clip;
+        return {
+          ...clip,
+          durationSec: p.durationSec,
+          transitionDurationSec: p.transitionDurationSec,
+        };
+      })
+    );
+    setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+  }, [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]);
+
   const handleFitTrimToClips = useCallback(() => {
     const aud = audioRef.current;
     const items = mediaItemsRef.current;
@@ -1173,8 +1254,22 @@ export default function App() {
 
   const handleCycleClipTransition = useCallback(
     (id: string) => {
-      const order: SlideTransitionType[] = ['crossfade', 'dip_black', 'slide', 'cut'];
+      const order: SlideTransitionType[] = [
+        'crossfade',
+        'zoom_cross',
+        'wipe_right',
+        'dip_black',
+        'slide',
+        'cut',
+      ];
       pushImmediateHistory();
+      if (configRef.current.slideshowMode !== 'custom_durations') {
+        setConfig((prev) => {
+          const idx = order.indexOf(prev.transitionType);
+          return { ...prev, transitionType: order[(idx + 1) % order.length] };
+        });
+        return;
+      }
       setMediaItems((prev) =>
         prev.map((m) => {
           if (m.id !== id) return m;
@@ -1715,6 +1810,7 @@ export default function App() {
       );
       const clamped = Math.max(0, Math.min(bounds.maxSeek, sec));
       currentTimeRef.current = clamped;
+      smoothStateRef.current = createSmoothState();
       setCurrentTime(clamped);
       if (isPlaying) {
         startPlaybackAt(clamped);
@@ -2290,6 +2386,8 @@ export default function App() {
           onClearVisuals={handleClearVisuals}
           onFitClipsToAudio={handleFitClipsToAudio}
           onFitTrimToClips={handleFitTrimToClips}
+          onAutoBeatSyncClips={handleAutoBeatSyncClips}
+          trackBpm={trackBeatGrid.bpm}
           onUseEmbeddedCover={handleUseEmbeddedCover}
           onUpdateConfig={handleUpdateConfig}
           onSelectTrimPreset={handleSelectTrimPreset}
@@ -2373,6 +2471,9 @@ export default function App() {
         onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
         onAddBeatMarker={handleAddBeatMarker}
         onClearBeatMarkers={handleClearBeatMarkers}
+        onAutoBeatSyncClips={handleAutoBeatSyncClips}
+        trackBpm={trackBeatGrid.bpm}
+        beatGridPoints={trackBeatGrid.beats}
         onSetTrimStart={handleSetTrimStart}
         onSetTrimEnd={handleSetTrimEnd}
       />
