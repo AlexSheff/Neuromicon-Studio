@@ -363,11 +363,11 @@ export function InspectorPanel({
                       <input
                         type="number"
                         min={0.5}
-                        max={30}
+                        max={120}
                         step={0.5}
                         value={Number(selectedClip.durationSec.toFixed(1))}
                         onChange={(e) => {
-                          const v = Math.max(0.5, Math.min(30, Number(e.target.value) || 0.5));
+                          const v = Math.max(0.5, Math.min(120, Number(e.target.value) || 0.5));
                           onUpdateClip(selectedClip.id, { durationSec: Number(v.toFixed(1)) });
                         }}
                         className="w-14 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
@@ -378,9 +378,9 @@ export function InspectorPanel({
                   <input
                     type="range"
                     min={0.5}
-                    max={30}
+                    max={60}
                     step={0.5}
-                    value={selectedClip.durationSec}
+                    value={Math.min(60, selectedClip.durationSec)}
                     onChange={(e) =>
                       onUpdateClip(selectedClip.id, { durationSec: Number(e.target.value) })
                     }

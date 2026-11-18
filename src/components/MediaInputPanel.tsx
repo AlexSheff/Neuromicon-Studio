@@ -618,25 +618,58 @@ export function MediaInputPanel({
                   {config.subtitles.map((cue) => (
                     <div
                       key={cue.id}
-                      className="rounded border border-[#262B38] bg-[#141821] p-1.5 flex items-center gap-1.5"
+                      className="rounded border border-[#262B38] bg-[#141821] p-1.5 space-y-1"
                     >
-                      <span className="text-[10px] font-mono tabular-nums text-amber-400 shrink-0">
-                        {cue.startSec.toFixed(1)}s
-                      </span>
-                      <input
-                        type="text"
-                        value={cue.text}
-                        onChange={(e) => onUpdateSubtitleCue(cue.id, { text: e.target.value })}
-                        className="flex-1 min-w-0 bg-transparent text-[11px] text-gray-100 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => onRemoveSubtitleCue(cue.id)}
-                        aria-label="Remove subtitle"
-                        className="p-0.5 text-gray-500 hover:text-rose-400 cursor-pointer"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={cue.text}
+                          onChange={(e) => onUpdateSubtitleCue(cue.id, { text: e.target.value })}
+                          className="flex-1 min-w-0 bg-transparent text-[11px] text-gray-100 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onRemoveSubtitleCue(cue.id)}
+                          aria-label="Remove subtitle"
+                          className="p-0.5 text-gray-500 hover:text-rose-400 cursor-pointer shrink-0"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[10px] font-mono tabular-nums text-amber-400/90">
+                        <input
+                          type="number"
+                          min={0}
+                          max={3600}
+                          step={0.1}
+                          value={Number(cue.startSec.toFixed(2))}
+                          onChange={(e) => {
+                            const nextStart = Math.max(0, Number(e.target.value) || 0);
+                            const nextEnd = Math.max(nextStart + 0.2, cue.endSec);
+                            onUpdateSubtitleCue(cue.id, {
+                              startSec: Number(nextStart.toFixed(2)),
+                              endSec: Number(nextEnd.toFixed(2)),
+                            });
+                          }}
+                          className="w-14 rounded bg-[#0E1016] border border-[#262B38] px-1 py-0.5 text-amber-300"
+                        />
+                        <span className="text-gray-500">→</span>
+                        <input
+                          type="number"
+                          min={0.2}
+                          max={3600}
+                          step={0.1}
+                          value={Number(cue.endSec.toFixed(2))}
+                          onChange={(e) => {
+                            const nextEnd = Math.max(cue.startSec + 0.2, Number(e.target.value) || 0.2);
+                            onUpdateSubtitleCue(cue.id, {
+                              endSec: Number(nextEnd.toFixed(2)),
+                            });
+                          }}
+                          className="w-14 rounded bg-[#0E1016] border border-[#262B38] px-1 py-0.5 text-amber-300"
+                        />
+                        <span className="text-gray-500">s</span>
+                      </div>
                     </div>
                   ))}
                   <div className="flex items-center justify-between gap-2 pt-1">
@@ -704,7 +737,7 @@ export function MediaInputPanel({
                   key={ov.id}
                   className="rounded border border-[#262B38] bg-[#141821] p-2 space-y-2"
                 >
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-1.5">
                     {ov.kind === 'text' ? (
                       <input
                         type="text"
@@ -717,9 +750,26 @@ export function MediaInputPanel({
                     )}
                     <button
                       type="button"
+                      title={t.overlayDuplicateBtn}
+                      aria-label={t.overlayDuplicateBtn}
+                      onClick={() => {
+                        const copy: OverlayLayer = {
+                          ...ov,
+                          id: `ov-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+                          xPct: Math.min(0.92, ov.xPct + 0.04),
+                          yPct: Math.min(0.92, ov.yPct + 0.04),
+                        };
+                        onUpdateConfig({ overlays: [...config.overlays, copy] });
+                      }}
+                      className="p-1 text-gray-400 hover:text-amber-300 cursor-pointer shrink-0"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => onRemoveOverlay(ov.id)}
                       aria-label="Remove layer"
-                      className="p-1 text-gray-400 hover:text-rose-400 cursor-pointer"
+                      className="p-1 text-gray-400 hover:text-rose-400 cursor-pointer shrink-0"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -764,6 +814,37 @@ export function MediaInputPanel({
                     </label>
                   </div>
 
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5 block">
+                      <span className="text-[10px] text-gray-400">
+                        α {Math.round(ov.opacity * 100)}%
+                      </span>
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1}
+                        step={0.05}
+                        value={ov.opacity}
+                        onChange={(e) => onUpdateOverlay(ov.id, { opacity: Number(e.target.value) })}
+                        className="w-full studio-slider"
+                      />
+                    </label>
+                    <label className="space-y-0.5 block">
+                      <span className="text-[10px] text-gray-400">
+                        {t.overlayFadeSecLabel} {(ov.fadeSec ?? 0).toFixed(2)}s
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1.5}
+                        step={0.05}
+                        value={ov.fadeSec ?? 0}
+                        onChange={(e) => onUpdateOverlay(ov.id, { fadeSec: Number(e.target.value) })}
+                        className="w-full studio-slider"
+                      />
+                    </label>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[#262B38]/60">
                     <label className="space-y-0.5 block">
                       <span className="text-[10px] text-gray-400">{t.overlayStartSecLabel}</span>
@@ -777,11 +858,10 @@ export function MediaInputPanel({
                         onChange={(e) => {
                           const raw = e.target.value;
                           if (raw === '') {
-                            onUpdateOverlay(ov.id, { startSec: undefined, durationSec: undefined });
+                            onUpdateOverlay(ov.id, { startSec: undefined });
                           } else {
                             onUpdateOverlay(ov.id, {
                               startSec: Math.max(0, Number(raw) || 0),
-                              durationSec: ov.durationSec ?? 4,
                             });
                           }
                         }}
@@ -794,19 +874,20 @@ export function MediaInputPanel({
                       </span>
                       <input
                         type="number"
-                        min={0.4}
+                        min={0}
                         max={600}
                         step={0.2}
                         placeholder={t.overlayWholeVideoHint}
                         value={ov.durationSec ?? ''}
                         onChange={(e) => {
                           const raw = e.target.value;
-                          if (raw === '') {
-                            onUpdateOverlay(ov.id, { startSec: undefined, durationSec: undefined });
+                          const num = Number(raw);
+                          if (raw === '' || Number.isNaN(num) || num <= 0) {
+                            onUpdateOverlay(ov.id, { durationSec: undefined });
                           } else {
                             onUpdateOverlay(ov.id, {
                               startSec: ov.startSec ?? 0,
-                              durationSec: Math.max(0.4, Number(raw) || 4),
+                              durationSec: Math.max(0.4, num),
                             });
                           }
                         }}

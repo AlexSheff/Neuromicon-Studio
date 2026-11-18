@@ -731,20 +731,21 @@ export default function App() {
       }
       if (session !== playSessionRef.current) return;
 
+      const cfg = configRef.current;
       const clampedStart = Math.max(
-        config.trimStart,
-        Math.min(config.trimEnd - 0.1, startAbsSec)
+        cfg.trimStart,
+        Math.min(cfg.trimEnd - 0.1, startAbsSec)
       );
-      const remainingDur = Math.max(0.1, config.trimEnd - clampedStart);
-      const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+      const remainingDur = Math.max(0.1, cfg.trimEnd - clampedStart);
+      const clipDuration = Math.max(0.5, cfg.trimEnd - cfg.trimStart);
 
       const segments = computeClipTimelineSegments(
         mediaItemsRef.current,
         clipDuration,
-        config,
+        cfg,
         beatCutTimestamps
       );
-      const duckGain = Math.max(0.08, 1 - (config.audioDucking ?? 0.45));
+      const duckGain = Math.max(0.08, 1 - (cfg.audioDucking ?? 0.45));
 
       const src = ctx.createBufferSource();
       src.buffer = currentAudio.buffer;
@@ -754,9 +755,9 @@ export default function App() {
       const curve = new Float32Array(curveSteps);
       for (let i = 0; i < curveSteps; i++) {
         const localT =
-          clampedStart - config.trimStart + (i / (curveSteps - 1)) * remainingDur;
+          clampedStart - cfg.trimStart + (i / (curveSteps - 1)) * remainingDur;
         let duckMult = 1;
-        if (config.audioDucking > 0.02 && segments.length > 0) {
+        if (cfg.audioDucking > 0.02 && segments.length > 0) {
           const seg = segments.find((s) => localT >= s.startSec && localT <= s.endSec);
           const clip = seg ? mediaItemsRef.current[seg.clipIndex] : undefined;
           if (clip && clip.kind === 'video' && !clip.clipAudioMuted && clip.clipAudioVolume > 0.02) {
@@ -764,8 +765,8 @@ export default function App() {
           }
         }
         curve[i] =
-          computeFadeEnvelope(localT, clipDuration, config.fadeInSec, config.fadeOutSec) *
-          config.audioGain *
+          computeFadeEnvelope(localT, clipDuration, cfg.fadeInSec, cfg.fadeOutSec) *
+          cfg.audioGain *
           duckMult;
       }
 
@@ -797,11 +798,10 @@ export default function App() {
       setIsPlaying(true);
 
       src.start(startCtxTime, clampedStart, remainingDur);
-      syncVideosAtLocalTime(clampedStart - config.trimStart, true);
+      syncVideosAtLocalTime(clampedStart - cfg.trimStart, true);
     },
     [
       beatCutTimestamps,
-      config,
       getAudioContext,
       getEffectiveTimelineBounds,
       stopPlayback,
@@ -1974,20 +1974,21 @@ export default function App() {
   const handleSplitClipAtPlayhead = useCallback(() => {
     const items = mediaItemsRef.current;
     if (items.length === 0) return;
-    const bounds = getEffectiveTimelineBounds(configRef.current, items, audioRef.current);
+    const cfg = configRef.current;
+    const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
     const clipDuration = bounds.clipDuration;
     const localTime = Math.max(0, Math.min(clipDuration, currentTimeRef.current - bounds.trimBase));
     const segments = computeClipTimelineSegments(
       items,
       clipDuration,
-      configRef.current,
+      cfg,
       beatCutTimestamps
     );
     if (segments.length === 0) return;
 
-    const seg =
-      segments.find((s) => localTime >= s.startSec && localTime < s.endSec) ||
-      segments[segments.length - 1];
+    let segIndex = segments.findIndex((s) => localTime >= s.startSec && localTime < s.endSec);
+    if (segIndex === -1) segIndex = segments.length - 1;
+    const seg = segments[segIndex];
     const targetClip = items[seg.clipIndex];
     if (!targetClip) return;
 
@@ -1998,60 +1999,89 @@ export default function App() {
     pushImmediateHistory();
     const firstDur = Number(offsetInSeg.toFixed(2));
     const secondDur = Number((segDur - offsetInSeg).toFixed(2));
-    const newId = createItemId();
 
-    let secondVideo: HTMLVideoElement | undefined;
-    if (targetClip.kind === 'video' && targetClip.url) {
-      secondVideo = document.createElement('video');
-      secondVideo.muted = true;
-      secondVideo.loop = true;
-      secondVideo.playsInline = true;
-      secondVideo.preload = 'auto';
-      secondVideo.src = targetClip.url;
+    const cloneClipVideo = (clip: VisualMediaState) => {
+      if (clip.kind !== 'video' || !clip.url) return undefined;
+      const vid = document.createElement('video');
+      vid.muted = true;
+      vid.loop = true;
+      vid.playsInline = true;
+      vid.preload = 'auto';
+      vid.src = clip.url;
+      return vid;
+    };
+
+    const baseItems = snapshotSegmentDurations(items, clipDuration, cfg, beatCutTimestamps);
+    let workingItems = [...baseItems];
+    let targetReplaceIndex = seg.clipIndex;
+
+    if (segIndex >= items.length) {
+      // Playhead is inside a loop repeat: materialize repeated segments up to segIndex first
+      for (let i = items.length; i <= segIndex; i++) {
+        const repSeg = segments[i];
+        const orig = items[repSeg.clipIndex];
+        if (!orig) continue;
+        workingItems.push({
+          ...orig,
+          id: createItemId(),
+          durationSec: Math.max(0.5, Number((repSeg.endSec - repSeg.startSec).toFixed(2))),
+          videoElement: cloneClipVideo(orig),
+          transform: { ...(orig.transform || DEFAULT_CLIP_TRANSFORM) },
+          generatorParams: orig.generatorParams ? { ...orig.generatorParams } : undefined,
+          overlayEffect: orig.overlayEffect
+            ? {
+                ...orig.overlayEffect,
+                params: orig.overlayEffect.params ? { ...orig.overlayEffect.params } : undefined,
+              }
+            : undefined,
+        });
+      }
+      targetReplaceIndex = workingItems.length - 1;
     }
 
+    const sourceForSplit = workingItems[targetReplaceIndex];
+    if (!sourceForSplit) return;
+
+    const newId = createItemId();
+    const secondVideo = cloneClipVideo(sourceForSplit);
+
     const firstClip: VisualMediaState = {
-      ...targetClip,
+      ...sourceForSplit,
       durationSec: firstDur,
-      generatorParams: targetClip.generatorParams ? { ...targetClip.generatorParams } : undefined,
-      overlayEffect: targetClip.overlayEffect
+      generatorParams: sourceForSplit.generatorParams ? { ...sourceForSplit.generatorParams } : undefined,
+      overlayEffect: sourceForSplit.overlayEffect
         ? {
-            ...targetClip.overlayEffect,
-            params: targetClip.overlayEffect.params ? { ...targetClip.overlayEffect.params } : undefined,
+            ...sourceForSplit.overlayEffect,
+            params: sourceForSplit.overlayEffect.params ? { ...sourceForSplit.overlayEffect.params } : undefined,
           }
         : undefined,
     };
     const secondClip: VisualMediaState = {
-      ...targetClip,
+      ...sourceForSplit,
       id: newId,
       durationSec: secondDur,
       sourceStartSec:
-        targetClip.kind === 'video'
-          ? Number((targetClip.sourceStartSec + firstDur * (targetClip.playbackRate || 1)).toFixed(2))
-          : targetClip.sourceStartSec,
+        sourceForSplit.kind === 'video'
+          ? Number(
+              (sourceForSplit.sourceStartSec + firstDur * (sourceForSplit.playbackRate || 1)).toFixed(2)
+            )
+          : sourceForSplit.sourceStartSec,
       videoElement: secondVideo,
-      transform: { ...(targetClip.transform || DEFAULT_CLIP_TRANSFORM) },
-      generatorParams: targetClip.generatorParams ? { ...targetClip.generatorParams } : undefined,
-      overlayEffect: targetClip.overlayEffect
+      transform: { ...(sourceForSplit.transform || DEFAULT_CLIP_TRANSFORM) },
+      generatorParams: sourceForSplit.generatorParams ? { ...sourceForSplit.generatorParams } : undefined,
+      overlayEffect: sourceForSplit.overlayEffect
         ? {
-            ...targetClip.overlayEffect,
-            params: targetClip.overlayEffect.params ? { ...targetClip.overlayEffect.params } : undefined,
+            ...sourceForSplit.overlayEffect,
+            params: sourceForSplit.overlayEffect.params ? { ...sourceForSplit.overlayEffect.params } : undefined,
           }
         : undefined,
     };
 
-    const baseItems = snapshotSegmentDurations(
-      items,
-      clipDuration,
-      configRef.current,
-      beatCutTimestamps
-    );
-    const next = [...baseItems];
-    next.splice(seg.clipIndex, 1, firstClip, secondClip);
-    setMediaItems(next);
+    workingItems.splice(targetReplaceIndex, 1, firstClip, secondClip);
+    setMediaItems(workingItems);
     setSelectedClipId(newId);
     setSelectedFxId(null);
-    if (configRef.current.slideshowMode !== 'custom_durations') {
+    if (cfg.slideshowMode !== 'custom_durations') {
       setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
     }
   }, [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]);
@@ -2190,11 +2220,14 @@ export default function App() {
   const handleImportSubtitlesText = useCallback(
     (raw: string) => {
       const parsed = parseSubtitles(raw);
-      if (parsed.length === 0) return;
+      if (parsed.length === 0) {
+        showError(tFor(langRef.current).errEmptySubtitles);
+        return;
+      }
       pushImmediateHistory();
       setConfig((prev) => ({ ...prev, subtitles: parsed, showSubtitles: true }));
     },
-    [pushImmediateHistory]
+    [pushImmediateHistory, showError]
   );
 
   const handleAddCueAtPlayhead = useCallback(() => {
@@ -2344,12 +2377,39 @@ export default function App() {
           throw new Error('Invalid project JSON');
         }
         pushImmediateHistory();
+        let missingBinaryMedia = false;
+
+        const restoredOverlays: OverlayLayer[] = [];
+        for (const ov of parsed.config.overlays || []) {
+          if (ov.kind === 'image') {
+            const blob = await loadBlobFromIDB(`overlay-${ov.id}`);
+            if (blob) {
+              const url = URL.createObjectURL(blob);
+              blobKeyMapRef.current.set(url, `overlay-${ov.id}`);
+              const img = await new Promise<HTMLImageElement | null>((resolve) => {
+                const el = new Image();
+                el.onload = () => resolve(el);
+                el.onerror = () => resolve(null);
+                el.src = url;
+              });
+              if (img) {
+                restoredOverlays.push({ ...ov, imageUrl: url, imageElement: img });
+              } else {
+                URL.revokeObjectURL(url);
+                missingBinaryMedia = true;
+              }
+            } else {
+              missingBinaryMedia = true;
+            }
+          } else {
+            restoredOverlays.push({ ...ov });
+          }
+        }
+
         const mergedConfig: StudioConfig = {
           ...DEFAULT_STUDIO_CONFIG,
           ...parsed.config,
-          overlays: (parsed.config.overlays || [])
-            .filter((o) => o.kind === 'text')
-            .map((o) => ({ ...o })),
+          overlays: restoredOverlays,
           fxOverlays: (parsed.config.fxOverlays || []).map((fx) => ({
             ...fx,
             params: fx.params ? { ...fx.params } : undefined,
@@ -2362,7 +2422,59 @@ export default function App() {
           setGlslError(res.error);
         }
 
-        // Restore generator clips cleanly + any local IDB blobs if available
+        // Rehydrate audio track if demo or matching local IDB blob exists
+        if (parsed.audioMeta) {
+          if (parsed.audioMeta.isSyntheticDemo) {
+            const demoBuf = await generateDemoAudioBuffer();
+            audioBlobKeyRef.current = undefined;
+            applyAudioBuffer(
+              demoBuf,
+              parsed.audioMeta.fileName,
+              parsed.audioMeta.fileSize,
+              {
+                title: mergedConfig.titleText,
+                artist: mergedConfig.artistText,
+                album: mergedConfig.albumText,
+                year: '2026',
+              },
+              true,
+              true
+            );
+          } else if (parsed.audioMeta.blobKey) {
+            const audioBlob = await loadBlobFromIDB(parsed.audioMeta.blobKey);
+            if (audioBlob) {
+              try {
+                audioBlobKeyRef.current = parsed.audioMeta.blobKey;
+                const arr = await audioBlob.arrayBuffer();
+                const id3 = parseID3Tags(arr, parsed.audioMeta.fileName);
+                const ctx = getAudioContext();
+                const decoded = await ctx.decodeAudioData(arr.slice(0));
+                applyAudioBuffer(
+                  decoded,
+                  parsed.audioMeta.fileName,
+                  parsed.audioMeta.fileSize,
+                  {
+                    title: id3.title || mergedConfig.titleText,
+                    artist: id3.artist || mergedConfig.artistText,
+                    album: id3.album || mergedConfig.albumText,
+                    year: id3.year || '',
+                    embeddedCoverUrl: id3.coverBlobUrl,
+                  },
+                  false,
+                  true
+                );
+              } catch {
+                missingBinaryMedia = true;
+              }
+            } else {
+              missingBinaryMedia = true;
+            }
+          } else {
+            missingBinaryMedia = true;
+          }
+        }
+
+        // Restore generator clips + image & video clips whose IDB blobs exist locally
         const nextClips: VisualMediaState[] = [];
         for (const sc of parsed.clips || []) {
           const restoredOverlay = sc.overlayEffect
@@ -2393,42 +2505,102 @@ export default function App() {
             });
           } else if (sc.blobKey) {
             const blob = await loadBlobFromIDB(sc.blobKey);
-            if (!blob) continue;
+            if (!blob) {
+              missingBinaryMedia = true;
+              continue;
+            }
             const url = URL.createObjectURL(blob);
             blobKeyMapRef.current.set(url, sc.blobKey);
             if (sc.kind === 'image') {
-              const img = new Image();
-              img.src = url;
-              nextClips.push({
-                id: sc.id || createItemId(),
-                kind: 'image',
-                fileName: sc.fileName,
-                url,
-                width: sc.width || 1920,
-                height: sc.height || 1080,
-                imageElement: img,
-                durationSec: sc.durationSec || 4,
-                sourceStartSec: 0,
-                playbackRate: 1,
-                transitionOut: sc.transitionOut || 'crossfade',
-                transitionDurationSec: sc.transitionDurationSec || 0.65,
-                overlayEffect: restoredOverlay,
-                transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
-                clipAudioVolume: 0,
-                clipAudioMuted: true,
+              const img = await new Promise<HTMLImageElement | null>((resolve) => {
+                const el = new Image();
+                el.onload = () => resolve(el);
+                el.onerror = () => resolve(null);
+                el.src = url;
               });
+              if (img) {
+                nextClips.push({
+                  id: sc.id || createItemId(),
+                  kind: 'image',
+                  fileName: sc.fileName,
+                  url,
+                  width: img.naturalWidth || sc.width || 1920,
+                  height: img.naturalHeight || sc.height || 1080,
+                  imageElement: img,
+                  durationSec: sc.durationSec || 4,
+                  sourceStartSec: 0,
+                  playbackRate: 1,
+                  transitionOut: sc.transitionOut || 'crossfade',
+                  transitionDurationSec: sc.transitionDurationSec || 0.65,
+                  overlayEffect: restoredOverlay,
+                  transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
+                  clipAudioVolume: 0,
+                  clipAudioMuted: true,
+                });
+              } else {
+                URL.revokeObjectURL(url);
+                missingBinaryMedia = true;
+              }
+            } else if (sc.kind === 'video') {
+              const video = document.createElement('video');
+              video.muted = true;
+              video.loop = true;
+              video.playsInline = true;
+              video.preload = 'auto';
+              const ok = await new Promise<boolean>((resolve) => {
+                video.onloadedmetadata = () => resolve(true);
+                video.onerror = () => resolve(false);
+                video.src = url;
+              });
+              if (ok) {
+                let decodedBuf: AudioBuffer | undefined;
+                try {
+                  const arr = await blob.arrayBuffer();
+                  decodedBuf = await getAudioContext().decodeAudioData(arr);
+                } catch {
+                  // silent video
+                }
+                nextClips.push({
+                  id: sc.id || createItemId(),
+                  kind: 'video',
+                  fileName: sc.fileName,
+                  url,
+                  width: video.videoWidth || sc.width || 1080,
+                  height: video.videoHeight || sc.height || 1920,
+                  videoElement: video,
+                  videoDuration: video.duration || sc.videoDuration || 10,
+                  decodedAudioBuffer: decodedBuf,
+                  durationSec: sc.durationSec || 4,
+                  sourceStartSec: sc.sourceStartSec || 0,
+                  playbackRate: sc.playbackRate || 1,
+                  transitionOut: sc.transitionOut || 'crossfade',
+                  transitionDurationSec: sc.transitionDurationSec || 0.65,
+                  overlayEffect: restoredOverlay,
+                  transform: sc.transform || { ...DEFAULT_CLIP_TRANSFORM },
+                  clipAudioVolume: sc.clipAudioVolume ?? 0.8,
+                  clipAudioMuted: sc.clipAudioMuted ?? true,
+                });
+              } else {
+                URL.revokeObjectURL(url);
+                missingBinaryMedia = true;
+              }
             }
+          } else {
+            missingBinaryMedia = true;
           }
         }
         if (nextClips.length > 0) {
           setMediaItems(nextClips);
           setSelectedClipId(nextClips[0].id);
         }
+        if (missingBinaryMedia) {
+          showError(tFor(langRef.current).noticeJsonPartialRestore);
+        }
       } catch (err) {
-        showError(err instanceof Error ? err.message : tFor(lang).errUnsupportedFile);
+        showError(err instanceof Error ? err.message : tFor(langRef.current).errUnsupportedFile);
       }
     },
-    [lang, pushImmediateHistory, showError]
+    [applyAudioBuffer, getAudioContext, pushImmediateHistory, showError]
   );
 
   const handleResetAutosave = useCallback(async () => {
@@ -3134,8 +3306,9 @@ export default function App() {
       a.download = `${safeTitle}_${dims.width}x${dims.height}.png`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showUndoToast(`${tFor(langRef.current).snapshotSavedNotice} (${dims.width}×${dims.height})`);
     }, 'image/png');
-  }, [beatCutTimestamps]);
+  }, [beatCutTimestamps, getEffectiveTimelineBounds, showUndoToast]);
 
   const handleExportSrt = useCallback(() => {
     const subs = configRef.current.subtitles;

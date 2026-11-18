@@ -345,7 +345,7 @@ export function TimelineDock({
   } | null>(null);
   const ovDragRef = useRef<{
     ovId: string;
-    mode: 'move' | 'right';
+    mode: 'move' | 'left' | 'right';
     startX: number;
     origStart: number;
     origDur: number;
@@ -754,7 +754,7 @@ export function TimelineDock({
   };
 
   const setClipDuration = (clipId: string, rawDur: number) => {
-    const clamped = Math.max(0.5, Math.min(30, Number(rawDur.toFixed(2))));
+    const clamped = Math.max(0.5, Math.min(120, Number(rawDur.toFixed(2))));
     onUpdateClip(clipId, { durationSec: clamped });
   };
 
@@ -1037,7 +1037,7 @@ export function TimelineDock({
                   <input
                     type="number"
                     min={0.5}
-                    max={30}
+                    max={120}
                     step={0.5}
                     value={Number(selectedClip.durationSec.toFixed(1))}
                     onChange={(e) => {
@@ -1663,7 +1663,7 @@ export function TimelineDock({
                                           clipDuration;
                                         let nextDur = Math.max(
                                           0.5,
-                                          Math.min(30, clipResizeRef.current.startDur + deltaSec)
+                                          Math.min(120, clipResizeRef.current.startDur + deltaSec)
                                         );
                                         if (config.snapToBeats && relSnapPoints.length > 0) {
                                           const proposedEnd =
@@ -1675,7 +1675,7 @@ export function TimelineDock({
                                           );
                                           nextDur = Math.max(
                                             0.5,
-                                            Math.min(30, snappedEnd - clipResizeRef.current.segStartSec)
+                                            Math.min(120, snappedEnd - clipResizeRef.current.segStartSec)
                                           );
                                         }
                                         onUpdateClip(clip.id, {
@@ -1980,24 +1980,65 @@ export function TimelineDock({
                                 const deltaSec =
                                   ((e.clientX - ovDragRef.current.startX) / seqW) * clipDuration;
                                 if (ovDragRef.current.mode === 'move') {
-                                  const nextStart = Math.max(
+                                  let nextStart = Math.max(
                                     0,
                                     Math.min(
                                       clipDuration - ovDragRef.current.origDur,
                                       ovDragRef.current.origStart + deltaSec
                                     )
                                   );
+                                  if (config.snapToBeats && relSnapPoints.length > 0) {
+                                    nextStart = Math.max(
+                                      0,
+                                      Math.min(
+                                        clipDuration - ovDragRef.current.origDur,
+                                        snapTimeToBeat(nextStart, relSnapPoints, 0.22)
+                                      )
+                                    );
+                                  }
                                   onUpdateOverlay(ov.id, {
                                     startSec: Number(nextStart.toFixed(2)),
                                   });
+                                } else if (ovDragRef.current.mode === 'left') {
+                                  const fixedEnd =
+                                    ovDragRef.current.origStart + ovDragRef.current.origDur;
+                                  let nextStart = Math.max(
+                                    0,
+                                    Math.min(fixedEnd - 0.4, ovDragRef.current.origStart + deltaSec)
+                                  );
+                                  if (config.snapToBeats && relSnapPoints.length > 0) {
+                                    nextStart = Math.min(
+                                      fixedEnd - 0.4,
+                                      snapTimeToBeat(nextStart, relSnapPoints, 0.22)
+                                    );
+                                  }
+                                  onUpdateOverlay(ov.id, {
+                                    startSec: Number(nextStart.toFixed(2)),
+                                    durationSec: Number((fixedEnd - nextStart).toFixed(2)),
+                                  });
                                 } else {
-                                  const nextDur = Math.max(
+                                  let nextDur = Math.max(
                                     0.4,
                                     Math.min(
                                       clipDuration - ovDragRef.current.origStart,
                                       ovDragRef.current.origDur + deltaSec
                                     )
                                   );
+                                  if (config.snapToBeats && relSnapPoints.length > 0) {
+                                    const proposedEnd = ovDragRef.current.origStart + nextDur;
+                                    const snappedEnd = snapTimeToBeat(
+                                      proposedEnd,
+                                      relSnapPoints,
+                                      0.22
+                                    );
+                                    nextDur = Math.max(
+                                      0.4,
+                                      Math.min(
+                                        clipDuration - ovDragRef.current.origStart,
+                                        snappedEnd - ovDragRef.current.origStart
+                                      )
+                                    );
+                                  }
                                   onUpdateOverlay(ov.id, {
                                     durationSec: Number(nextDur.toFixed(2)),
                                   });
@@ -2018,8 +2059,23 @@ export function TimelineDock({
                                 height: '18px',
                               }}
                               title={`${ov.text || ov.label} · ${startSec.toFixed(1)}s`}
-                              className="absolute rounded-xs border border-emerald-500/45 bg-emerald-500/15 hover:bg-emerald-500/25 px-1.5 flex items-center gap-1 overflow-hidden cursor-grab active:cursor-grabbing text-emerald-200"
+                              className="group absolute rounded-xs border border-emerald-500/45 bg-emerald-500/15 hover:bg-emerald-500/25 px-1.5 flex items-center gap-1 overflow-hidden cursor-grab active:cursor-grabbing text-emerald-200"
                             >
+                              <div
+                                onPointerDown={(e) => {
+                                  e.stopPropagation();
+                                  if (!onUpdateOverlay) return;
+                                  ovDragRef.current = {
+                                    ovId: ov.id,
+                                    mode: 'left',
+                                    startX: e.clientX,
+                                    origStart: startSec,
+                                    origDur: durationSec,
+                                  };
+                                  e.currentTarget.setPointerCapture(e.pointerId);
+                                }}
+                                className="absolute top-0 left-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-emerald-300/80"
+                              />
                               <span className="text-[9px] font-medium truncate pointer-events-none">
                                 {ov.text || ov.label}
                               </span>

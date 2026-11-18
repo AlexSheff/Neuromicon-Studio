@@ -294,12 +294,17 @@ async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Prom
     let settled = false;
     const vid = video as VideoWithFrameCallback;
     let rvfcId: number | null = null;
+    let rvfcFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
     const finish = () => {
       if (settled) return;
       settled = true;
       video.removeEventListener('seeked', onSeeked);
       clearTimeout(timer);
+      if (rvfcFallbackTimer !== null) {
+        clearTimeout(rvfcFallbackTimer);
+        rvfcFallbackTimer = null;
+      }
       if (rvfcId !== null && vid.cancelVideoFrameCallback) {
         try {
           vid.cancelVideoFrameCallback(rvfcId);
@@ -313,7 +318,7 @@ async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Prom
     const onSeeked = () => {
       if (typeof vid.requestVideoFrameCallback === 'function') {
         rvfcId = vid.requestVideoFrameCallback(() => finish());
-        setTimeout(finish, 120);
+        rvfcFallbackTimer = setTimeout(finish, 120);
       } else {
         finish();
       }
@@ -360,6 +365,7 @@ async function renderTrimmedAudioWithFades(
     const segDur = Math.max(0.05, seg.endSec - seg.startSec);
     const clipSrc = offline.createBufferSource();
     clipSrc.buffer = clip.decodedAudioBuffer;
+    clipSrc.loop = true;
     clipSrc.playbackRate.value = clip.playbackRate || 1;
     const clipGainNode = offline.createGain();
     clipGainNode.gain.value = clip.clipAudioVolume;
@@ -367,8 +373,9 @@ async function renderTrimmedAudioWithFades(
     clipGainNode.connect(offline.destination);
 
     const bufDur = clip.decodedAudioBuffer.duration || 1;
-    const offsetInClip = clip.sourceStartSec % bufDur;
-    clipSrc.start(seg.startSec, offsetInClip, segDur * (clip.playbackRate || 1));
+    const offsetInClip = ((clip.sourceStartSec % bufDur) + bufDur) % bufDur;
+    clipSrc.start(seg.startSec, offsetInClip);
+    clipSrc.stop(seg.endSec);
 
     if (duckAmt > 0.02) {
       mainGain.gain.setTargetAtTime(duckGain, seg.startSec, 0.08);
@@ -834,6 +841,14 @@ async function exportWithWebCodecs(params: {
     }
 
     if (abortSignal.aborted) {
+      if (writableStream) {
+        try {
+          await writableStream.abort();
+        } catch {
+          // ignore
+        }
+        writableStream = null;
+      }
       return {
         phase: 'cancelled',
         currentFrame: 0,
@@ -982,31 +997,32 @@ async function exportWithMediaRecorder(params: {
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('Cannot initialize export canvas');
 
-  const audioCtx = new AudioContext({ sampleRate: 48000 });
+  let audioCtx: AudioContext;
+  try {
+    audioCtx = new AudioContext({ sampleRate: 48000 });
+  } catch {
+    audioCtx = new AudioContext();
+  }
+  if (audioCtx.state === 'suspended') {
+    try {
+      await audioCtx.resume();
+    } catch {
+      // continue best-effort
+    }
+  }
+
+  const mixedAudioBuffer = await renderTrimmedAudioWithFades(
+    audio.buffer,
+    config,
+    mediaItems,
+    beatCutTimestamps,
+    audioCtx.sampleRate
+  );
+
   const dest = audioCtx.createMediaStreamDestination();
   const src = audioCtx.createBufferSource();
-  src.buffer = audio.buffer;
-
-  const gainNode = audioCtx.createGain();
-  const now = audioCtx.currentTime;
-  const baseGain = config.audioGain;
-  if (config.fadeInSec > 0.02) {
-    gainNode.gain.setValueAtTime(0, now);
-    gainNode.gain.linearRampToValueAtTime(
-      baseGain,
-      now + Math.min(clipDuration * 0.5, config.fadeInSec)
-    );
-  } else {
-    gainNode.gain.setValueAtTime(baseGain, now);
-  }
-  if (config.fadeOutSec > 0.02) {
-    const fadeStart = Math.max(0, clipDuration - config.fadeOutSec);
-    gainNode.gain.setValueAtTime(baseGain, now + fadeStart);
-    gainNode.gain.linearRampToValueAtTime(0, now + clipDuration);
-  }
-
-  src.connect(gainNode);
-  gainNode.connect(dest);
+  src.buffer = mixedAudioBuffer;
+  src.connect(dest);
 
   const canvasStream = canvas.captureStream(config.fps);
   const combinedStream = new MediaStream([
@@ -1026,14 +1042,26 @@ async function exportWithMediaRecorder(params: {
   const smoothState = createSmoothState();
   const label = `MediaRecorder (${ext.toUpperCase()})`;
 
+  let rafId = 0;
+  const onAbort = () => {
+    cancelAnimationFrame(rafId);
+    if (recorder.state !== 'inactive') recorder.stop();
+  };
+
   const resultPromise = new Promise<ExportProgressState>((resolve) => {
     recorder.onstop = () => {
+      abortSignal.removeEventListener('abort', onAbort);
       try {
         src.stop();
+        src.disconnect();
         audioCtx.close();
       } catch {
         // ignore
       }
+      for (const track of canvasStream.getTracks()) track.stop();
+      for (const track of dest.stream.getTracks()) track.stop();
+      for (const track of combinedStream.getTracks()) track.stop();
+
       if (abortSignal.aborted) {
         resolve({
           phase: 'cancelled',
@@ -1075,15 +1103,15 @@ async function exportWithMediaRecorder(params: {
   });
 
   recorder.start(250);
-  src.start(now, config.trimStart, clipDuration);
+  const audioNow = audioCtx.currentTime;
+  src.start(audioNow, 0, mixedAudioBuffer.duration);
 
   const startTime = performance.now();
   let lastTickTime = startTime;
-  let rafId = 0;
 
   const tick = () => {
     if (abortSignal.aborted) {
-      recorder.stop();
+      if (recorder.state !== 'inactive') recorder.stop();
       return;
     }
     const wallNow = performance.now();
@@ -1091,9 +1119,34 @@ async function exportWithMediaRecorder(params: {
     lastTickTime = wallNow;
     const localTime = (wallNow - startTime) / 1000;
     if (localTime >= clipDuration) {
-      recorder.stop();
+      if (recorder.state !== 'inactive') recorder.stop();
       return;
     }
+
+    if (mediaItems.length > 0) {
+      const slice = resolveActiveSlideshowSlice(
+        mediaItems,
+        localTime,
+        clipDuration,
+        config,
+        beatCutTimestamps
+      );
+      const syncVid = (item: VisualMediaState | undefined, slideT: number) => {
+        if (!item || item.kind !== 'video' || !item.videoElement) return;
+        const vid = item.videoElement;
+        const dur = vid.duration || 1;
+        const target =
+          Math.max(0, (item.sourceStartSec + slideT * (item.playbackRate || 1)) % dur);
+        if (!vid.seeking && Math.abs(vid.currentTime - target) > 0.08) {
+          vid.currentTime = Math.min(Math.max(0, dur - 0.04), target);
+        }
+      };
+      syncVid(mediaItems[slice.activeIndex], slice.slideLocalTime);
+      if (slice.prevIndex !== null) {
+        syncVid(mediaItems[slice.prevIndex], slice.prevSlideLocalTime);
+      }
+    }
+
     const currentFrame = Math.min(totalFrames, Math.floor(localTime * config.fps));
     const sourceAudioTime = config.trimStart + localTime;
     const metrics = analyzeAudioAtTime(
@@ -1139,14 +1192,7 @@ async function exportWithMediaRecorder(params: {
   };
 
   rafId = requestAnimationFrame(tick);
-  abortSignal.addEventListener(
-    'abort',
-    () => {
-      cancelAnimationFrame(rafId);
-      if (recorder.state !== 'inactive') recorder.stop();
-    },
-    { once: true }
-  );
+  abortSignal.addEventListener('abort', onAbort, { once: true });
 
   return resultPromise;
 }

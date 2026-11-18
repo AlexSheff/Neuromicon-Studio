@@ -913,3 +913,39 @@ export async function generateDemoAudioBuffer(): Promise<AudioBuffer> {
 
   return offline.startRendering();
 }
+
+export interface ResolvedOverlayWindow {
+  visible: boolean;
+  startSec: number;
+  durationSec: number;
+  endSec: number | null;
+  relTime: number;
+}
+
+/**
+ * Resolves overlay layer visibility and active time window:
+ * - missing startSec => 0
+ * - missing or <= 0 durationSec => visible until end of clipDuration
+ */
+export function resolveOverlayWindow(
+  ov: { startSec?: number; durationSec?: number },
+  localTime: number,
+  clipDuration: number
+): ResolvedOverlayWindow {
+  const safeClipDur = Math.max(0.4, clipDuration);
+  const startSec = Math.max(0, Math.min(safeClipDur - 0.1, ov.startSec ?? 0));
+  const hasBoundedDur = typeof ov.durationSec === 'number' && ov.durationSec > 0;
+  const durationSec = hasBoundedDur
+    ? Math.max(0.4, Math.min(safeClipDur - startSec, ov.durationSec!))
+    : Math.max(0.4, safeClipDur - startSec);
+  const endSec = hasBoundedDur ? startSec + ov.durationSec! : null;
+  const visible = localTime >= startSec && (endSec === null || localTime <= endSec);
+  return {
+    visible,
+    startSec,
+    durationSec,
+    endSec,
+    relTime: Math.max(0, localTime - startSec),
+  };
+}
+

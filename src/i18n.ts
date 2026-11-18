@@ -380,6 +380,11 @@ export const TRANSLATIONS = {
     largeExportRamWarning: 'Длинный или 4K-экспорт (~{frames} кадров) займёт много ОЗУ. Используйте потоковый экспорт на диск.',
     streamExportBtn: 'Потоковый экспорт сразу на диск',
     streamSavedNote: 'Видеофайл сохранён напрямую на диск без буферизации в ОЗУ.',
+    errEmptySubtitles: 'Не найдены субтитры: проверьте таймкоды SRT/VTT',
+    noticeJsonPartialRestore: 'Настройки проекта загружены; отсутствующие локальные медиафайлы добавьте вручную',
+    overlayFadeSecLabel: 'Затухание',
+    overlayDuplicateBtn: 'Дубл.',
+    snapshotSavedNotice: 'PNG-снимок кадра сохранён',
 
     presets: {
       spectrum_bars: { name: 'Спектр-бары', desc: 'Эквалайзер с реакцией на бас и верх' },
@@ -765,6 +770,11 @@ export const TRANSLATIONS = {
     largeExportRamWarning: 'Long or 4K render (~{frames} frames) uses significant RAM. Use Direct-to-Disk Streaming.',
     streamExportBtn: 'Stream Render Directly to Disk',
     streamSavedNote: 'Video streamed directly to disk without holding the file in RAM.',
+    errEmptySubtitles: 'No valid subtitle cues found (check SRT/VTT timestamps)',
+    noticeJsonPartialRestore: 'Project settings loaded; re-add any missing local media files',
+    overlayFadeSecLabel: 'Fade',
+    overlayDuplicateBtn: 'Dup',
+    snapshotSavedNotice: 'PNG snapshot saved',
 
     presets: {
       spectrum_bars: { name: 'Spectrum Bars', desc: 'Bass-and-treble reactive frequency bars' },

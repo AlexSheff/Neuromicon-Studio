@@ -7,7 +7,11 @@ import {
   StudioConfig,
   VisualMediaState,
 } from '../types/studio';
-import { computeFadeEnvelope, resolveActiveSlideshowSlice } from './audioAnalyzer';
+import {
+  computeFadeEnvelope,
+  resolveActiveSlideshowSlice,
+  resolveOverlayWindow,
+} from './audioAnalyzer';
 import { DEFAULT_CLIP_TRANSFORM, resolveColorScheme } from './presets';
 import { proceduralShaderEngine } from './proceduralShaders';
 
@@ -347,6 +351,9 @@ function drawFitBlurBackdrop(
     ctx.drawImage(source as CanvasImageSource, x, y, drawW, drawH);
   }
   if (!hasFilter) {
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
     applyFallbackColorAndBrightness(ctx, x, y, drawW, drawH, config.mediaFilter, config.mediaBrightness);
   }
   ctx.restore();
@@ -1471,6 +1478,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       anchorY = height * 0.48;
     } else {
       const extraLift =
+        config.showVisualizer !== false &&
         config.visualizerPlacement === 'bottom' &&
         (config.beatPreset === 'spectrum_bars' || config.beatPreset === 'horizon_wave')
           ? minDim * 0.18
@@ -1627,14 +1635,23 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     scheme.visualizerSecondary
   );
 
-  // 5c. Multi-Layer Text & Image Overlays (respect optional startSec / durationSec timing)
+  // 5c. Multi-Layer Text & Image Overlays (respect startSec / durationSec timing and optional fadeSec)
   if (config.overlays && config.overlays.length > 0) {
     for (const ov of config.overlays) {
-      if (typeof ov.startSec === 'number' && typeof ov.durationSec === 'number') {
-        if (localTime < ov.startSec || localTime > ov.startSec + ov.durationSec) continue;
-      }
+      const win = resolveOverlayWindow(ov, localTime, clipDuration);
+      if (!win.visible) continue;
+      const fadeSec = Math.max(0, Math.min(1.5, ov.fadeSec ?? 0));
+      const fadeInEnv =
+        fadeSec > 0.01 ? computeFadeEnvelope(win.relTime, win.durationSec, fadeSec, 0) : 1;
+      const fadeOutEnv =
+        fadeSec > 0.01 && (win.endSec !== null || (ov.startSec ?? 0) > 0)
+          ? computeFadeEnvelope(win.relTime, win.durationSec, 0, fadeSec)
+          : 1;
+      const alpha = Math.max(0, Math.min(1, ov.opacity * fadeInEnv * fadeOutEnv));
+      if (alpha <= 0.005) continue;
+
       ctx.save();
-      ctx.globalAlpha = Math.max(0.05, Math.min(1, ov.opacity));
+      ctx.globalAlpha = alpha;
       const ox = ov.xPct * width;
       const oy = ov.yPct * height;
       if (ov.kind === 'image' && ov.imageElement && ov.imageElement.complete && ov.imageElement.naturalWidth > 0) {

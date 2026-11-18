@@ -155,8 +155,9 @@ export interface OverlayLayer {
   scale: number; // 0.4 .. 2.5
   opacity: number; // 0.1 .. 1.0
   color?: string;
-  startSec?: number; // undefined => whole video
-  durationSec?: number; // undefined => whole video
+  startSec?: number; // undefined => from start (0s)
+  durationSec?: number; // undefined or 0 => until end of clip
+  fadeSec?: number; // optional smooth fade in/out in seconds
 }
 
 export interface ColorScheme {
