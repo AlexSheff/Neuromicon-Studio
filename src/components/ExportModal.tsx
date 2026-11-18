@@ -101,21 +101,32 @@ export function ExportModal({
             </>
           )}
 
-          {state.phase === 'complete' && state.outputUrl && (
+          {state.phase === 'complete' && (
             <>
               <div className="flex items-center gap-2.5 text-emerald-400">
                 <CheckCircle2 className="w-5 h-5 shrink-0" />
                 <p className="text-sm font-semibold">{t.exportComplete}</p>
               </div>
 
-              <div className="rounded-md border border-[#262B38] bg-black overflow-hidden">
-                <video
-                  src={state.outputUrl}
-                  controls
-                  playsInline
-                  className="w-full max-h-64 object-contain mx-auto"
-                />
-              </div>
+              {state.streamedToDisk && (
+                <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+                  {t.streamSavedNote}{' '}
+                  {state.outputFileName && (
+                    <span className="font-mono text-emerald-300">({state.outputFileName})</span>
+                  )}
+                </div>
+              )}
+
+              {state.outputUrl && (
+                <div className="rounded-md border border-[#262B38] bg-black overflow-hidden">
+                  <video
+                    src={state.outputUrl}
+                    controls
+                    playsInline
+                    className="w-full max-h-64 object-contain mx-auto"
+                  />
+                </div>
+              )}
             </>
           )}
 
@@ -187,7 +198,7 @@ export function ExportModal({
             </button>
           ) : (
             <>
-              {state.phase === 'complete' && state.outputUrl && (
+              {state.phase === 'complete' && (
                 <>
                   <button
                     type="button"
@@ -197,14 +208,16 @@ export function ExportModal({
                     <FileText className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
                     <span>{t.exportMetaTxtBtn}</span>
                   </button>
-                  <a
-                    href={state.outputUrl}
-                    download={state.outputFileName || `neuromicon.${state.outputFormat}`}
-                    className="px-4 py-2 rounded-md bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-zinc-950 inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>{t.downloadVideoBtn}</span>
-                  </a>
+                  {state.outputUrl && (
+                    <a
+                      href={state.outputUrl}
+                      download={state.outputFileName || `neuromicon.${state.outputFormat}`}
+                      className="px-4 py-2 rounded-md bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-zinc-950 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>{t.downloadVideoBtn}</span>
+                    </a>
+                  )}
                 </>
               )}
               <button

@@ -1,5 +1,13 @@
-import { ArrayBufferTarget as Mp4ArrayBufferTarget, Muxer as Mp4Muxer } from 'mp4-muxer';
-import { ArrayBufferTarget as WebmArrayBufferTarget, Muxer as WebmMuxer } from 'webm-muxer';
+import {
+  ArrayBufferTarget as Mp4ArrayBufferTarget,
+  FileSystemWritableFileStreamTarget as Mp4FileStreamTarget,
+  Muxer as Mp4Muxer,
+} from 'mp4-muxer';
+import {
+  ArrayBufferTarget as WebmArrayBufferTarget,
+  FileSystemWritableFileStreamTarget as WebmFileStreamTarget,
+  Muxer as WebmMuxer,
+} from 'webm-muxer';
 import {
   AudioTrackState,
   ExportAspectMode,
@@ -214,6 +222,63 @@ async function probeBestWebCodecsProfile(
   return null;
 }
 
+export interface ExportCapabilityReport {
+  engine: 'webcodecs' | 'mediarecorder';
+  container: 'mp4' | 'webm';
+  label: string;
+  isFallback: boolean;
+  supportsStreaming: boolean;
+}
+
+export async function probeExportCapabilities(
+  width: number,
+  height: number,
+  fps: number,
+  bitrateMbps: number,
+  sampleRate = 48000,
+  channels = 2
+): Promise<ExportCapabilityReport> {
+  const supportsStreaming =
+    typeof window !== 'undefined' &&
+    'showSaveFilePicker' in window &&
+    typeof VideoEncoder !== 'undefined';
+
+  const profile = await probeBestWebCodecsProfile(
+    width,
+    height,
+    fps,
+    bitrateMbps * 1_000_000,
+    sampleRate,
+    channels
+  );
+  if (profile) {
+    return {
+      engine: 'webcodecs',
+      container: profile.container,
+      label: profile.label,
+      isFallback: profile.container === 'webm',
+      supportsStreaming,
+    };
+  }
+  const mimeCandidates = [
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+  ];
+  const selectedMime =
+    mimeCandidates.find((m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)) ||
+    'video/webm';
+  const ext: 'mp4' | 'webm' = selectedMime.includes('mp4') ? 'mp4' : 'webm';
+  return {
+    engine: 'mediarecorder',
+    container: ext,
+    label: `MediaRecorder (${ext.toUpperCase()})`,
+    isFallback: true,
+    supportsStreaming: false,
+  };
+}
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: () => void) => number;
   cancelVideoFrameCallback?: (id: number) => void;
@@ -332,8 +397,9 @@ export async function exportStudioVideo(params: {
   abortSignal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
   batchContext?: { index: number; total: number; label: string };
+  fileHandle?: FileSystemFileHandle | null;
 }): Promise<ExportProgressState> {
-  const { audio, mediaItems, config, abortSignal, onProgress, batchContext } = params;
+  const { audio, mediaItems, config, abortSignal, onProgress, batchContext, fileHandle } = params;
   const startWallMs = performance.now();
   const dims = resolveExportDimensions(
     config.aspectMode,
@@ -409,6 +475,7 @@ export async function exportStudioVideo(params: {
       abortSignal,
       onProgress,
       batchContext,
+      fileHandle,
     });
   }
 
@@ -445,6 +512,7 @@ async function exportWithWebCodecs(params: {
   abortSignal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
   batchContext?: { index: number; total: number; label: string };
+  fileHandle?: FileSystemFileHandle | null;
 }): Promise<ExportProgressState> {
   const {
     profile,
@@ -462,6 +530,7 @@ async function exportWithWebCodecs(params: {
     abortSignal,
     onProgress,
     batchContext,
+    fileHandle,
   } = params;
 
   const targetSampleRate = profile.audioSampleRate;
@@ -487,44 +556,90 @@ async function exportWithWebCodecs(params: {
     };
   }
 
-  let mp4Muxer: Mp4Muxer<Mp4ArrayBufferTarget> | null = null;
-  let webmMuxer: WebmMuxer<WebmArrayBufferTarget> | null = null;
-  let mp4Target: Mp4ArrayBufferTarget | null = null;
-  let webmTarget: WebmArrayBufferTarget | null = null;
+  let mp4Muxer: Mp4Muxer<Mp4ArrayBufferTarget | Mp4FileStreamTarget> | null = null;
+  let webmMuxer: WebmMuxer<WebmArrayBufferTarget | WebmFileStreamTarget> | null = null;
+  let mp4ArrayTarget: Mp4ArrayBufferTarget | null = null;
+  let webmArrayTarget: WebmArrayBufferTarget | null = null;
+  let writableStream: FileSystemWritableFileStream | null = null;
+
+  if (fileHandle && typeof fileHandle.createWritable === 'function') {
+    try {
+      writableStream = await fileHandle.createWritable();
+    } catch {
+      writableStream = null;
+    }
+  }
 
   if (profile.container === 'mp4') {
-    mp4Target = new Mp4ArrayBufferTarget();
-    mp4Muxer = new Mp4Muxer({
-      target: mp4Target,
-      video: {
-        codec: 'avc',
-        width: dims.width,
-        height: dims.height,
-        frameRate: config.fps,
-      },
-      audio: {
-        codec: 'aac',
-        numberOfChannels: channels,
-        sampleRate: targetSampleRate,
-      },
-      fastStart: 'in-memory',
-    });
+    if (writableStream) {
+      const streamTarget = new Mp4FileStreamTarget(writableStream);
+      mp4Muxer = new Mp4Muxer({
+        target: streamTarget,
+        video: {
+          codec: 'avc',
+          width: dims.width,
+          height: dims.height,
+          frameRate: config.fps,
+        },
+        audio: {
+          codec: 'aac',
+          numberOfChannels: channels,
+          sampleRate: targetSampleRate,
+        },
+        fastStart: false,
+      });
+    } else {
+      mp4ArrayTarget = new Mp4ArrayBufferTarget();
+      mp4Muxer = new Mp4Muxer({
+        target: mp4ArrayTarget,
+        video: {
+          codec: 'avc',
+          width: dims.width,
+          height: dims.height,
+          frameRate: config.fps,
+        },
+        audio: {
+          codec: 'aac',
+          numberOfChannels: channels,
+          sampleRate: targetSampleRate,
+        },
+        fastStart: 'in-memory',
+      });
+    }
   } else {
-    webmTarget = new WebmArrayBufferTarget();
-    webmMuxer = new WebmMuxer({
-      target: webmTarget,
-      video: {
-        codec: profile.muxerVideoCodec as 'V_VP9' | 'V_VP8',
-        width: dims.width,
-        height: dims.height,
-        frameRate: config.fps,
-      },
-      audio: {
-        codec: 'A_OPUS',
-        numberOfChannels: channels,
-        sampleRate: targetSampleRate,
-      },
-    });
+    if (writableStream) {
+      const streamTarget = new WebmFileStreamTarget(writableStream);
+      webmMuxer = new WebmMuxer({
+        target: streamTarget,
+        video: {
+          codec: profile.muxerVideoCodec as 'V_VP9' | 'V_VP8',
+          width: dims.width,
+          height: dims.height,
+          frameRate: config.fps,
+        },
+        audio: {
+          codec: 'A_OPUS',
+          numberOfChannels: channels,
+          sampleRate: targetSampleRate,
+        },
+      });
+    } else {
+      webmArrayTarget = new WebmArrayBufferTarget();
+      webmMuxer = new WebmMuxer({
+        target: webmArrayTarget,
+        video: {
+          codec: profile.muxerVideoCodec as 'V_VP9' | 'V_VP8',
+          width: dims.width,
+          height: dims.height,
+          frameRate: config.fps,
+        },
+        audio: {
+          codec: 'A_OPUS',
+          numberOfChannels: channels,
+          sampleRate: targetSampleRate,
+        },
+      });
+    }
   }
 
   let encoderError: Error | null = null;
@@ -751,15 +866,38 @@ async function exportWithWebCodecs(params: {
 
     await Promise.all([videoEncoder.flush(), audioEncoder.flush()]);
 
+    const outputFileName =
+      fileHandle?.name ||
+      sanitizeOutputFileName(config.titleText, config.artistText, dims.aspectLabel, profile.container);
+
+    if (writableStream) {
+      if (mp4Muxer) mp4Muxer.finalize();
+      else if (webmMuxer) webmMuxer.finalize();
+      await writableStream.close();
+      return {
+        phase: 'complete',
+        currentFrame: totalFrames,
+        totalFrames,
+        elapsedMs: performance.now() - startWallMs,
+        encoderLabel: profile.label,
+        outputFormat: profile.container,
+        streamedToDisk: true,
+        batchIndex: batchContext?.index,
+        batchTotal: batchContext?.total,
+        batchLabel: batchContext?.label,
+        outputFileName,
+      };
+    }
+
     let buffer: ArrayBuffer;
     let mime: string;
-    if (mp4Muxer && mp4Target) {
+    if (mp4Muxer && mp4ArrayTarget) {
       mp4Muxer.finalize();
-      buffer = mp4Target.buffer;
+      buffer = mp4ArrayTarget.buffer;
       mime = 'video/mp4';
-    } else if (webmMuxer && webmTarget) {
+    } else if (webmMuxer && webmArrayTarget) {
       webmMuxer.finalize();
-      buffer = webmTarget.buffer;
+      buffer = webmArrayTarget.buffer;
       mime = 'video/webm';
     } else {
       throw new Error('Muxer target missing');
@@ -767,12 +905,6 @@ async function exportWithWebCodecs(params: {
 
     const blob = new Blob([buffer], { type: mime });
     const outputUrl = URL.createObjectURL(blob);
-    const outputFileName = sanitizeOutputFileName(
-      config.titleText,
-      config.artistText,
-      dims.aspectLabel,
-      profile.container
-    );
 
     return {
       phase: 'complete',
@@ -788,6 +920,15 @@ async function exportWithWebCodecs(params: {
       outputFileName,
       outputSizeBytes: blob.size,
     };
+  } catch (err) {
+    if (writableStream) {
+      try {
+        await writableStream.abort();
+      } catch {
+        // ignore
+      }
+    }
+    throw err;
   } finally {
     closeEncoders();
   }

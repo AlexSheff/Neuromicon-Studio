@@ -1,5 +1,16 @@
-import { Download, FolderOpen, Globe, Redo2, Save, Undo2 } from 'lucide-react';
-import React, { useRef } from 'react';
+import {
+  Download,
+  FolderOpen,
+  Globe,
+  PanelLeft,
+  PanelRight,
+  Redo2,
+  RotateCcw,
+  Save,
+  Undo2,
+} from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { tFor } from '../i18n';
 import { InspectorTab, Language } from '../types/studio';
 
@@ -10,11 +21,17 @@ interface TopBarProps {
   canUndo: boolean;
   canRedo: boolean;
   dimsLabel: string;
+  leftOpen: boolean;
+  rightOpen: boolean;
+  saveStatus: 'saved' | 'saving' | 'error';
+  onToggleLeftPanel: () => void;
+  onToggleRightPanel: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onToggleLanguage: () => void;
   onExportProjectJson: () => void;
   onImportProjectJson: (file: File) => void;
+  onResetWorkspace: () => void;
   onSelectSection: (section: 'media' | InspectorTab) => void;
   onStartExport: () => void;
 }
@@ -26,16 +43,23 @@ export function TopBar({
   canUndo,
   canRedo,
   dimsLabel,
+  leftOpen,
+  rightOpen,
+  saveStatus,
+  onToggleLeftPanel,
+  onToggleRightPanel,
   onUndo,
   onRedo,
   onToggleLanguage,
   onExportProjectJson,
   onImportProjectJson,
+  onResetWorkspace,
   onSelectSection,
   onStartExport,
 }: TopBarProps) {
   const t = tFor(lang);
   const jsonInputRef = useRef<HTMLInputElement>(null);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
   const navTabs: { id: InspectorTab; label: string }[] = [
     { id: 'clip', label: t.tabClip },
@@ -47,8 +71,23 @@ export function TopBar({
 
   return (
     <header className="h-12 border-b border-[#262B38] bg-[#0E1016] px-3 lg:px-4 flex items-center justify-between gap-3 shrink-0">
-      {/* Zone 1: Brand Wordmark & Project Spec */}
-      <div className="flex items-center gap-3 min-w-0">
+      {/* Zone 1: Panel Toggle, Brand Wordmark, Project Spec & Autosave Status */}
+      <div className="flex items-center gap-2 min-w-0">
+        <button
+          type="button"
+          onClick={onToggleLeftPanel}
+          title={t.toggleLeftPanel}
+          aria-label={t.toggleLeftPanel}
+          aria-pressed={leftOpen}
+          className={`hidden lg:inline-flex p-1.5 rounded-md border transition-colors cursor-pointer ${
+            leftOpen
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+              : 'border-[#262B38] bg-[#141821] text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <PanelLeft className="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+
         <a
           href="#top"
           onClick={(e) => {
@@ -59,13 +98,30 @@ export function TopBar({
         >
           {t.brandName}
         </a>
+
         <span className="hidden xl:inline-block px-2 py-0.5 rounded bg-[#141821] border border-[#262B38] text-[10px] font-mono tabular-nums text-gray-400 whitespace-nowrap">
           {dimsLabel}
+        </span>
+
+        <span
+          className={`hidden xl:inline-block text-[10px] font-mono whitespace-nowrap ${
+            saveStatus === 'error'
+              ? 'text-rose-400'
+              : saveStatus === 'saving'
+                ? 'text-amber-300'
+                : 'text-gray-500'
+          }`}
+        >
+          {saveStatus === 'error'
+            ? t.saveStatusError
+            : saveStatus === 'saving'
+              ? t.saveStatusSaving
+              : t.saveStatusSaved}
         </span>
       </div>
 
       {/* Zone 2: Inspector Quick-Focus Tabs */}
-      <nav className="hidden md:flex items-center gap-3.5 text-xs font-medium">
+      <nav className="hidden md:flex items-center gap-3 text-xs font-medium">
         <button
           type="button"
           onClick={() => onSelectSection('media')}
@@ -92,7 +148,7 @@ export function TopBar({
         ))}
       </nav>
 
-      {/* Zone 3: History, Project JSON, Language & Primary Export CTA */}
+      {/* Zone 3: History, Reset, Project JSON, Right Panel Toggle, Language & Export CTA */}
       <div className="flex items-center gap-1.5 shrink-0">
         <div className="hidden sm:flex items-center gap-1">
           <button
@@ -135,7 +191,7 @@ export function TopBar({
             className="hidden lg:inline-flex items-center gap-1 px-2 py-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-gray-500 text-[11px] font-medium text-gray-300 transition-colors cursor-pointer whitespace-nowrap"
           >
             <FolderOpen className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
-            <span className="hidden xl:inline">{t.importProjectJson}</span>
+            <span className="hidden 2xl:inline">{t.importProjectJson}</span>
           </button>
           <button
             type="button"
@@ -145,9 +201,34 @@ export function TopBar({
             className="hidden lg:inline-flex items-center gap-1 px-2 py-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-gray-500 text-[11px] font-medium text-gray-300 transition-colors cursor-pointer whitespace-nowrap"
           >
             <Save className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
-            <span className="hidden xl:inline">{t.exportProjectJson}</span>
+            <span className="hidden 2xl:inline">{t.exportProjectJson}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmResetOpen(true)}
+            title={t.resetWorkspaceBtn}
+            aria-label={t.resetWorkspaceBtn}
+            className="inline-flex items-center gap-1 px-2 py-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-rose-500/60 hover:text-rose-300 text-[11px] font-medium text-gray-300 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+            <span className="hidden xl:inline">{t.resetWorkspaceBtn}</span>
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={onToggleRightPanel}
+          title={t.toggleRightPanel}
+          aria-label={t.toggleRightPanel}
+          aria-pressed={rightOpen}
+          className={`hidden lg:inline-flex p-1.5 rounded-md border transition-colors cursor-pointer ${
+            rightOpen
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+              : 'border-[#262B38] bg-[#141821] text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <PanelRight className="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
 
         <button
           type="button"
@@ -169,6 +250,45 @@ export function TopBar({
           <span>{t.primaryExportCta}</span>
         </button>
       </div>
+
+      {confirmResetOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="reset-dialog-title"
+              className="w-full max-w-sm rounded-lg border border-[#323849] bg-[#12151C] shadow-2xl p-5 space-y-4"
+            >
+              <div className="space-y-1.5">
+                <h3 id="reset-dialog-title" className="text-sm font-semibold text-gray-100">
+                  {t.resetConfirmTitle}
+                </h3>
+                <p className="text-xs text-gray-400 leading-relaxed">{t.resetConfirmDesc}</p>
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmResetOpen(false)}
+                  className="px-3 py-1.5 rounded-md border border-[#262B38] bg-[#161A24] hover:border-gray-500 text-xs font-medium text-gray-200 cursor-pointer"
+                >
+                  {t.cancelAction}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmResetOpen(false);
+                    onResetWorkspace();
+                  }}
+                  className="px-3.5 py-1.5 rounded-md bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white cursor-pointer"
+                >
+                  {t.resetConfirmProceed}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </header>
   );
 }

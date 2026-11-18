@@ -1,6 +1,8 @@
 import {
+  AlertTriangle,
   AudioWaveform,
   Camera,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -15,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
@@ -24,6 +27,7 @@ import {
   StudioConfig,
   VisualMediaState,
 } from '../types/studio';
+import { isCanvasFilterSupported } from '../utils/canvasRenderer';
 import { resolveExportDimensions } from '../utils/videoExporter';
 
 interface PreviewStageProps {
@@ -95,9 +99,15 @@ export function PreviewStage({
   const t = tFor(lang);
   const [presetDrawerOpen, setPresetDrawerOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
+  const [presetAnchorRect, setPresetAnchorRect] = useState<DOMRect | null>(null);
+  const [shortcutsAnchorRect, setShortcutsAnchorRect] = useState<DOMRect | null>(null);
+  const presetBtnRef = useRef<HTMLButtonElement>(null);
+  const shortcutsBtnRef = useRef<HTMLButtonElement>(null);
 
   const stageContainerRef = useRef<HTMLDivElement>(null);
   const [stageSize, setStageSize] = useState<{ w: number; h: number }>({ w: 640, h: 360 });
+  const filterSupported = useMemo(() => isCanvasFilterSupported(), []);
 
   const dims = resolveExportDimensions(
     config.aspectMode,
@@ -167,16 +177,24 @@ export function PreviewStage({
   const activePresetMeta = t.presets[config.beatPreset];
   const hasAnythingLoaded =
     Boolean(audio) || mediaItems.length > 0 || config.generatorEffect !== 'none';
+  const showOnboarding = !audio && mediaItems.length === 0 && !onboardingDismissed;
   const canPlay = hasAnythingLoaded;
 
   return (
-    <main className="flex-1 min-w-0 flex flex-col bg-[#090B10] relative overflow-hidden">
+    <main className="flex-1 min-w-0 lg:min-w-[440px] xl:min-w-[520px] flex flex-col bg-[#090B10] relative overflow-hidden">
       {/* Compact Stage Sub-Toolbar */}
       <div className="px-3 py-2 border-b border-[#262B38] bg-[#0E1016] flex flex-wrap items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-1.5 flex-wrap min-w-0">
           <button
+            ref={presetBtnRef}
             type="button"
-            onClick={() => setPresetDrawerOpen((v) => !v)}
+            onClick={() => {
+              if (!presetDrawerOpen && presetBtnRef.current) {
+                setPresetAnchorRect(presetBtnRef.current.getBoundingClientRect());
+              }
+              setPresetDrawerOpen((v) => !v);
+              setShortcutsOpen(false);
+            }}
             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-xs font-semibold text-amber-300 transition-colors cursor-pointer whitespace-nowrap"
           >
             <AudioWaveform className="w-3.5 h-3.5" aria-hidden="true" />
@@ -236,8 +254,15 @@ export function PreviewStage({
           </div>
 
           <button
+            ref={shortcutsBtnRef}
             type="button"
-            onClick={() => setShortcutsOpen((v) => !v)}
+            onClick={() => {
+              if (!shortcutsOpen && shortcutsBtnRef.current) {
+                setShortcutsAnchorRect(shortcutsBtnRef.current.getBoundingClientRect());
+              }
+              setShortcutsOpen((v) => !v);
+              setPresetDrawerOpen(false);
+            }}
             className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
               shortcutsOpen
                 ? 'border-amber-500/60 bg-amber-500/12 text-amber-300'
@@ -248,84 +273,120 @@ export function PreviewStage({
             <span>{t.shortcutsBtnLabel}</span>
           </button>
 
-          {shortcutsOpen && (
-            <div className="absolute top-9 right-0 z-40 w-72 rounded-lg border border-[#323849] bg-[#141822] shadow-2xl p-3.5 space-y-2">
-              <div className="flex items-center justify-between border-b border-[#262B38] pb-1.5">
-                <span className="text-xs font-semibold text-gray-100">{t.shortcutsTitle}</span>
-                <button
-                  type="button"
+          {shortcutsOpen &&
+            shortcutsAnchorRect &&
+            createPortal(
+              <>
+                <div
+                  className="fixed inset-0 z-40"
                   onClick={() => setShortcutsOpen(false)}
-                  className="text-gray-400 hover:text-gray-100 cursor-pointer"
+                />
+                <div
+                  style={{
+                    top: Math.min(window.innerHeight - 280, shortcutsAnchorRect.bottom + 8),
+                    right: Math.max(12, window.innerWidth - shortcutsAnchorRect.right),
+                  }}
+                  className="fixed z-50 w-72 rounded-lg border border-[#323849] bg-[#141822] shadow-2xl p-3.5 space-y-2"
                 >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <div className="space-y-1 text-[11px] text-gray-300">
-                {[
-                  ['Space', lang === 'ru' ? 'Старт / Пауза' : 'Play / Pause'],
-                  ['S', lang === 'ru' ? 'Разрезать клип' : 'Split clip at playhead'],
-                  ['M', lang === 'ru' ? 'Метка бита' : 'Add beat marker'],
-                  ['I / O', lang === 'ru' ? 'Границы обрезки In/Out' : 'Set Trim In / Out'],
-                  ['Ctrl+D', lang === 'ru' ? 'Дублировать клип' : 'Duplicate selected clip'],
-                  ['Del', lang === 'ru' ? 'Удалить клип' : 'Ripple delete clip'],
-                  [', / .', lang === 'ru' ? 'Шаг -1 / +1 кадр' : 'Step -1 / +1 frame'],
-                  ['← / →', lang === 'ru' ? 'Перемотка ±0.5с' : 'Seek ±0.5s'],
-                  ['Ctrl+Z / Y', lang === 'ru' ? 'Отмена / Повтор' : 'Undo / Redo'],
-                ].map(([keyLabel, desc]) => (
-                  <div key={keyLabel} className="flex items-center justify-between gap-2">
-                    <span className="text-gray-400">{desc}</span>
-                    <kbd className="px-1.5 py-0.5 rounded bg-[#0B0D11] border border-[#262B38] font-mono text-[10px] text-amber-300">
-                      {keyLabel}
-                    </kbd>
+                  <div className="flex items-center justify-between border-b border-[#262B38] pb-1.5">
+                    <span className="text-xs font-semibold text-gray-100">{t.shortcutsTitle}</span>
+                    <button
+                      type="button"
+                      onClick={() => setShortcutsOpen(false)}
+                      aria-label={t.closeLabel}
+                      className="text-gray-400 hover:text-gray-100 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
+                  <div className="space-y-1 text-[11px] text-gray-300">
+                    {[
+                      ['Space', lang === 'ru' ? 'Старт / Пауза' : 'Play / Pause'],
+                      ['S', lang === 'ru' ? 'Разрезать клип' : 'Split clip at playhead'],
+                      ['M', lang === 'ru' ? 'Метка бита' : 'Add beat marker'],
+                      ['I / O', lang === 'ru' ? 'Границы обрезки In/Out' : 'Set Trim In / Out'],
+                      ['Ctrl+D', lang === 'ru' ? 'Дублировать клип' : 'Duplicate selected clip'],
+                      ['Del', lang === 'ru' ? 'Удалить клип' : 'Ripple delete clip'],
+                      [', / .', lang === 'ru' ? 'Шаг -1 / +1 кадр' : 'Step -1 / +1 frame'],
+                      ['← / →', lang === 'ru' ? 'Перемотка ±0.5с' : 'Seek ±0.5s'],
+                      ['Ctrl+Z / Y', lang === 'ru' ? 'Отмена / Повтор' : 'Undo / Redo'],
+                    ].map(([keyLabel, desc]) => (
+                      <div key={keyLabel} className="flex items-center justify-between gap-2">
+                        <span className="text-gray-400">{desc}</span>
+                        <kbd className="px-1.5 py-0.5 rounded bg-[#0B0D11] border border-[#262B38] font-mono text-[10px] text-amber-300">
+                          {keyLabel}
+                        </kbd>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>,
+              document.body
+            )}
         </div>
       </div>
 
-      {/* Beat Preset Quick Selector Popover */}
-      {presetDrawerOpen && (
-        <div className="absolute top-12 left-4 right-4 z-30 max-w-2xl rounded-lg border border-[#323849] bg-[#141822] shadow-2xl p-4">
-          <div className="flex items-start justify-between gap-4 mb-3">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-100">{t.beatPresetDrawerTitle}</h3>
-              <p className="text-xs text-gray-400 mt-0.5">{t.beatPresetDrawerSubtitle}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setPresetDrawerOpen(false)}
-              className="p-1.5 rounded-md text-gray-400 hover:text-gray-100 hover:bg-[#1E2330] cursor-pointer"
-              aria-label={t.closeLabel}
+      {/* Beat Preset Quick Selector Popover (Portal) */}
+      {presetDrawerOpen &&
+        presetAnchorRect &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setPresetDrawerOpen(false)} />
+            <div
+              style={{
+                top: Math.min(window.innerHeight - 280, presetAnchorRect.bottom + 8),
+                left: Math.max(12, Math.min(window.innerWidth - 580, presetAnchorRect.left)),
+              }}
+              className="fixed z-50 w-[min(640px,calc(100vw-24px))] rounded-lg border border-[#323849] bg-[#141822] shadow-2xl p-4"
             >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
-            {BEAT_PRESET_IDS.map((id) => {
-              const info = t.presets[id];
-              const isSelected = config.beatPreset === id;
-              return (
+              <div className="flex items-start justify-between gap-4 mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-100">{t.beatPresetDrawerTitle}</h3>
+                  <p className="text-xs text-gray-400 mt-0.5">{t.beatPresetDrawerSubtitle}</p>
+                </div>
                 <button
-                  key={id}
                   type="button"
-                  onClick={() => {
-                    onSelectBeatPreset(id);
-                    setPresetDrawerOpen(false);
-                  }}
-                  className={`text-left p-3 rounded-md border transition-colors cursor-pointer ${
-                    isSelected
-                      ? 'border-amber-500 bg-amber-500/12'
-                      : 'border-[#262B38] bg-[#10131A] hover:border-gray-500'
-                  }`}
+                  onClick={() => setPresetDrawerOpen(false)}
+                  className="p-1.5 rounded-md text-gray-400 hover:text-gray-100 hover:bg-[#1E2330] cursor-pointer"
+                  aria-label={t.closeLabel}
                 >
-                  <div className="text-xs font-semibold text-gray-100">{info.name}</div>
-                  <div className="text-[11px] text-gray-400 mt-1 leading-snug">{info.desc}</div>
+                  <X className="w-4 h-4" />
                 </button>
-              );
-            })}
-          </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                {BEAT_PRESET_IDS.map((id) => {
+                  const info = t.presets[id];
+                  const isSelected = config.beatPreset === id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => {
+                        onSelectBeatPreset(id);
+                        setPresetDrawerOpen(false);
+                      }}
+                      className={`text-left p-3 rounded-md border transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'border-amber-500 bg-amber-500/12'
+                          : 'border-[#262B38] bg-[#10131A] hover:border-gray-500'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold text-gray-100">{info.name}</div>
+                      <div className="text-[11px] text-gray-400 mt-1 leading-snug">{info.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </>,
+          document.body
+        )}
+
+      {/* Safari Canvas Filter Warning */}
+      {!filterSupported && (
+        <div className="px-3 py-1 bg-amber-500/10 border-b border-amber-500/30 text-[11px] text-amber-200 flex items-center gap-2 shrink-0">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
+          <span className="truncate">{t.safariFilterWarning}</span>
         </div>
       )}
 
@@ -343,20 +404,86 @@ export function PreviewStage({
         >
           <canvas ref={canvasRef} className="w-full h-full block" />
 
-          {!hasAnythingLoaded && (
-            <div className="absolute inset-0 bg-[#090B10]/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center">
-              <SlidersHorizontal className="w-7 h-7 text-amber-400 mb-3" aria-hidden="true" />
-              <h3 className="text-base font-semibold text-gray-100 max-w-md">{t.emptyStageTitle}</h3>
-              <p className="text-xs text-gray-400 max-w-sm mt-1.5 leading-relaxed">
-                {t.emptyStageHint}
-              </p>
-              <button
-                type="button"
-                onClick={onLoadDemoBeat}
-                className="mt-4 px-4 py-2 rounded-md bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-zinc-950 transition-colors cursor-pointer"
-              >
-                {t.loadDemoBeat}
-              </button>
+          {(!hasAnythingLoaded || showOnboarding) && (
+            <div className="absolute inset-0 bg-[#090B10]/82 backdrop-blur-xs flex flex-col items-center justify-center p-4 sm:p-6 overflow-y-auto">
+              <div className="w-full max-w-md rounded-lg border border-[#262B38] bg-[#11151E]/95 p-4 space-y-3 shadow-2xl">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <SlidersHorizontal className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+                    <h3 className="text-sm font-semibold text-gray-100">{t.onboardingTitle}</h3>
+                  </div>
+                  {hasAnythingLoaded && (
+                    <button
+                      type="button"
+                      onClick={() => setOnboardingDismissed(true)}
+                      className="text-[11px] text-gray-400 hover:text-gray-200 cursor-pointer"
+                    >
+                      {t.dismissOnboarding}
+                    </button>
+                  )}
+                </div>
+
+                <ul className="space-y-1.5 text-xs text-gray-300">
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2
+                      className={`w-3.5 h-3.5 shrink-0 ${audio ? 'text-emerald-400' : 'text-gray-600'}`}
+                      aria-hidden="true"
+                    />
+                    <span>{t.onboardingStep1}</span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        mediaItems.length > 0 || config.generatorEffect !== 'none'
+                          ? 'text-emerald-400'
+                          : 'text-gray-600'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>{t.onboardingStep2}</span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-amber-400/80" aria-hidden="true" />
+                    <span>{t.onboardingStep3}</span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-gray-600" aria-hidden="true" />
+                    <span>{t.onboardingStep4}</span>
+                  </li>
+                </ul>
+
+                {!audio && (
+                  <p className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5">
+                    {t.onboardingMissingAudio}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={onLoadDemoBeat}
+                    className="px-3.5 py-1.5 rounded-md bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-zinc-950 transition-colors cursor-pointer"
+                  >
+                    {t.loadDemoBeat}
+                  </button>
+                  <div className="inline-flex rounded border border-[#262B38] bg-[#0B0D11] p-0.5">
+                    {(['16:9', '9:16', '1:1'] as ExportAspectMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => onSelectAspectMode(mode)}
+                        className={`px-2 py-0.5 rounded text-[11px] font-mono cursor-pointer ${
+                          config.aspectMode === mode
+                            ? 'bg-amber-500/20 text-amber-300 font-semibold'
+                            : 'text-gray-400 hover:text-gray-200'
+                        }`}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>

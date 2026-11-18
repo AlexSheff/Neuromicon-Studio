@@ -130,6 +130,7 @@ function drawCoverImage(
 }
 
 let cachedFilterSupport: boolean | null = null;
+let blurCanvasTemp: HTMLCanvasElement | null = null;
 
 function supportsCanvasFilter(ctx: CanvasRenderingContext2D): boolean {
   if (cachedFilterSupport !== null) return cachedFilterSupport;
@@ -147,6 +148,63 @@ function supportsCanvasFilter(ctx: CanvasRenderingContext2D): boolean {
     cachedFilterSupport = false;
     return false;
   }
+}
+
+export function isCanvasFilterSupported(): boolean {
+  if (cachedFilterSupport !== null) return cachedFilterSupport;
+  if (typeof document === 'undefined') return true;
+  const c = document.createElement('canvas');
+  c.width = 4;
+  c.height = 4;
+  const ctx = c.getContext('2d');
+  return ctx ? supportsCanvasFilter(ctx) : true;
+}
+
+/**
+ * Safari lacks CanvasRenderingContext2D.filter support; downsample into a tiny offscreen
+ * buffer and upscale with imageSmoothingEnabled for fast, soft hardware-bilinear blur.
+ */
+function drawDownscaledBlurFallback(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement,
+  srcW: number,
+  srcH: number,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+  blurStrengthPx: number,
+  scaleFactor = 1,
+  panX = 0,
+  panY = 0,
+  useCover = true
+) {
+  if (!blurCanvasTemp) blurCanvasTemp = document.createElement('canvas');
+  const factor = Math.max(0.03, Math.min(0.28, 1 / (1 + blurStrengthPx * 0.65)));
+  const bw = Math.max(12, Math.round(dw * factor));
+  const bh = Math.max(12, Math.round(dh * factor));
+  if (blurCanvasTemp.width !== bw || blurCanvasTemp.height !== bh) {
+    blurCanvasTemp.width = bw;
+    blurCanvasTemp.height = bh;
+  }
+  const bctx = blurCanvasTemp.getContext('2d', { alpha: false });
+  if (!bctx) {
+    if (useCover) drawCoverImage(ctx, source, srcW, srcH, dw, dh, scaleFactor, panX, panY);
+    else ctx.drawImage(source as CanvasImageSource, dx, dy, dw, dh);
+    return;
+  }
+  bctx.imageSmoothingEnabled = true;
+  bctx.imageSmoothingQuality = 'low';
+  if (useCover) {
+    drawCoverImage(bctx, source, srcW, srcH, bw, bh, scaleFactor, panX * factor, panY * factor);
+  } else {
+    bctx.drawImage(source as CanvasImageSource, 0, 0, bw, bh);
+  }
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(blurCanvasTemp, dx, dy, dw, dh);
+  ctx.restore();
 }
 
 function applyFallbackColorAndBrightness(
@@ -174,6 +232,12 @@ function applyFallbackColorAndBrightness(
     ctx.fillStyle = 'rgba(30, 80, 145, 0.18)';
     ctx.fillRect(x, y, w, h);
     ctx.restore();
+  } else if (filter === 'high_contrast') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.fillStyle = 'rgba(128, 128, 128, 0.24)';
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
   }
   if (brightness < 0.99) {
     ctx.save();
@@ -199,17 +263,32 @@ function drawFitBlurBackdrop(
   config: StudioConfig
 ) {
   const hasFilter = supportsCanvasFilter(ctx);
+  const bgExtraBlur = Math.round(Math.min(dstW, dstH) * 0.032);
   ctx.save();
   if (hasFilter) {
     ctx.filter = buildFilterString(
       config.mediaFilter,
       config.mediaBrightness * 0.48,
       config.mediaBlur,
-      Math.round(Math.min(dstW, dstH) * 0.032)
+      bgExtraBlur
     );
-  }
-  drawCoverImage(ctx, source, srcW, srcH, dstW, dstH, 1.14, 0, 0);
-  if (!hasFilter) {
+    drawCoverImage(ctx, source, srcW, srcH, dstW, dstH, 1.14, 0, 0);
+  } else {
+    drawDownscaledBlurFallback(
+      ctx,
+      source,
+      srcW,
+      srcH,
+      0,
+      0,
+      dstW,
+      dstH,
+      Math.max(12, config.mediaBlur + bgExtraBlur),
+      1.14,
+      0,
+      0,
+      true
+    );
     applyFallbackColorAndBrightness(
       ctx,
       0,
@@ -248,7 +327,25 @@ function drawFitBlurBackdrop(
   ctx.shadowColor = 'rgba(0,0,0,0.65)';
   ctx.shadowBlur = Math.min(dstW, dstH) * 0.04;
   ctx.shadowOffsetY = Math.min(dstW, dstH) * 0.015;
-  ctx.drawImage(source as CanvasImageSource, x, y, drawW, drawH);
+  if (!hasFilter && config.mediaBlur > 0.4) {
+    drawDownscaledBlurFallback(
+      ctx,
+      source,
+      srcW,
+      srcH,
+      x,
+      y,
+      drawW,
+      drawH,
+      config.mediaBlur,
+      1,
+      0,
+      0,
+      false
+    );
+  } else {
+    ctx.drawImage(source as CanvasImageSource, x, y, drawW, drawH);
+  }
   if (!hasFilter) {
     applyFallbackColorAndBrightness(ctx, x, y, drawW, drawH, config.mediaFilter, config.mediaBrightness);
   }
@@ -411,19 +508,54 @@ function drawSingleClipLayer(
     const hasFilter = supportsCanvasFilter(ctx);
     if (hasFilter) {
       ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
-    }
-    drawCoverImage(
-      ctx,
-      drawSource,
-      drawSrcW,
-      drawSrcH,
-      width,
-      height,
-      totalScale,
-      panX,
-      panY
-    );
-    if (!hasFilter) {
+      drawCoverImage(
+        ctx,
+        drawSource,
+        drawSrcW,
+        drawSrcH,
+        width,
+        height,
+        totalScale,
+        panX,
+        panY
+      );
+    } else if (config.mediaBlur > 0.4) {
+      drawDownscaledBlurFallback(
+        ctx,
+        drawSource,
+        drawSrcW,
+        drawSrcH,
+        0,
+        0,
+        width,
+        height,
+        config.mediaBlur,
+        totalScale,
+        panX,
+        panY,
+        true
+      );
+      applyFallbackColorAndBrightness(
+        ctx,
+        0,
+        0,
+        width,
+        height,
+        config.mediaFilter,
+        config.mediaBrightness
+      );
+    } else {
+      drawCoverImage(
+        ctx,
+        drawSource,
+        drawSrcW,
+        drawSrcH,
+        width,
+        height,
+        totalScale,
+        panX,
+        panY
+      );
       applyFallbackColorAndBrightness(
         ctx,
         0,
@@ -1150,6 +1282,10 @@ export function renderStudioFrame(params: RenderFrameParams): void {
   }
 
   // 4. Beat-Synced Visualizer Layer
+  if (config.showVisualizer !== false) {
+  const useCustomVis = config.visualizerColor && config.visualizerColor !== 'auto';
+  const visPrimary = useCustomVis ? config.visualizerColor : scheme.accentColor;
+  const visSecondary = useCustomVis ? config.visualizerColor : scheme.visualizerSecondary;
   const visAlpha = config.visualizerOpacity;
   const visScale = config.visualizerScale;
   const visWidth = Math.max(0.25, Math.min(1.0, config.visualizerWidth));
@@ -1187,8 +1323,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             : visY - h;
 
       const grad = ctx.createLinearGradient(bx, by, bx, by + h);
-      grad.addColorStop(0, scheme.visualizerSecondary);
-      grad.addColorStop(1, scheme.accentColor);
+      grad.addColorStop(0, visSecondary);
+      grad.addColorStop(1, visPrimary);
       ctx.fillStyle = grad;
 
       const radius = Math.min(barW / 2, h / 2);
@@ -1203,7 +1339,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       minDim * 0.16 * visScale * (0.55 + visWidth * 0.65) * (1 + metrics.beatPulse * 0.08);
     const bins = 48;
 
-    ctx.strokeStyle = hexToRgba(scheme.accentColor, 0.35 + metrics.beatPulse * 0.45);
+    ctx.strokeStyle = hexToRgba(visPrimary, 0.35 + metrics.beatPulse * 0.45);
     ctx.lineWidth = Math.max(1.2, minDim * 0.003 * visThick);
     ctx.beginPath();
     ctx.arc(cx, cy, baseRadius * 0.94, 0, Math.PI * 2);
@@ -1221,7 +1357,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       const x2 = cx + Math.cos(angle) * r2;
       const y2 = cy + Math.sin(angle) * r2;
 
-      ctx.strokeStyle = i % 2 === 0 ? scheme.accentColor : scheme.visualizerSecondary;
+      ctx.strokeStyle = i % 2 === 0 ? visPrimary : visSecondary;
       ctx.lineWidth = Math.max(1.5, minDim * 0.0052 * visThick);
       ctx.lineCap = 'round';
       ctx.beginPath();
@@ -1246,7 +1382,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
         ctx.quadraticCurveTo(prevX, prevY, (prevX + px) / 2, (prevY + py) / 2);
       }
     }
-    ctx.strokeStyle = scheme.accentColor;
+    ctx.strokeStyle = visPrimary;
     ctx.lineWidth = Math.max(1.5, minDim * 0.0045 * visThick);
     ctx.lineCap = 'round';
     ctx.stroke();
@@ -1258,7 +1394,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       if (i === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
-    ctx.strokeStyle = hexToRgba(scheme.visualizerSecondary, config.mirrorVisualizer ? 0.85 : 0.5);
+    ctx.strokeStyle = hexToRgba(visSecondary, config.mirrorVisualizer ? 0.85 : 0.5);
     ctx.lineWidth = Math.max(1, minDim * (config.mirrorVisualizer ? 0.0038 : 0.0022) * visThick);
     ctx.stroke();
   } else if (config.beatPreset === 'beat_zoom') {
@@ -1267,7 +1403,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     const rightX = (width + spanW) / 2 - minDim * 0.03;
     const railH = (height - minDim * 0.09) * (0.15 + metrics.bass * 0.65) * visScale;
     const railW = Math.max(2, minDim * 0.0055 * visThick);
-    ctx.fillStyle = scheme.accentColor;
+    ctx.fillStyle = visPrimary;
     ctx.beginPath();
     ctx.roundRect(leftX, (height - railH) / 2, railW, railH, railW / 2);
     ctx.roundRect(rightX - railW, (height - railH) / 2, railW, railH, railW / 2);
@@ -1295,8 +1431,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
 
       ctx.fillStyle =
         i % 3 === 0
-          ? hexToRgba(scheme.accentColor, 0.35 + metrics.treble * 0.55)
-          : hexToRgba(scheme.visualizerSecondary, 0.25 + metrics.mid * 0.45);
+          ? hexToRgba(visPrimary, 0.35 + metrics.treble * 0.55)
+          : hexToRgba(visSecondary, 0.25 + metrics.mid * 0.45);
       ctx.beginPath();
       ctx.arc(px, py, radius, 0, Math.PI * 2);
       ctx.fill();
@@ -1306,7 +1442,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     const frameX = (width - frameW) / 2;
     const padY = minDim * 0.05;
     const frameH = height - padY * 2;
-    ctx.strokeStyle = hexToRgba(scheme.textColor, 0.22 + metrics.beatPulse * 0.35);
+    ctx.strokeStyle = hexToRgba(useCustomVis ? visPrimary : scheme.textColor, 0.22 + metrics.beatPulse * 0.35);
     ctx.lineWidth = Math.max(1, minDim * 0.0022 * visThick);
     ctx.strokeRect(frameX, padY, frameW, frameH);
 
@@ -1314,13 +1450,14 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     const progW = Math.max(20, frameW - progPad * 2);
     const progY = height - padY - progPad * 0.65;
     const barH = Math.max(2, minDim * 0.003 * visThick);
-    ctx.fillStyle = hexToRgba(scheme.textColor, 0.18);
+    ctx.fillStyle = hexToRgba(useCustomVis ? visPrimary : scheme.textColor, 0.18);
     ctx.fillRect(frameX + progPad, progY, progW, barH);
-    ctx.fillStyle = scheme.accentColor;
+    ctx.fillStyle = visPrimary;
     ctx.fillRect(frameX + progPad, progY, progW * progress, barH);
   }
 
   ctx.restore();
+  }
 
   // 5. Animated Typography Layer
   if (config.showText && (config.titleText || config.artistText || config.albumText)) {
@@ -1490,9 +1627,12 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     scheme.visualizerSecondary
   );
 
-  // 5c. Multi-Layer Text & Image Overlays
+  // 5c. Multi-Layer Text & Image Overlays (respect optional startSec / durationSec timing)
   if (config.overlays && config.overlays.length > 0) {
     for (const ov of config.overlays) {
+      if (typeof ov.startSec === 'number' && typeof ov.durationSec === 'number') {
+        if (localTime < ov.startSec || localTime > ov.startSec + ov.durationSec) continue;
+      }
       ctx.save();
       ctx.globalAlpha = Math.max(0.05, Math.min(1, ov.opacity));
       const ox = ov.xPct * width;

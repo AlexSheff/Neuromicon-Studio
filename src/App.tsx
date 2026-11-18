@@ -1,6 +1,5 @@
 import { AlertTriangle, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExportModal } from './components/ExportModal';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { InspectorPanel } from './components/InspectorPanel';
 import { MediaInputPanel } from './components/MediaInputPanel';
 import { PreviewStage } from './components/PreviewStage';
@@ -54,6 +53,7 @@ import {
   clearProjectIDB,
   loadBlobFromIDB,
   loadProjectFromIDB,
+  pruneOrphanedBlobs,
   saveBlobToIDB,
   saveProjectToIDB,
   SerializedProject,
@@ -63,8 +63,13 @@ import { formatSrtTime, parseSubtitles } from './utils/subtitleParser';
 import {
   buildSocialMetadataText,
   exportStudioVideo,
+  probeExportCapabilities,
   resolveExportDimensions,
 } from './utils/videoExporter';
+
+const ExportModal = lazy(() =>
+  import('./components/ExportModal').then((m) => ({ default: m.ExportModal }))
+);
 
 const IDLE_EXPORT_STATE: ExportProgressState = {
   phase: 'idle',
@@ -122,6 +127,59 @@ function cloneSnapshot(
   };
 }
 
+function readStoredPanelBool(key: string, fallback: boolean): boolean {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === '1') return true;
+    if (raw === '0') return false;
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+function readStoredPanelWidth(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const num = Number(window.localStorage.getItem(key));
+    if (Number.isFinite(num) && num >= min && num <= max) return num;
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+function insertClipAfterSelection(
+  prev: VisualMediaState[],
+  newClip: VisualMediaState,
+  selectedClipId: string | null
+): VisualMediaState[] {
+  if (!selectedClipId) return [...prev, newClip];
+  const idx = prev.findIndex((m) => m.id === selectedClipId);
+  if (idx < 0 || idx === prev.length - 1) return [...prev, newClip];
+  const copy = [...prev];
+  copy.splice(idx + 1, 0, newClip);
+  return copy;
+}
+
+function snapshotSegmentDurations(
+  items: VisualMediaState[],
+  clipDuration: number,
+  cfg: StudioConfig,
+  beatCuts: number[]
+): VisualMediaState[] {
+  if (cfg.slideshowMode === 'custom_durations' || items.length === 0) return items;
+  const segs = computeClipTimelineSegments(items, clipDuration, cfg, beatCuts);
+  return items.map((item, idx) => {
+    const seg = segs.find((s) => s.clipIndex === idx && !s.isLoopRepeat);
+    if (!seg) return item;
+    return {
+      ...item,
+      durationSec: Math.max(0.5, Number((seg.endSec - seg.startSec).toFixed(2))),
+      transitionOut: cfg.transitionType,
+    };
+  });
+}
+
 export default function App() {
   const [lang, setLang] = useState<Language>('en');
   const [activeTab, setActiveTab] = useState<InspectorTab>('effects');
@@ -140,6 +198,21 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [exportState, setExportState] = useState<ExportProgressState>(IDLE_EXPORT_STATE);
   const [historyFlags, setHistoryFlags] = useState({ canUndo: false, canRedo: false });
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+  const [undoToast, setUndoToast] = useState<string | null>(null);
+
+  const [leftOpen, setLeftOpen] = useState(() =>
+    readStoredPanelBool('neuromicon_left_panel_open_v1', true)
+  );
+  const [rightOpen, setRightOpen] = useState(() =>
+    readStoredPanelBool('neuromicon_right_panel_open_v1', true)
+  );
+  const [leftWidth, setLeftWidth] = useState(() =>
+    readStoredPanelWidth('neuromicon_left_panel_w_v1', 310, 260, 420)
+  );
+  const [rightWidth, setRightWidth] = useState(() =>
+    readStoredPanelWidth('neuromicon_right_panel_w_v1', 340, 280, 440)
+  );
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -161,7 +234,14 @@ export default function App() {
   const selectedClipIdRef = useRef<string | null>(selectedClipId);
   const selectedFxIdRef = useRef<string | null>(selectedFxId);
   const audioRef = useRef<AudioTrackState | null>(audio);
+  const langRef = useRef<Language>(lang);
   const errorTimerRef = useRef<number | null>(null);
+  const undoToastTimerRef = useRef<number | null>(null);
+  const panelDragRef = useRef<{
+    side: 'left' | 'right';
+    startX: number;
+    startW: number;
+  } | null>(null);
 
   // Persistence & History Refs
   const hydratedRef = useRef(false);
@@ -178,6 +258,7 @@ export default function App() {
   selectedClipIdRef.current = selectedClipId;
   selectedFxIdRef.current = selectedFxId;
   audioRef.current = audio;
+  langRef.current = lang;
   isLoopingRef.current = isLooping;
 
   const t = tFor(lang);
@@ -191,6 +272,17 @@ export default function App() {
       setNoticeError(null);
       errorTimerRef.current = null;
     }, 6500);
+  }, []);
+
+  const showUndoToast = useCallback((msg: string) => {
+    setUndoToast(msg);
+    if (undoToastTimerRef.current !== null) {
+      window.clearTimeout(undoToastTimerRef.current);
+    }
+    undoToastTimerRef.current = window.setTimeout(() => {
+      setUndoToast(null);
+      undoToastTimerRef.current = null;
+    }, 5000);
   }, []);
 
   const syncHistoryFlags = useCallback(() => {
@@ -295,6 +387,61 @@ export default function App() {
   }, [syncHistoryFlags]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem('neuromicon_left_panel_open_v1', leftOpen ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [leftOpen]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('neuromicon_right_panel_open_v1', rightOpen ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [rightOpen]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('neuromicon_left_panel_w_v1', String(Math.round(leftWidth)));
+    } catch {
+      // ignore
+    }
+  }, [leftWidth]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('neuromicon_right_panel_w_v1', String(Math.round(rightWidth)));
+    } catch {
+      // ignore
+    }
+  }, [rightWidth]);
+
+  useEffect(() => {
+    const onPointerMove = (e: PointerEvent) => {
+      if (!panelDragRef.current) return;
+      const { side, startX, startW } = panelDragRef.current;
+      if (side === 'left') {
+        setLeftWidth(Math.max(260, Math.min(420, startW + (e.clientX - startX))));
+      } else {
+        setRightWidth(Math.max(280, Math.min(440, startW - (e.clientX - startX))));
+      }
+    };
+    const onPointerUp = () => {
+      panelDragRef.current = null;
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+    };
+  }, []);
+
+  useEffect(() => {
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
     reducedMotionRef.current = mq.matches;
     const onChange = (e: MediaQueryListEvent) => {
@@ -308,6 +455,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
+      if (undoToastTimerRef.current !== null) window.clearTimeout(undoToastTimerRef.current);
       if (historyDebounceRef.current !== null) window.clearTimeout(historyDebounceRef.current);
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
       exportAbortRef.current?.abort();
@@ -676,26 +824,29 @@ export default function App() {
         const img = new Image();
         img.onload = () => {
           pushImmediateHistory();
-          setMediaItems((prev) => [
-            ...prev,
-            {
-              id,
-              kind: 'image',
-              fileName,
-              url,
-              width: img.naturalWidth,
-              height: img.naturalHeight,
-              imageElement: img,
-              durationSec: 4.0,
-              sourceStartSec: 0,
-              playbackRate: 1.0,
-              transitionOut: 'crossfade',
-              transitionDurationSec: 0.65,
-              transform: { ...DEFAULT_CLIP_TRANSFORM },
-              clipAudioVolume: 0,
-              clipAudioMuted: true,
-            },
-          ]);
+          setMediaItems((prev) =>
+            insertClipAfterSelection(
+              prev,
+              {
+                id,
+                kind: 'image',
+                fileName,
+                url,
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+                imageElement: img,
+                durationSec: 4.0,
+                sourceStartSec: 0,
+                playbackRate: 1.0,
+                transitionOut: 'crossfade',
+                transitionDurationSec: 0.65,
+                transform: { ...DEFAULT_CLIP_TRANSFORM },
+                clipAudioVolume: 0,
+                clipAudioMuted: true,
+              },
+              selectedClipIdRef.current
+            )
+          );
           setSelectedClipId(id);
         };
         img.onerror = () => {
@@ -714,27 +865,30 @@ export default function App() {
         video.onloadedmetadata = () => {
           const vDur = video.duration || 10;
           pushImmediateHistory();
-          setMediaItems((prev) => [
-            ...prev,
-            {
-              id,
-              kind: 'video',
-              fileName,
-              url,
-              width: video.videoWidth || 1080,
-              height: video.videoHeight || 1920,
-              videoElement: video,
-              videoDuration: vDur,
-              durationSec: Number(Math.min(8, Math.max(1, vDur)).toFixed(1)),
-              sourceStartSec: 0,
-              playbackRate: 1.0,
-              transitionOut: 'crossfade',
-              transitionDurationSec: 0.65,
-              transform: { ...DEFAULT_CLIP_TRANSFORM },
-              clipAudioVolume: 0.8,
-              clipAudioMuted: true,
-            },
-          ]);
+          setMediaItems((prev) =>
+            insertClipAfterSelection(
+              prev,
+              {
+                id,
+                kind: 'video',
+                fileName,
+                url,
+                width: video.videoWidth || 1080,
+                height: video.videoHeight || 1920,
+                videoElement: video,
+                videoDuration: vDur,
+                durationSec: Number(Math.min(8, Math.max(1, vDur)).toFixed(1)),
+                sourceStartSec: 0,
+                playbackRate: 1.0,
+                transitionOut: 'crossfade',
+                transitionDurationSec: 0.65,
+                transform: { ...DEFAULT_CLIP_TRANSFORM },
+                clipAudioVolume: 0.8,
+                clipAudioMuted: true,
+              },
+              selectedClipIdRef.current
+            )
+          );
           setSelectedClipId(id);
           if (sourceBlob) {
             decodeVideoClipAudio(id, sourceBlob);
@@ -1034,13 +1188,14 @@ export default function App() {
     };
   }, [applyAudioBuffer, getAudioContext]);
 
-  // Debounced IndexedDB autosave whenever project state changes
+  // Debounced IndexedDB autosave + orphan blob pruning
   useEffect(() => {
     if (!hydratedRef.current) return;
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current);
     }
-    autosaveTimerRef.current = window.setTimeout(() => {
+    setSaveStatus('saving');
+    autosaveTimerRef.current = window.setTimeout(async () => {
       const serialized = serializeStudioState(
         config,
         mediaItems,
@@ -1050,10 +1205,26 @@ export default function App() {
         audio?.isSyntheticDemo,
         audioBlobKeyRef.current
       );
-      saveProjectToIDB(serialized);
+      const res = await saveProjectToIDB(serialized);
+      if (!res.ok) {
+        setSaveStatus('error');
+        showError(res.error || tFor(langRef.current).saveStatusError);
+      } else {
+        const activeKeys = new Set<string>();
+        if (audioBlobKeyRef.current) activeKeys.add(audioBlobKeyRef.current);
+        for (const item of mediaItems) {
+          const key = item.url ? blobKeyMapRef.current.get(item.url) : undefined;
+          if (key) activeKeys.add(key);
+        }
+        for (const ov of config.overlays) {
+          if (ov.kind === 'image') activeKeys.add(`overlay-${ov.id}`);
+        }
+        await pruneOrphanedBlobs(activeKeys);
+        setSaveStatus('saved');
+      }
       autosaveTimerRef.current = null;
     }, 900);
-  }, [audio, config, mediaItems]);
+  }, [audio, config, mediaItems, showError]);
 
   const handleAudioFile = useCallback(
     async (file: File) => {
@@ -1070,7 +1241,12 @@ export default function App() {
 
         const audioKey = `audio-${createItemId()}`;
         audioBlobKeyRef.current = audioKey;
-        saveBlobToIDB(audioKey, file);
+        saveBlobToIDB(audioKey, file).then((res) => {
+          if (!res.ok) {
+            setSaveStatus('error');
+            showError(res.error || tFor(langRef.current).saveStatusError);
+          }
+        });
 
         applyAudioBuffer(
           decoded,
@@ -1136,7 +1312,12 @@ export default function App() {
         const url = URL.createObjectURL(file);
         const blobKey = `clip-${createItemId()}`;
         blobKeyMapRef.current.set(url, blobKey);
-        saveBlobToIDB(blobKey, file);
+        saveBlobToIDB(blobKey, file).then((res) => {
+          if (!res.ok) {
+            setSaveStatus('error');
+            showError(res.error || tFor(langRef.current).saveStatusError);
+          }
+        });
         appendVisualFromUrl(url, file.name, isVideo ? 'video' : 'image', false, file);
       }
     },
@@ -1163,27 +1344,30 @@ export default function App() {
             glow: cfg.generatorGlow,
           }
         : undefined;
-      setMediaItems((prev) => [
-        ...prev,
-        {
-          id,
-          kind: 'generator',
-          fileName,
-          url: '',
-          width: 1920,
-          height: 1080,
-          durationSec: 5.0,
-          sourceStartSec: 0,
-          playbackRate: 1.0,
-          transitionOut: 'crossfade',
-          transitionDurationSec: 0.65,
-          generatorId: effect,
-          generatorParams,
-          transform: { ...DEFAULT_CLIP_TRANSFORM },
-          clipAudioVolume: 0,
-          clipAudioMuted: true,
-        },
-      ]);
+      setMediaItems((prev) =>
+        insertClipAfterSelection(
+          prev,
+          {
+            id,
+            kind: 'generator',
+            fileName,
+            url: '',
+            width: 1920,
+            height: 1080,
+            durationSec: 5.0,
+            sourceStartSec: 0,
+            playbackRate: 1.0,
+            transitionOut: 'crossfade',
+            transitionDurationSec: 0.65,
+            generatorId: effect,
+            generatorParams,
+            transform: { ...DEFAULT_CLIP_TRANSFORM },
+            clipAudioVolume: 0,
+            clipAudioMuted: true,
+          },
+          selectedClipIdRef.current
+        )
+      );
       setSelectedClipId(id);
     },
     [lang, pushImmediateHistory]
@@ -1192,18 +1376,29 @@ export default function App() {
   const handleUpdateClip = useCallback(
     (id: string, patch: Partial<VisualMediaState>) => {
       queueDebouncedHistory();
-      setMediaItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
-      if (
+      const needsModeSwitch =
         (patch.durationSec !== undefined ||
           patch.transitionOut !== undefined ||
           patch.transitionDurationSec !== undefined) &&
         mediaItemsRef.current.length > 1 &&
-        configRef.current.slideshowMode !== 'custom_durations'
-      ) {
+        configRef.current.slideshowMode !== 'custom_durations';
+
+      const bounds = needsModeSwitch
+        ? getEffectiveTimelineBounds(configRef.current, mediaItemsRef.current, audioRef.current)
+        : null;
+
+      setMediaItems((prev) => {
+        const base =
+          needsModeSwitch && bounds
+            ? snapshotSegmentDurations(prev, bounds.clipDuration, configRef.current, beatCutTimestamps)
+            : prev;
+        return base.map((item) => (item.id === id ? { ...item, ...patch } : item));
+      });
+      if (needsModeSwitch) {
         setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
       }
     },
-    [queueDebouncedHistory]
+    [beatCutTimestamps, getEffectiveTimelineBounds, queueDebouncedHistory]
   );
 
   const handleSelectClip = useCallback((id: string) => {
@@ -1405,8 +1600,9 @@ export default function App() {
       if (selectedFxIdRef.current === id) {
         setSelectedFxId(null);
       }
+      showUndoToast(tFor(langRef.current).toastFxDeleted);
     },
-    [pushImmediateHistory]
+    [pushImmediateHistory, showUndoToast]
   );
 
   const handleFitFxToSelectedClip = useCallback(
@@ -1632,21 +1828,86 @@ export default function App() {
   const handleSetClipTransition = useCallback(
     (id: string, transitionOut: SlideTransitionType, applyAll = false) => {
       pushImmediateHistory();
-      if (applyAll || configRef.current.slideshowMode !== 'custom_durations') {
-        setConfig((prev) => ({ ...prev, transitionType: transitionOut }));
-      }
       if (applyAll) {
+        setConfig((prev) => ({ ...prev, transitionType: transitionOut }));
         setMediaItems((prev) => prev.map((m) => ({ ...m, transitionOut })));
       } else {
-        setMediaItems((prev) =>
-          prev.map((m) => (m.id === id ? { ...m, transitionOut } : m))
-        );
-        if (mediaItemsRef.current.length > 1 && configRef.current.slideshowMode !== 'custom_durations') {
+        const needsModeSwitch =
+          mediaItemsRef.current.length > 1 && configRef.current.slideshowMode !== 'custom_durations';
+        const bounds = needsModeSwitch
+          ? getEffectiveTimelineBounds(configRef.current, mediaItemsRef.current, audioRef.current)
+          : null;
+        setMediaItems((prev) => {
+          const base =
+            needsModeSwitch && bounds
+              ? snapshotSegmentDurations(prev, bounds.clipDuration, configRef.current, beatCutTimestamps)
+              : prev;
+          return base.map((m) => (m.id === id ? { ...m, transitionOut } : m));
+        });
+        if (needsModeSwitch) {
           setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
         }
       }
     },
-    [pushImmediateHistory]
+    [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]
+  );
+
+  const handleMaterializeLoopSegment = useCallback(
+    (upToStepIndex: number) => {
+      const items = mediaItemsRef.current;
+      const cfg = configRef.current;
+      if (items.length === 0) return;
+      const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+      const segments = computeClipTimelineSegments(
+        items,
+        bounds.clipDuration,
+        cfg,
+        beatCutTimestamps
+      );
+      if (upToStepIndex < items.length || upToStepIndex >= segments.length) return;
+
+      pushImmediateHistory();
+      const baseList = snapshotSegmentDurations(items, bounds.clipDuration, cfg, beatCutTimestamps);
+      const additions: VisualMediaState[] = [];
+      for (let i = items.length; i <= upToStepIndex; i++) {
+        const seg = segments[i];
+        const orig = items[seg.clipIndex];
+        if (!orig) continue;
+        const newId = createItemId();
+        let clonedVideo: HTMLVideoElement | undefined;
+        if (orig.kind === 'video' && orig.url) {
+          clonedVideo = document.createElement('video');
+          clonedVideo.muted = true;
+          clonedVideo.loop = true;
+          clonedVideo.playsInline = true;
+          clonedVideo.preload = 'auto';
+          clonedVideo.src = orig.url;
+        }
+        additions.push({
+          ...orig,
+          id: newId,
+          durationSec: Math.max(0.5, Number((seg.endSec - seg.startSec).toFixed(2))),
+          transform: { ...(orig.transform || DEFAULT_CLIP_TRANSFORM) },
+          generatorParams: orig.generatorParams ? { ...orig.generatorParams } : undefined,
+          overlayEffect: orig.overlayEffect
+            ? {
+                ...orig.overlayEffect,
+                params: orig.overlayEffect.params ? { ...orig.overlayEffect.params } : undefined,
+              }
+            : undefined,
+          videoElement: orig.kind === 'video' ? clonedVideo : undefined,
+        });
+      }
+      const next = [...baseList, ...additions];
+      setMediaItems(next);
+      if (additions.length > 0) {
+        setSelectedClipId(additions[additions.length - 1].id);
+      }
+      if (cfg.slideshowMode !== 'custom_durations') {
+        setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+      }
+    },
+    [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]
   );
 
   const handleCycleClipTransition = useCallback(
@@ -1779,7 +2040,13 @@ export default function App() {
         : undefined,
     };
 
-    const next = [...items];
+    const baseItems = snapshotSegmentDurations(
+      items,
+      clipDuration,
+      configRef.current,
+      beatCutTimestamps
+    );
+    const next = [...baseItems];
     next.splice(seg.clipIndex, 1, firstClip, secondClip);
     setMediaItems(next);
     setSelectedClipId(newId);
@@ -1803,8 +2070,9 @@ export default function App() {
       if (selectedClipIdRef.current === id) {
         setSelectedClipId(remaining[0]?.id ?? null);
       }
+      showUndoToast(tFor(langRef.current).toastClipDeleted);
     },
-    [pushImmediateHistory]
+    [pushImmediateHistory, showUndoToast]
   );
 
   const handleRippleDeleteSelected = useCallback(() => {
@@ -1989,7 +2257,12 @@ export default function App() {
       if (!file || file.size === 0 || file.size > MAX_UPLOAD_BYTES) return;
       const ovId = `ov-${createItemId()}`;
       const url = URL.createObjectURL(file);
-      saveBlobToIDB(`overlay-${ovId}`, file);
+      saveBlobToIDB(`overlay-${ovId}`, file).then((res) => {
+        if (!res.ok) {
+          setSaveStatus('error');
+          showError(res.error || tFor(langRef.current).saveStatusError);
+        }
+      });
       blobKeyMapRef.current.set(url, `overlay-${ovId}`);
 
       const img = new Image();
@@ -2160,10 +2433,32 @@ export default function App() {
 
   const handleResetAutosave = useCallback(async () => {
     stopPlayback();
-    pushImmediateHistory();
+    const seen = new Set<string>();
+    for (const item of mediaItemsRef.current) {
+      if (item.kind === 'video' && item.videoElement) item.videoElement.pause();
+      if (item.url.startsWith('blob:') && !seen.has(item.url)) {
+        seen.add(item.url);
+        URL.revokeObjectURL(item.url);
+      }
+    }
+    for (const ov of configRef.current.overlays) {
+      if (ov.imageUrl?.startsWith('blob:') && !seen.has(ov.imageUrl)) {
+        seen.add(ov.imageUrl);
+        URL.revokeObjectURL(ov.imageUrl);
+      }
+    }
+    const coverUrl = audioRef.current?.metadata.embeddedCoverUrl;
+    if (coverUrl && coverUrl.startsWith('blob:') && !seen.has(coverUrl)) {
+      URL.revokeObjectURL(coverUrl);
+    }
+
     await clearProjectIDB();
     blobKeyMapRef.current.clear();
     audioBlobKeyRef.current = undefined;
+    pastRef.current = [];
+    futureRef.current = [];
+    pendingBaseSnapshotRef.current = null;
+    syncHistoryFlags();
     setMediaItems([]);
     setSelectedClipId(null);
     setSelectedFxId(null);
@@ -2171,9 +2466,11 @@ export default function App() {
     monoDataRef.current = new Float32Array(0);
     setConfig(DEFAULT_STUDIO_CONFIG);
     setGlslError(null);
+    setUndoToast(null);
     currentTimeRef.current = 0;
     setCurrentTime(0);
-  }, [pushImmediateHistory, stopPlayback]);
+    setSaveStatus('saved');
+  }, [stopPlayback, syncHistoryFlags]);
 
   const handleSelectTrimPreset = useCallback(
     (preset: TrimPresetId) => {
@@ -2473,7 +2770,7 @@ export default function App() {
     }
   }, [currentTime, drawOnce, isPlaying]);
 
-  // Global Keyboard Shortcuts (ignoring text inputs)
+  // Global Keyboard Shortcuts (ignoring text inputs & interactive controls)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -2486,6 +2783,10 @@ export default function App() {
       ) {
         return;
       }
+
+      const isInteractiveControl = Boolean(
+        target?.closest('button, a, [role="slider"], [role="button"], [role="menuitem"], [role="option"]')
+      );
 
       if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
         e.preventDefault();
@@ -2508,6 +2809,7 @@ export default function App() {
         return;
       }
       if (e.code === 'Space') {
+        if (isInteractiveControl) return;
         e.preventDefault();
         handleTogglePlay();
         return;
@@ -2542,17 +2844,19 @@ export default function App() {
         handleStepFrame(1);
         return;
       }
-      if (e.code === 'Delete' || e.code === 'Backspace') {
+      if ((e.code === 'Delete' || e.code === 'Backspace') && !isInteractiveControl) {
         e.preventDefault();
         handleRippleDeleteSelected();
         return;
       }
       if (e.code === 'ArrowLeft') {
+        if (target?.closest('[role="slider"]')) return;
         e.preventDefault();
         handleSeekAbsolute(currentTimeRef.current - (e.shiftKey ? 2.0 : 0.5));
         return;
       }
       if (e.code === 'ArrowRight') {
+        if (target?.closest('[role="slider"]')) return;
         e.preventDefault();
         handleSeekAbsolute(currentTimeRef.current + (e.shiftKey ? 2.0 : 0.5));
       }
@@ -2610,6 +2914,96 @@ export default function App() {
       });
     }
   }, [audio, config, exportState.outputUrl, mediaItems, stopPlayback]);
+
+  const handleStartStreamExport = useCallback(async () => {
+    if (!audio) return;
+    const picker = (
+      window as unknown as {
+        showSaveFilePicker?: (opts?: {
+          suggestedName?: string;
+          types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+        }) => Promise<FileSystemFileHandle>;
+      }
+    ).showSaveFilePicker;
+    if (!picker) {
+      handleStartExport();
+      return;
+    }
+
+    const dims = resolveExportDimensions(
+      config.aspectMode,
+      mediaItems,
+      config.customWidth,
+      config.customHeight
+    );
+    const caps = await probeExportCapabilities(
+      dims.width,
+      dims.height,
+      config.fps,
+      config.bitrateMbps,
+      audio.sampleRate,
+      audio.numberOfChannels
+    );
+    if (caps.engine === 'mediarecorder') {
+      handleStartExport();
+      return;
+    }
+
+    const ext = caps.container;
+    const safeTitle =
+      (config.titleText || 'neuromicon-video').replace(/[<>:"/\\|?*]/g, '').trim() ||
+      'neuromicon-video';
+
+    let fileHandle: FileSystemFileHandle;
+    try {
+      fileHandle = await picker({
+        suggestedName: `${safeTitle}_${dims.width}x${dims.height}.${ext}`,
+        types: [
+          ext === 'mp4'
+            ? { description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }
+            : { description: 'WebM Video', accept: { 'video/webm': ['.webm'] } },
+        ],
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      handleStartExport();
+      return;
+    }
+
+    stopPlayback();
+    if (exportState.outputUrl) {
+      URL.revokeObjectURL(exportState.outputUrl);
+    }
+
+    const abortController = new AbortController();
+    exportAbortRef.current = abortController;
+    let lastEncoderLabel = 'Stream Encoder';
+
+    try {
+      const finalState = await exportStudioVideo({
+        audio,
+        mediaItems,
+        config,
+        fileHandle,
+        abortSignal: abortController.signal,
+        onProgress: (prog) => {
+          if (prog.encoderLabel) lastEncoderLabel = prog.encoderLabel;
+          setExportState(prog);
+        },
+      });
+      setExportState(finalState);
+    } catch (err) {
+      setExportState({
+        phase: 'error',
+        currentFrame: 0,
+        totalFrames: 0,
+        elapsedMs: 0,
+        encoderLabel: lastEncoderLabel,
+        outputFormat: ext,
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, [audio, config, exportState.outputUrl, handleStartExport, mediaItems, stopPlayback]);
 
   const handleStartBatchExport = useCallback(async () => {
     if (!audio) return;
@@ -2766,10 +3160,16 @@ export default function App() {
 
   const handleSelectSection = useCallback((section: 'media' | InspectorTab) => {
     if (section === 'media') {
-      document.getElementById('media-panel')?.scrollIntoView({ behavior: 'smooth' });
+      setLeftOpen(true);
+      requestAnimationFrame(() => {
+        document.getElementById('media-panel')?.scrollIntoView({ behavior: 'smooth' });
+      });
     } else {
+      setRightOpen(true);
       setActiveTab(section);
-      document.getElementById('inspector-panel')?.scrollIntoView({ behavior: 'smooth' });
+      requestAnimationFrame(() => {
+        document.getElementById('inspector-panel')?.scrollIntoView({ behavior: 'smooth' });
+      });
     }
   }, []);
 
@@ -2789,11 +3189,17 @@ export default function App() {
         canUndo={historyFlags.canUndo}
         canRedo={historyFlags.canRedo}
         dimsLabel={`${stageDims.width}×${stageDims.height} · ${stageDims.aspectLabel} · ${config.fps}fps`}
+        leftOpen={leftOpen}
+        rightOpen={rightOpen}
+        saveStatus={saveStatus}
+        onToggleLeftPanel={() => setLeftOpen((v) => !v)}
+        onToggleRightPanel={() => setRightOpen((v) => !v)}
         onUndo={handleUndo}
         onRedo={handleRedo}
         onToggleLanguage={() => setLang((l) => (l === 'ru' ? 'en' : 'ru'))}
         onExportProjectJson={handleExportProjectJson}
         onImportProjectJson={handleImportProjectJson}
+        onResetWorkspace={handleResetAutosave}
         onSelectSection={handleSelectSection}
         onStartExport={handleStartExport}
       />
@@ -2816,44 +3222,83 @@ export default function App() {
         </div>
       )}
 
+      {undoToast && (
+        <div
+          role="status"
+          className="fixed bottom-4 left-4 z-50 rounded-md border border-amber-500/50 bg-[#141822] px-3 py-2 shadow-xl flex items-center gap-3 text-xs text-gray-200"
+        >
+          <span>{undoToast}</span>
+          <button
+            type="button"
+            onClick={() => {
+              handleUndo();
+              setUndoToast(null);
+            }}
+            className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/50 text-amber-300 font-semibold cursor-pointer"
+          >
+            {t.undoActionBtn}
+          </button>
+          <button
+            type="button"
+            onClick={() => setUndoToast(null)}
+            aria-label={t.closeLabel}
+            className="text-gray-400 hover:text-white cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
-        <MediaInputPanel
-          lang={lang}
-          audio={audio}
-          mediaItems={mediaItems}
-          selectedClipId={selectedClipId}
-          config={config}
-          isLoadingAudio={isLoadingAudio}
-          onAudioFile={handleAudioFile}
-          onLoadDemoBeat={handleLoadDemoBeat}
-          onVisualFiles={handleVisualFiles}
-          onAddGeneratorScene={handleAddGeneratorScene}
-          onSelectClip={handleSelectClip}
-          onInspectClip={handleInspectClip}
-          onDuplicateClip={handleDuplicateClip}
-          onMoveVisual={handleMoveVisual}
-          onReverseClips={handleReverseClips}
-          onRemoveVisual={handleRemoveVisual}
-          onClearVisuals={handleClearVisuals}
-          onFitClipsToAudio={handleFitClipsToAudio}
-          onFitTrimToClips={handleFitTrimToClips}
-          onAutoBeatSyncClips={handleAutoBeatSyncClips}
-          trackBpm={trackBeatGrid.bpm}
-          onUseEmbeddedCover={handleUseEmbeddedCover}
-          onUpdateConfig={handleUpdateConfig}
-          onSelectTrimPreset={handleSelectTrimPreset}
-          onPreviewFadeOut={handlePreviewFadeOut}
-          onImportSubtitlesText={handleImportSubtitlesText}
-          onExportSrt={handleExportSrt}
-          onAddCueAtPlayhead={handleAddCueAtPlayhead}
-          onUpdateSubtitleCue={handleUpdateSubtitleCue}
-          onRemoveSubtitleCue={handleRemoveSubtitleCue}
-          onAddTextOverlay={handleAddTextOverlay}
-          onAddImageOverlay={handleAddImageOverlay}
-          onUpdateOverlay={handleUpdateOverlay}
-          onRemoveOverlay={handleRemoveOverlay}
-          onResetAutosave={handleResetAutosave}
-        />
+        {leftOpen && (
+          <>
+            <MediaInputPanel
+              lang={lang}
+              audio={audio}
+              mediaItems={mediaItems}
+              selectedClipId={selectedClipId}
+              config={config}
+              isLoadingAudio={isLoadingAudio}
+              widthPx={leftWidth}
+              onAudioFile={handleAudioFile}
+              onLoadDemoBeat={handleLoadDemoBeat}
+              onVisualFiles={handleVisualFiles}
+              onAddGeneratorScene={handleAddGeneratorScene}
+              onSelectClip={handleSelectClip}
+              onInspectClip={handleInspectClip}
+              onDuplicateClip={handleDuplicateClip}
+              onMoveVisual={handleMoveVisual}
+              onReverseClips={handleReverseClips}
+              onRemoveVisual={handleRemoveVisual}
+              onClearVisuals={handleClearVisuals}
+              onFitClipsToAudio={handleFitClipsToAudio}
+              onFitTrimToClips={handleFitTrimToClips}
+              onAutoBeatSyncClips={handleAutoBeatSyncClips}
+              trackBpm={trackBeatGrid.bpm}
+              onUseEmbeddedCover={handleUseEmbeddedCover}
+              onUpdateConfig={handleUpdateConfig}
+              onSelectTrimPreset={handleSelectTrimPreset}
+              onPreviewFadeOut={handlePreviewFadeOut}
+              onImportSubtitlesText={handleImportSubtitlesText}
+              onExportSrt={handleExportSrt}
+              onAddCueAtPlayhead={handleAddCueAtPlayhead}
+              onUpdateSubtitleCue={handleUpdateSubtitleCue}
+              onRemoveSubtitleCue={handleRemoveSubtitleCue}
+              onAddTextOverlay={handleAddTextOverlay}
+              onAddImageOverlay={handleAddImageOverlay}
+              onUpdateOverlay={handleUpdateOverlay}
+              onRemoveOverlay={handleRemoveOverlay}
+              onResetAutosave={handleResetAutosave}
+            />
+            <div
+              onPointerDown={(e) => {
+                panelDragRef.current = { side: 'left', startX: e.clientX, startW: leftWidth };
+              }}
+              className="hidden lg:block w-1 shrink-0 cursor-col-resize bg-[#1B202C] hover:bg-amber-500/60 transition-colors"
+              aria-hidden="true"
+            />
+          </>
+        )}
 
         <PreviewStage
           lang={lang}
@@ -2876,37 +3321,50 @@ export default function App() {
           onLoadDemoBeat={handleLoadDemoBeat}
         />
 
-        <InspectorPanel
-          lang={lang}
-          activeTab={activeTab}
-          audio={audio}
-          mediaItems={mediaItems}
-          selectedClipId={selectedClipId}
-          selectedFxId={selectedFxId}
-          config={config}
-          glslError={glslError}
-          onChangeTab={setActiveTab}
-          onSelectClip={handleSelectClip}
-          onSelectFx={handleSelectFx}
-          onUpdateClip={handleUpdateClip}
-          onApplyClipOverlay={handleApplyClipOverlay}
-          onMoveClipOverlayToFxTrack={handleMoveClipOverlayToFxTrack}
-          onDuplicateClip={handleDuplicateClip}
-          onRemoveVisual={handleRemoveVisual}
-          onSetClipTransition={handleSetClipTransition}
-          onUpdateConfig={handleUpdateConfig}
-          onAddFxOverlay={handleAddFxOverlay}
-          onUpdateFxOverlay={handleUpdateFxOverlay}
-          onDuplicateFxOverlay={handleDuplicateFxOverlay}
-          onRemoveFxOverlay={handleRemoveFxOverlay}
-          onFitFxToSelectedClip={handleFitFxToSelectedClip}
-          onApplyMoodPreset={handleApplyMoodPreset}
-          onResetGenerator={handleResetGenerator}
-          onCompileCustomGlsl={handleCompileCustomGlsl}
-          onStartExport={handleStartExport}
-          onStartBatchExport={handleStartBatchExport}
-          onDownloadMetadataTxt={handleDownloadMetadataTxt}
-        />
+        {rightOpen && (
+          <>
+            <div
+              onPointerDown={(e) => {
+                panelDragRef.current = { side: 'right', startX: e.clientX, startW: rightWidth };
+              }}
+              className="hidden lg:block w-1 shrink-0 cursor-col-resize bg-[#1B202C] hover:bg-amber-500/60 transition-colors"
+              aria-hidden="true"
+            />
+            <InspectorPanel
+              lang={lang}
+              activeTab={activeTab}
+              audio={audio}
+              mediaItems={mediaItems}
+              selectedClipId={selectedClipId}
+              selectedFxId={selectedFxId}
+              config={config}
+              glslError={glslError}
+              widthPx={rightWidth}
+              onChangeTab={setActiveTab}
+              onSelectClip={handleSelectClip}
+              onSelectFx={handleSelectFx}
+              onUpdateClip={handleUpdateClip}
+              onApplyClipOverlay={handleApplyClipOverlay}
+              onMoveClipOverlayToFxTrack={handleMoveClipOverlayToFxTrack}
+              onDuplicateClip={handleDuplicateClip}
+              onRemoveVisual={handleRemoveVisual}
+              onSetClipTransition={handleSetClipTransition}
+              onUpdateConfig={handleUpdateConfig}
+              onAddFxOverlay={handleAddFxOverlay}
+              onUpdateFxOverlay={handleUpdateFxOverlay}
+              onDuplicateFxOverlay={handleDuplicateFxOverlay}
+              onRemoveFxOverlay={handleRemoveFxOverlay}
+              onFitFxToSelectedClip={handleFitFxToSelectedClip}
+              onApplyMoodPreset={handleApplyMoodPreset}
+              onResetGenerator={handleResetGenerator}
+              onCompileCustomGlsl={handleCompileCustomGlsl}
+              onStartExport={handleStartExport}
+              onStartStreamExport={handleStartStreamExport}
+              onStartBatchExport={handleStartBatchExport}
+              onDownloadMetadataTxt={handleDownloadMetadataTxt}
+            />
+          </>
+        )}
       </div>
 
       <TimelineDock
@@ -2938,6 +3396,8 @@ export default function App() {
         onRemoveFxOverlay={handleRemoveFxOverlay}
         onFitFxToSelectedClip={handleFitFxToSelectedClip}
         onSnapFxOverlaysToBeats={handleSnapFxOverlaysToBeats}
+        onUpdateOverlay={handleUpdateOverlay}
+        onMaterializeLoopSegment={handleMaterializeLoopSegment}
         onSplitClipAtPlayhead={handleSplitClipAtPlayhead}
         onRippleDeleteSelected={handleRippleDeleteSelected}
         onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
@@ -2951,13 +3411,17 @@ export default function App() {
         onSetTrimEnd={handleSetTrimEnd}
       />
 
-      <ExportModal
-        lang={lang}
-        state={exportState}
-        onCancel={() => exportAbortRef.current?.abort()}
-        onClose={() => setExportState(IDLE_EXPORT_STATE)}
-        onDownloadMetadataTxt={handleDownloadMetadataTxt}
-      />
+      {exportState.phase !== 'idle' && (
+        <Suspense fallback={null}>
+          <ExportModal
+            lang={lang}
+            state={exportState}
+            onCancel={() => exportAbortRef.current?.abort()}
+            onClose={() => setExportState(IDLE_EXPORT_STATE)}
+            onDownloadMetadataTxt={handleDownloadMetadataTxt}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

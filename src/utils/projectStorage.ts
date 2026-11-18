@@ -36,7 +36,7 @@ export interface SerializedClip {
 }
 
 export interface SerializedProject {
-  version: 2;
+  version: 2 | 3;
   savedAt: string;
   config: StudioConfig;
   clips: SerializedClip[];
@@ -46,6 +46,11 @@ export interface SerializedProject {
     isSyntheticDemo: boolean;
     blobKey?: string;
   };
+}
+
+export interface StorageWriteResult {
+  ok: boolean;
+  error?: string;
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -71,32 +76,39 @@ function openDB(): Promise<IDBDatabase> {
 
 async function idbPut(storeName: string, key: string, value: unknown): Promise<void> {
   const db = await openDB();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-  db.close();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      tx.objectStore(storeName).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB write aborted'));
+    });
+  } finally {
+    db.close();
+  }
 }
 
 async function idbGet<T>(storeName: string, key: string): Promise<T | undefined> {
   const db = await openDB();
-  const res = await new Promise<T | undefined>((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const req = tx.objectStore(storeName).get(key);
-    req.onsuccess = () => resolve(req.result as T | undefined);
-    req.onerror = () => reject(req.error);
-  });
-  db.close();
-  return res;
+  try {
+    return await new Promise<T | undefined>((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).get(key);
+      req.onsuccess = () => resolve(req.result as T | undefined);
+      req.onerror = () => reject(req.error || new Error('IndexedDB read failed'));
+    });
+  } finally {
+    db.close();
+  }
 }
 
-export async function saveBlobToIDB(key: string, blob: Blob): Promise<void> {
+export async function saveBlobToIDB(key: string, blob: Blob): Promise<StorageWriteResult> {
   try {
     await idbPut(STORE_BLOBS, key, blob);
-  } catch {
-    // Best-effort storage (quota or private browsing)
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Blob save failed' };
   }
 }
 
@@ -108,11 +120,12 @@ export async function loadBlobFromIDB(key: string): Promise<Blob | undefined> {
   }
 }
 
-export async function saveProjectToIDB(project: SerializedProject): Promise<void> {
+export async function saveProjectToIDB(project: SerializedProject): Promise<StorageWriteResult> {
   try {
     await idbPut(STORE_PROJECT, PROJECT_KEY, project);
-  } catch {
-    // Ignore storage quota errors cleanly
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Project save failed' };
   }
 }
 
@@ -124,17 +137,49 @@ export async function loadProjectFromIDB(): Promise<SerializedProject | undefine
   }
 }
 
+export async function pruneOrphanedBlobs(activeKeys: Set<string>): Promise<void> {
+  try {
+    const db = await openDB();
+    try {
+      const allKeys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+        const tx = db.transaction(STORE_BLOBS, 'readonly');
+        const req = tx.objectStore(STORE_BLOBS).getAllKeys();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+      const toDelete = allKeys.filter((k) => typeof k === 'string' && !activeKeys.has(k));
+      if (toDelete.length === 0) return;
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_BLOBS, 'readwrite');
+        const store = tx.objectStore(STORE_BLOBS);
+        for (const k of toDelete) {
+          store.delete(k);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Best-effort orphan cleanup
+  }
+}
+
 export async function clearProjectIDB(): Promise<void> {
   try {
     const db = await openDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([STORE_PROJECT, STORE_BLOBS], 'readwrite');
-      tx.objectStore(STORE_PROJECT).clear();
-      tx.objectStore(STORE_BLOBS).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    db.close();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction([STORE_PROJECT, STORE_BLOBS], 'readwrite');
+        tx.objectStore(STORE_PROJECT).clear();
+        tx.objectStore(STORE_BLOBS).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
   } catch {
     // ignore
   }
@@ -155,7 +200,7 @@ export function serializeStudioState(
   }));
 
   return {
-    version: 2,
+    version: 3,
     savedAt: new Date().toISOString(),
     config: {
       ...config,

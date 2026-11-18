@@ -309,6 +309,8 @@ export function resolveColorScheme(
 }
 
 export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
+  showVisualizer: true,
+  visualizerColor: 'auto',
   beatPreset: 'spectrum_bars',
   beatSensitivity: 1.15,
   visualizerOpacity: 0.88,

@@ -155,6 +155,8 @@ export interface OverlayLayer {
   scale: number; // 0.4 .. 2.5
   opacity: number; // 0.1 .. 1.0
   color?: string;
+  startSec?: number; // undefined => whole video
+  durationSec?: number; // undefined => whole video
 }
 
 export interface ColorScheme {
@@ -214,6 +216,8 @@ export interface VisualMediaState {
 
 export interface StudioConfig {
   // Beat-synced animation settings
+  showVisualizer: boolean;
+  visualizerColor: string; // 'auto' or hex color
   beatPreset: BeatPresetId;
   beatSensitivity: number;
   visualizerOpacity: number;
@@ -331,5 +335,6 @@ export interface ExportProgressState {
   outputUrl?: string;
   outputFileName?: string;
   outputSizeBytes?: number;
+  streamedToDisk?: boolean;
   errorMessage?: string;
 }

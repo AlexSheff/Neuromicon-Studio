@@ -1,7 +1,9 @@
 import {
+  AlertTriangle,
   Copy,
   Download,
   FileText,
+  HardDriveDownload,
   Layers,
   Move,
   Orbit,
@@ -16,6 +18,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
@@ -48,7 +51,11 @@ import {
   GENERATOR_EFFECTS,
   STUDIO_MOOD_PRESETS,
 } from '../utils/presets';
-import { resolveExportDimensions } from '../utils/videoExporter';
+import {
+  ExportCapabilityReport,
+  probeExportCapabilities,
+  resolveExportDimensions,
+} from '../utils/videoExporter';
 
 interface InspectorPanelProps {
   lang: Language;
@@ -88,8 +95,10 @@ interface InspectorPanelProps {
   onResetGenerator: () => void;
   onCompileCustomGlsl: () => void;
   onStartExport: () => void;
+  onStartStreamExport?: () => void;
   onStartBatchExport: () => void;
   onDownloadMetadataTxt: () => void;
+  widthPx?: number;
 }
 
 const BEAT_PRESETS: BeatPresetId[] = [
@@ -138,8 +147,10 @@ export function InspectorPanel({
   onResetGenerator,
   onCompileCustomGlsl,
   onStartExport,
+  onStartStreamExport,
   onStartBatchExport,
   onDownloadMetadataTxt,
+  widthPx,
 }: InspectorPanelProps) {
   const t = tFor(lang);
   const dims = resolveExportDimensions(
@@ -149,6 +160,33 @@ export function InspectorPanel({
     config.customHeight
   );
   const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+  const [capabilities, setCapabilities] = useState<ExportCapabilityReport | null>(null);
+
+  useEffect(() => {
+    if (activeTab !== 'export') return;
+    let cancelled = false;
+    probeExportCapabilities(
+      dims.width,
+      dims.height,
+      config.fps,
+      config.bitrateMbps,
+      audio?.sampleRate || 48000,
+      Math.min(2, audio?.numberOfChannels || 2)
+    ).then((rep) => {
+      if (!cancelled) setCapabilities(rep);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTab,
+    dims.width,
+    dims.height,
+    config.fps,
+    config.bitrateMbps,
+    audio?.sampleRate,
+    audio?.numberOfChannels,
+  ]);
 
   const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
   const clipTransform: ClipTransform = selectedClip?.transform || DEFAULT_CLIP_TRANSFORM;
@@ -206,7 +244,8 @@ export function InspectorPanel({
   return (
     <aside
       id="inspector-panel"
-      className="w-full lg:w-[325px] xl:w-[360px] shrink-0 border-t lg:border-t-0 lg:border-l border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
+      style={widthPx ? { ['--insp-w' as string]: `${widthPx}px` } : undefined}
+      className="w-full lg:w-[var(--insp-w,340px)] shrink-0 border-t lg:border-t-0 lg:border-l border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
     >
       {/* 5-Tab Bar */}
       <div className="p-1.5 border-b border-[#262B38] bg-[#0E1016] grid grid-cols-5 gap-1 shrink-0">
@@ -1087,7 +1126,49 @@ export function InspectorPanel({
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2.5">
+              <div className="rounded-lg border border-[#262B38] bg-[#141821] p-2.5 space-y-2">
+                <label className="flex items-center justify-between text-xs font-medium text-gray-200 cursor-pointer">
+                  <span>{t.showVisualizerLabel}</span>
+                  <input
+                    type="checkbox"
+                    checked={config.showVisualizer !== false}
+                    onChange={(e) => onUpdateConfig({ showVisualizer: e.target.checked })}
+                    className="accent-amber-500 w-4 h-4 rounded cursor-pointer"
+                  />
+                </label>
+
+                {config.showVisualizer !== false && (
+                  <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#262B38]">
+                    <span className="text-[11px] text-gray-300">{t.visualizerColorLabel}</span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => onUpdateConfig({ visualizerColor: 'auto' })}
+                        className={`px-2 py-0.5 rounded border text-[10px] font-medium cursor-pointer ${
+                          config.visualizerColor === 'auto' || !config.visualizerColor
+                            ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                            : 'border-[#262B38] bg-[#0B0D11] text-gray-400 hover:text-gray-200'
+                        }`}
+                      >
+                        {t.visualizerColorAuto}
+                      </button>
+                      <input
+                        type="color"
+                        aria-label={t.visualizerColorLabel}
+                        value={
+                          config.visualizerColor && config.visualizerColor !== 'auto'
+                            ? config.visualizerColor
+                            : '#F59E0B'
+                        }
+                        onChange={(e) => onUpdateConfig({ visualizerColor: e.target.value })}
+                        className="w-6 h-5 bg-transparent border-0 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <label className="text-xs font-semibold text-gray-200 block">{t.beatPresetLabel}</label>
               <div className="grid grid-cols-2 gap-2">
                 {BEAT_PRESETS.map((id) => {
@@ -2423,7 +2504,38 @@ export function InspectorPanel({
                   {config.fps} fps · {config.bitrateMbps} Mbps
                 </span>
               </div>
+              {capabilities && (
+                <div className="px-3 py-2 flex justify-between gap-2">
+                  <span className="text-gray-400 shrink-0">{t.preflightEngineLabel}</span>
+                  <span
+                    className={`font-mono text-right truncate ${
+                      capabilities.isFallback ? 'text-amber-300' : 'text-emerald-300'
+                    }`}
+                  >
+                    {capabilities.label}
+                  </span>
+                </div>
+              )}
             </div>
+
+            {capabilities?.isFallback && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-200 flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+                <span>{t.preflightFallbackNote}</span>
+              </div>
+            )}
+
+            {(dims.width * dims.height > 2_500_000 || clipDuration * config.fps > 3000) && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-200 flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+                <span>
+                  {t.largeExportRamWarning.replace(
+                    '{frames}',
+                    String(Math.ceil(clipDuration * config.fps))
+                  )}
+                </span>
+              </div>
+            )}
 
             {!audio && <p className="text-xs text-amber-400/90">{t.needAudioAlert}</p>}
 
@@ -2437,6 +2549,18 @@ export function InspectorPanel({
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>{t.exportVideoBtn}</span>
               </button>
+
+              {capabilities?.supportsStreaming && onStartStreamExport && (
+                <button
+                  type="button"
+                  onClick={onStartStreamExport}
+                  disabled={!audio}
+                  className="w-full py-2 px-4 rounded-md border border-emerald-500/50 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-emerald-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <HardDriveDownload className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>{t.streamExportBtn}</span>
+                </button>
+              )}
 
               <button
                 type="button"

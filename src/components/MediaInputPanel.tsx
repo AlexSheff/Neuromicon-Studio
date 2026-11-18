@@ -77,6 +77,7 @@ interface MediaInputPanelProps {
   onUpdateOverlay: (id: string, patch: Partial<OverlayLayer>) => void;
   onRemoveOverlay: (id: string) => void;
   onResetAutosave: () => void;
+  widthPx?: number;
 }
 
 function formatSec(sec: number): string {
@@ -121,6 +122,7 @@ export function MediaInputPanel({
   onUpdateOverlay,
   onRemoveOverlay,
   onResetAutosave,
+  widthPx,
 }: MediaInputPanelProps) {
   const t = tFor(lang);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -164,7 +166,8 @@ export function MediaInputPanel({
   return (
     <aside
       id="media-panel"
-      className="w-full lg:w-[300px] xl:w-[325px] shrink-0 border-b lg:border-b-0 lg:border-r border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
+      style={widthPx ? { ['--panel-w' as string]: `${widthPx}px` } : undefined}
+      className="w-full lg:w-[var(--panel-w,310px)] shrink-0 border-b lg:border-b-0 lg:border-r border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
     >
       {/* Left Panel 3-Tab Header */}
       <div className="p-2 border-b border-[#262B38] bg-[#0E1016] grid grid-cols-3 gap-1 shrink-0">
@@ -757,6 +760,57 @@ export function MediaInputPanel({
                         value={ov.scale}
                         onChange={(e) => onUpdateOverlay(ov.id, { scale: Number(e.target.value) })}
                         className="w-full studio-slider"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[#262B38]/60">
+                    <label className="space-y-0.5 block">
+                      <span className="text-[10px] text-gray-400">{t.overlayStartSecLabel}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={600}
+                        step={0.2}
+                        placeholder="0"
+                        value={ov.startSec ?? ''}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === '') {
+                            onUpdateOverlay(ov.id, { startSec: undefined, durationSec: undefined });
+                          } else {
+                            onUpdateOverlay(ov.id, {
+                              startSec: Math.max(0, Number(raw) || 0),
+                              durationSec: ov.durationSec ?? 4,
+                            });
+                          }
+                        }}
+                        className="w-full rounded bg-[#0E1016] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono tabular-nums text-gray-200"
+                      />
+                    </label>
+                    <label className="space-y-0.5 block">
+                      <span className="text-[10px] text-gray-400">
+                        {t.overlayDurSecLabel}
+                      </span>
+                      <input
+                        type="number"
+                        min={0.4}
+                        max={600}
+                        step={0.2}
+                        placeholder={t.overlayWholeVideoHint}
+                        value={ov.durationSec ?? ''}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === '') {
+                            onUpdateOverlay(ov.id, { startSec: undefined, durationSec: undefined });
+                          } else {
+                            onUpdateOverlay(ov.id, {
+                              startSec: ov.startSec ?? 0,
+                              durationSec: Math.max(0.4, Number(raw) || 4),
+                            });
+                          }
+                        }}
+                        className="w-full rounded bg-[#0E1016] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono tabular-nums text-gray-200"
                       />
                     </label>
                   </div>

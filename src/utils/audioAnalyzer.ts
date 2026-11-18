@@ -613,6 +613,46 @@ export function snapFxOverlayToBeats(
   };
 }
 
+/**
+ * Greedy interval packing: assigns each item a non-overlapping horizontal lane index
+ * so simultaneous FX or overlay items stack cleanly without hiding one another.
+ */
+export function packTimelineLanes<T extends { startSec: number; durationSec: number }>(
+  items: T[]
+): { laneByIndex: number[]; laneCount: number } {
+  if (items.length === 0) return { laneByIndex: [], laneCount: 1 };
+  const indexed = items.map((item, idx) => ({
+    idx,
+    start: Math.max(0, item.startSec),
+    end: Math.max(0, item.startSec) + Math.max(0.1, item.durationSec),
+  }));
+  indexed.sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const laneEnds: number[] = [];
+  const laneByIndex = new Array<number>(items.length).fill(0);
+
+  for (const item of indexed) {
+    let assigned = -1;
+    for (let l = 0; l < laneEnds.length; l++) {
+      if (laneEnds[l] <= item.start + 0.01) {
+        assigned = l;
+        laneEnds[l] = item.end;
+        break;
+      }
+    }
+    if (assigned === -1) {
+      assigned = laneEnds.length;
+      laneEnds.push(item.end);
+    }
+    laneByIndex[item.idx] = assigned;
+  }
+
+  return {
+    laneByIndex,
+    laneCount: Math.max(1, laneEnds.length),
+  };
+}
+
 export interface ActiveSlideshowSlice {
   activeIndex: number;
   prevIndex: number | null;
