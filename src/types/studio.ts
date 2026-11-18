@@ -79,7 +79,7 @@ export type TextBackdropMode = 'none' | 'accent_line' | 'glass_box';
 
 export type VisualizerPlacement = 'bottom' | 'center' | 'top';
 
-export type InspectorTab = 'effects' | 'generator' | 'typography' | 'export';
+export type InspectorTab = 'clip' | 'effects' | 'generator' | 'typography' | 'export';
 
 export type KeyframeEasing = 'linear' | 'ease_in_out' | 'ease_out';
 

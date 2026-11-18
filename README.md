@@ -7,6 +7,7 @@
 ### Multi-Clip NLE & Synchronized Multi-Track Timeline
 - **Master Overview & Zoomable Sequence (`1×–8×`)**: Full-track waveform overview with draggable **Trim In (`[`)** / **Trim Out (`]`)** handles paired with a synchronized timeline featuring a clickable **Time Ruler**, **Clips** track, **Zoomed Audio Slice + Beat Markers**, **Subtitles Lane**, and a continuous vertical playhead.
 - **Direct Timeline Manipulation**:
+  - **Inline Clip & Duration Bar**: Select any clip (`<` / dropdown / `>`), edit exact duration (`-0.5s` / numeric input / `+0.5s` or `2s / 4s / 6s / 10s` chips), and jump to its **Clip** inspector directly from the bottom timeline dock
   - **Edge-Trim Resize**: Drag the right handle of any clip directly on the timeline to adjust its duration (`0.5s – 30s`)
   - **Inline Transition Pills**: Click boundary tags (`CF` Crossfade / `DIP` Dip Black / `SLD` Slide / `CUT` Hard Cut) between clips to cycle transitions directly on the track
   - **Drag-and-Drop Reorder** & **Reverse Order** button, plus **Fit Clips to Audio** and **Fit Trim to Clips**
@@ -136,9 +137,10 @@ npm run preview
     │   └── studio.ts             # Core domain & configuration types
     ├── components/
     │   ├── TopBar.tsx            # Studio navigation, undo/redo, JSON save/load & export CTA
-    │   ├── MediaInputPanel.tsx   # Audio, multi-clip sequence, transform, subtitles & overlays
-    │   ├── PreviewStage.tsx      # Live canvas stage, PNG snapshot, loop & dual-track timeline
-    │   ├── InspectorPanel.tsx    # Beat FX, Space & FX generators, Typography & Export tabs
+    │   ├── MediaInputPanel.tsx   # Tabbed Media Bin (Media, Layers & Timing)
+    │   ├── PreviewStage.tsx      # Distortion-free measured canvas stage, quick aspect switcher & transport
+    │   ├── InspectorPanel.tsx    # Clip, Beat FX, Space & FX, Text & Export tabs
+    │   ├── TimelineDock.tsx      # Full-width multi-track timeline dock with clip/duration bar
     │   └── ExportModal.tsx       # Render progress, ETA & file download modal
     └── utils/
         ├── audioAnalyzer.ts      # FFT analysis, adaptive beat-cut & timeline segmenter

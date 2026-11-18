@@ -4,6 +4,7 @@ import { ExportModal } from './components/ExportModal';
 import { InspectorPanel } from './components/InspectorPanel';
 import { MediaInputPanel } from './components/MediaInputPanel';
 import { PreviewStage } from './components/PreviewStage';
+import { TimelineDock } from './components/TimelineDock';
 import { TopBar } from './components/TopBar';
 import { tFor } from './i18n';
 import {
@@ -341,7 +342,7 @@ export default function App() {
         };
       }
       const rawClipsTotal = items.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
-      const clipDuration = Math.max(4, rawClipsTotal > 0 ? rawClipsTotal : 12);
+      const clipDuration = items.length > 0 ? Math.max(0.5, rawClipsTotal) : 12;
       return {
         trimBase: 0,
         trimEnd: clipDuration,
@@ -1087,9 +1088,21 @@ export default function App() {
     (id: string, patch: Partial<VisualMediaState>) => {
       queueDebouncedHistory();
       setMediaItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+      if (
+        patch.durationSec !== undefined &&
+        mediaItemsRef.current.length > 1 &&
+        configRef.current.slideshowMode !== 'custom_durations'
+      ) {
+        setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+      }
     },
     [queueDebouncedHistory]
   );
+
+  const handleInspectClip = useCallback((id: string) => {
+    setSelectedClipId(id);
+    setActiveTab('clip');
+  }, []);
 
   const handleDuplicateClip = useCallback(
     (id: string) => {
@@ -2213,16 +2226,25 @@ export default function App() {
     }
   }, []);
 
+  const stageDims = resolveExportDimensions(
+    config.aspectMode,
+    mediaItems,
+    config.customWidth,
+    config.customHeight
+  );
+
   return (
-    <div className="min-h-screen lg:h-screen flex flex-col bg-[#0B0D11] text-gray-100 relative">
+    <div className="min-h-screen lg:h-screen flex flex-col bg-[#0B0D11] text-gray-100 lg:overflow-hidden relative">
       <TopBar
         lang={lang}
         activeTab={activeTab}
         hasAudio={Boolean(audio)}
         canUndo={historyFlags.canUndo}
         canRedo={historyFlags.canRedo}
+        dimsLabel={`${stageDims.width}×${stageDims.height} · ${stageDims.aspectLabel} · ${config.fps}fps`}
         onUndo={handleUndo}
         onRedo={handleRedo}
+        onToggleLanguage={() => setLang((l) => (l === 'ru' ? 'en' : 'ru'))}
         onExportProjectJson={handleExportProjectJson}
         onImportProjectJson={handleImportProjectJson}
         onSelectSection={handleSelectSection}
@@ -2247,7 +2269,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row lg:overflow-hidden">
         <MediaInputPanel
           lang={lang}
           audio={audio}
@@ -2260,7 +2282,7 @@ export default function App() {
           onVisualFiles={handleVisualFiles}
           onAddGeneratorScene={handleAddGeneratorScene}
           onSelectClip={setSelectedClipId}
-          onUpdateClip={handleUpdateClip}
+          onInspectClip={handleInspectClip}
           onDuplicateClip={handleDuplicateClip}
           onMoveVisual={handleMoveVisual}
           onReverseClips={handleReverseClips}
@@ -2289,35 +2311,18 @@ export default function App() {
           canvasRef={canvasRef}
           audio={audio}
           mediaItems={mediaItems}
-          selectedClipId={selectedClipId}
-          beatCutTimestamps={beatCutTimestamps}
           config={config}
           isPlaying={isPlaying}
           isLooping={isLooping}
           currentTime={currentTime}
-          onToggleLanguage={() => setLang((l) => (l === 'ru' ? 'en' : 'ru'))}
           onTogglePlay={handleTogglePlay}
           onToggleLoop={() => setIsLooping((v) => !v)}
           onResetToTrimStart={handleResetToTrimStart}
           onSnapshotPng={handleSnapshotPng}
-          onSeekAbsolute={handleSeekAbsolute}
-          onSelectClip={setSelectedClipId}
-          onUpdateClip={handleUpdateClip}
-          onDuplicateClip={handleDuplicateClip}
-          onReorderClip={handleReorderClip}
-          onReverseClips={handleReverseClips}
-          onCycleClipTransition={handleCycleClipTransition}
-          onAddGeneratorScene={handleAddGeneratorScene}
-          onSplitClipAtPlayhead={handleSplitClipAtPlayhead}
-          onRippleDeleteSelected={handleRippleDeleteSelected}
-          onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
-          onAddBeatMarker={handleAddBeatMarker}
-          onClearBeatMarkers={handleClearBeatMarkers}
-          onSetTrimStart={handleSetTrimStart}
-          onSetTrimEnd={handleSetTrimEnd}
           onStepFrame={handleStepFrame}
           onJumpCut={handleJumpCut}
           onSelectBeatPreset={(preset: BeatPresetId) => handleUpdateConfig({ beatPreset: preset })}
+          onSelectAspectMode={(mode: ExportAspectMode) => handleUpdateConfig({ aspectMode: mode })}
           onToggleSafeZones={() => handleUpdateConfig({ showSafeZones: !config.showSafeZones })}
           onLoadDemoBeat={handleLoadDemoBeat}
         />
@@ -2327,9 +2332,14 @@ export default function App() {
           activeTab={activeTab}
           audio={audio}
           mediaItems={mediaItems}
+          selectedClipId={selectedClipId}
           config={config}
           glslError={glslError}
           onChangeTab={setActiveTab}
+          onSelectClip={setSelectedClipId}
+          onUpdateClip={handleUpdateClip}
+          onDuplicateClip={handleDuplicateClip}
+          onRemoveVisual={handleRemoveVisual}
           onUpdateConfig={handleUpdateConfig}
           onApplyMoodPreset={handleApplyMoodPreset}
           onResetGenerator={handleResetGenerator}
@@ -2339,6 +2349,33 @@ export default function App() {
           onDownloadMetadataTxt={handleDownloadMetadataTxt}
         />
       </div>
+
+      <TimelineDock
+        lang={lang}
+        audio={audio}
+        mediaItems={mediaItems}
+        selectedClipId={selectedClipId}
+        beatCutTimestamps={beatCutTimestamps}
+        config={config}
+        currentTime={currentTime}
+        onSeekAbsolute={handleSeekAbsolute}
+        onSelectClip={setSelectedClipId}
+        onInspectClip={handleInspectClip}
+        onUpdateClip={handleUpdateClip}
+        onVisualFiles={handleVisualFiles}
+        onDuplicateClip={handleDuplicateClip}
+        onReorderClip={handleReorderClip}
+        onReverseClips={handleReverseClips}
+        onCycleClipTransition={handleCycleClipTransition}
+        onAddGeneratorScene={handleAddGeneratorScene}
+        onSplitClipAtPlayhead={handleSplitClipAtPlayhead}
+        onRippleDeleteSelected={handleRippleDeleteSelected}
+        onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
+        onAddBeatMarker={handleAddBeatMarker}
+        onClearBeatMarkers={handleClearBeatMarkers}
+        onSetTrimStart={handleSetTrimStart}
+        onSetTrimEnd={handleSetTrimEnd}
+      />
 
       <ExportModal
         lang={lang}

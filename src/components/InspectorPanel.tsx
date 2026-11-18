@@ -1,25 +1,36 @@
 import {
+  Copy,
   Download,
   FileText,
   Layers,
+  Move,
   Orbit,
   Palette,
   Play,
   RotateCcw,
   Sliders,
+  SlidersHorizontal,
   Sparkles,
+  Trash2,
   Type,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
   BeatPresetId,
+  ClipGeneratorParams,
+  ClipTransform,
   ExportAspectMode,
   GeneratorBlendMode,
+  GeneratorEffectId,
   InspectorTab,
+  KeyframeEasing,
   Language,
   LutPresetId,
   MediaColorFilter,
+  SlideTransitionType,
   StudioConfig,
   TextAlignMode,
   TextAnimationId,
@@ -30,6 +41,7 @@ import {
 } from '../types/studio';
 import {
   COLOR_SCHEMES,
+  DEFAULT_CLIP_TRANSFORM,
   FONT_OPTIONS,
   GENERATOR_EFFECTS,
   STUDIO_MOOD_PRESETS,
@@ -41,9 +53,14 @@ interface InspectorPanelProps {
   activeTab: InspectorTab;
   audio: AudioTrackState | null;
   mediaItems: VisualMediaState[];
+  selectedClipId: string | null;
   config: StudioConfig;
   glslError: string | null;
   onChangeTab: (tab: InspectorTab) => void;
+  onSelectClip: (id: string) => void;
+  onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
+  onDuplicateClip: (id: string) => void;
+  onRemoveVisual: (id: string) => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
   onApplyMoodPreset: (patch: Partial<StudioConfig>) => void;
   onResetGenerator: () => void;
@@ -76,9 +93,14 @@ export function InspectorPanel({
   activeTab,
   audio,
   mediaItems,
+  selectedClipId,
   config,
   glslError,
   onChangeTab,
+  onSelectClip,
+  onUpdateClip,
+  onDuplicateClip,
+  onRemoveVisual,
   onUpdateConfig,
   onApplyMoodPreset,
   onResetGenerator,
@@ -95,6 +117,24 @@ export function InspectorPanel({
     config.customHeight
   );
   const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+
+  const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
+  const clipTransform: ClipTransform = selectedClip?.transform || DEFAULT_CLIP_TRANSFORM;
+  const clipGenParams: ClipGeneratorParams = selectedClip?.generatorParams || {};
+
+  const updateSelectedTransform = (patch: Partial<ClipTransform>) => {
+    if (!selectedClip) return;
+    onUpdateClip(selectedClip.id, {
+      transform: { ...clipTransform, ...patch },
+    });
+  };
+
+  const updateSelectedGenParams = (patch: Partial<ClipGeneratorParams>) => {
+    if (!selectedClip) return;
+    onUpdateClip(selectedClip.id, {
+      generatorParams: { ...clipGenParams, ...patch },
+    });
+  };
 
   const colorFilters: { id: MediaColorFilter; label: string }[] = [
     { id: 'none', label: t.filterNone },
@@ -115,14 +155,26 @@ export function InspectorPanel({
   return (
     <aside
       id="inspector-panel"
-      className="w-full lg:w-[350px] xl:w-[385px] shrink-0 border-t lg:border-t-0 lg:border-l border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
+      className="w-full lg:w-[325px] xl:w-[360px] shrink-0 border-t lg:border-t-0 lg:border-l border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
     >
-      {/* 4-Tab Bar */}
-      <div className="p-2 border-b border-[#262B38] bg-[#0E1016] grid grid-cols-4 gap-1 shrink-0">
+      {/* 5-Tab Bar */}
+      <div className="p-1.5 border-b border-[#262B38] bg-[#0E1016] grid grid-cols-5 gap-1 shrink-0">
+        <button
+          type="button"
+          onClick={() => onChangeTab('clip')}
+          className={`flex flex-col xl:flex-row items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+            activeTab === 'clip'
+              ? 'bg-[#1D2230] text-amber-400'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span className="truncate">{t.tabClip}</span>
+        </button>
         <button
           type="button"
           onClick={() => onChangeTab('effects')}
-          className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+          className={`flex flex-col xl:flex-row items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
             activeTab === 'effects'
               ? 'bg-[#1D2230] text-amber-400'
               : 'text-gray-400 hover:text-gray-200'
@@ -134,7 +186,7 @@ export function InspectorPanel({
         <button
           type="button"
           onClick={() => onChangeTab('generator')}
-          className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+          className={`flex flex-col xl:flex-row items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
             activeTab === 'generator'
               ? 'bg-[#1D2230] text-amber-400'
               : 'text-gray-400 hover:text-gray-200'
@@ -146,7 +198,7 @@ export function InspectorPanel({
         <button
           type="button"
           onClick={() => onChangeTab('typography')}
-          className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+          className={`flex flex-col xl:flex-row items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
             activeTab === 'typography'
               ? 'bg-[#1D2230] text-amber-400'
               : 'text-gray-400 hover:text-gray-200'
@@ -158,7 +210,7 @@ export function InspectorPanel({
         <button
           type="button"
           onClick={() => onChangeTab('export')}
-          className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+          className={`flex flex-col xl:flex-row items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
             activeTab === 'export'
               ? 'bg-[#1D2230] text-amber-400'
               : 'text-gray-400 hover:text-gray-200'
@@ -170,7 +222,639 @@ export function InspectorPanel({
       </div>
 
       {/* Scrollable Inspector Body */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-5">
+      <div className="flex-1 overflow-y-auto p-3.5 space-y-4">
+        {activeTab === 'clip' && (
+          <>
+            {mediaItems.length > 0 && selectedClip ? (
+              <div className="space-y-4">
+                {/* Clip Switcher + Quick Actions */}
+                <div className="space-y-2 pb-3 border-b border-[#262B38]">
+                  <span className="text-[11px] font-semibold text-amber-300 block">
+                    {t.selectedClipTitle}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={selectedClip.id}
+                      onChange={(e) => onSelectClip(e.target.value)}
+                      className="flex-1 min-w-0 rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs text-gray-100 focus:border-amber-500 focus:outline-none"
+                    >
+                      {mediaItems.map((m, idx) => (
+                        <option key={m.id} value={m.id}>
+                          #{idx + 1} {m.fileName} ({m.durationSec.toFixed(1)}s)
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => onDuplicateClip(selectedClip.id)}
+                      title={t.duplicateClipLabel}
+                      aria-label={t.duplicateClipLabel}
+                      className="p-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-gray-300 hover:text-amber-300 cursor-pointer"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveVisual(selectedClip.id)}
+                      title={t.rippleDeleteBtn}
+                      aria-label={t.rippleDeleteBtn}
+                      className="p-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-rose-500/60 text-gray-300 hover:text-rose-400 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Clip Duration */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-200 font-medium">{t.clipDurationLabel}</span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={30}
+                        step={0.5}
+                        value={Number(selectedClip.durationSec.toFixed(1))}
+                        onChange={(e) => {
+                          const v = Math.max(0.5, Math.min(30, Number(e.target.value) || 0.5));
+                          onUpdateClip(selectedClip.id, { durationSec: Number(v.toFixed(1)) });
+                        }}
+                        className="w-14 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
+                      />
+                      <span className="text-[11px] font-mono text-gray-500">s</span>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={30}
+                    step={0.5}
+                    value={selectedClip.durationSec}
+                    onChange={(e) =>
+                      onUpdateClip(selectedClip.id, { durationSec: Number(e.target.value) })
+                    }
+                    className="w-full studio-slider"
+                  />
+                  <div className="grid grid-cols-5 gap-1">
+                    {[2, 4, 5, 8, 12].map((sec) => (
+                      <button
+                        key={sec}
+                        type="button"
+                        onClick={() => onUpdateClip(selectedClip.id, { durationSec: sec })}
+                        className={`py-1 rounded border text-[11px] font-mono tabular-nums cursor-pointer ${
+                          Math.abs(selectedClip.durationSec - sec) < 0.05
+                            ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                            : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                        }`}
+                      >
+                        {sec}s
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Generator Scene & Per-Clip Shader Overrides */}
+                {selectedClip.kind === 'generator' && (
+                  <div className="space-y-3 pt-3 border-t border-[#262B38]">
+                    <div className="space-y-1">
+                      <span className="text-xs font-semibold text-gray-200 block">
+                        {t.clipGeneratorSceneLabel}
+                      </span>
+                      <select
+                        value={selectedClip.generatorId || 'galaxy_spiral'}
+                        onChange={(e) => {
+                          const nextEff = e.target.value as Exclude<GeneratorEffectId, 'none'>;
+                          const meta = GENERATOR_EFFECTS.find((g) => g.id === nextEff);
+                          onUpdateClip(selectedClip.id, {
+                            generatorId: nextEff,
+                            fileName: meta ? (lang === 'ru' ? meta.nameRu : meta.nameEn) : nextEff,
+                          });
+                        }}
+                        className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs text-gray-100 focus:border-amber-500 focus:outline-none"
+                      >
+                        {GENERATOR_EFFECTS.filter((g) => g.id !== 'none').map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {lang === 'ru' ? g.nameRu : g.nameEn}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-2 rounded-lg border border-[#262B38] bg-[#141821] p-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-gray-200 flex items-center gap-1.5">
+                          <Orbit className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                          <span>{t.clipGenParamsTitle}</span>
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateClip(selectedClip.id, {
+                              generatorParams: {
+                                speed: config.generatorSpeed,
+                                scale: config.generatorScale,
+                                beatReact: config.generatorBeatReact,
+                                complexity: config.generatorComplexity,
+                                warp: config.generatorWarp,
+                                symmetry: config.generatorSymmetry,
+                                rotationSpeed: config.generatorRotationSpeed,
+                                hueShift: config.generatorHueShift,
+                                glow: config.generatorGlow,
+                              },
+                            })
+                          }
+                          className="py-1 px-2 rounded border border-[#262B38] bg-[#0E1016] hover:border-amber-500/60 text-[10px] font-medium text-amber-300 cursor-pointer truncate"
+                        >
+                          {t.clipGenCopyGlobal}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateClip(selectedClip.id, { generatorParams: undefined })
+                          }
+                          className="py-1 px-2 rounded border border-[#262B38] bg-[#0E1016] hover:border-gray-500 text-[10px] font-medium text-gray-400 hover:text-gray-200 cursor-pointer truncate"
+                        >
+                          {t.clipGenUseGlobal}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-5 gap-1">
+                        {([1, 2, 4, 6, 8] as const).map((sym) => {
+                          const curSym = clipGenParams.symmetry ?? config.generatorSymmetry;
+                          return (
+                            <button
+                              key={sym}
+                              type="button"
+                              onClick={() => updateSelectedGenParams({ symmetry: sym })}
+                              className={`py-1 rounded border text-[10px] font-mono tabular-nums cursor-pointer ${
+                                curSym === sym
+                                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                                  : 'border-[#262B38] bg-[#0E1016] text-gray-300'
+                              }`}
+                            >
+                              {sym}×
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorSpeedLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.speed ?? config.generatorSpeed).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.2}
+                            max={2.5}
+                            step={0.05}
+                            value={clipGenParams.speed ?? config.generatorSpeed}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ speed: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorScaleLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.scale ?? config.generatorScale).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.5}
+                            max={2.0}
+                            step={0.05}
+                            value={clipGenParams.scale ?? config.generatorScale}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ scale: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorComplexityLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.complexity ?? config.generatorComplexity).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.4}
+                            max={2.0}
+                            step={0.05}
+                            value={clipGenParams.complexity ?? config.generatorComplexity}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ complexity: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorWarpLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {Math.round((clipGenParams.warp ?? config.generatorWarp) * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1.5}
+                            step={0.05}
+                            value={clipGenParams.warp ?? config.generatorWarp}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ warp: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {clipGenParams.hueShift ?? config.generatorHueShift}°
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={-180}
+                            max={180}
+                            step={5}
+                            value={clipGenParams.hueShift ?? config.generatorHueShift}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ hueShift: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorGlowLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(clipGenParams.glow ?? config.generatorGlow).toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.4}
+                            max={2.2}
+                            step={0.05}
+                            value={clipGenParams.glow ?? config.generatorGlow}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ glow: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Video Source Trim & Audio */}
+                {selectedClip.kind === 'video' && (
+                  <div className="space-y-2.5 pt-3 border-t border-[#262B38]">
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <label className="space-y-1 block">
+                        <span className="text-[10px] text-gray-400 block">
+                          {t.clipVideoStartLabel}
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={Math.max(0, (selectedClip.videoDuration || 10) - 0.5)}
+                          step={0.2}
+                          value={Number(selectedClip.sourceStartSec.toFixed(1))}
+                          onChange={(e) =>
+                            onUpdateClip(selectedClip.id, {
+                              sourceStartSec: Math.max(0, Number(e.target.value) || 0),
+                            })
+                          }
+                          className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
+                        />
+                      </label>
+
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-gray-400 block">{t.clipSpeedLabel}</span>
+                        <select
+                          value={selectedClip.playbackRate}
+                          onChange={(e) =>
+                            onUpdateClip(selectedClip.id, { playbackRate: Number(e.target.value) })
+                          }
+                          className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
+                        >
+                          {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
+                            <option key={spd} value={spd}>
+                              {spd}×
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-[#262B38] bg-[#141821] p-2.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-gray-300 flex items-center gap-1.5">
+                          {selectedClip.clipAudioMuted ? (
+                            <VolumeX className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
+                          ) : (
+                            <Volume2 className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                          )}
+                          <span>{t.clipAudioTitle}</span>
+                        </span>
+                        <label className="flex items-center gap-1.5 text-[11px] text-gray-400 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedClip.clipAudioMuted}
+                            onChange={(e) =>
+                              onUpdateClip(selectedClip.id, {
+                                clipAudioMuted: e.target.checked,
+                                clipAudioVolume:
+                                  !e.target.checked && selectedClip.clipAudioVolume === 0
+                                    ? 0.8
+                                    : selectedClip.clipAudioVolume,
+                              })
+                            }
+                            className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                          />
+                          <span>{t.clipMuteLabel}</span>
+                        </label>
+                      </div>
+
+                      {!selectedClip.clipAudioMuted && (
+                        <div className="space-y-2">
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px]">
+                              <span className="text-gray-400">{t.clipVolumeLabel}</span>
+                              <span className="font-mono tabular-nums text-gray-200">
+                                {Math.round(selectedClip.clipAudioVolume * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1.5}
+                              step={0.05}
+                              value={selectedClip.clipAudioVolume}
+                              onChange={(e) =>
+                                onUpdateClip(selectedClip.id, {
+                                  clipAudioVolume: Number(e.target.value),
+                                })
+                              }
+                              className="w-full studio-slider"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px]">
+                              <span className="text-gray-400">{t.audioDuckingLabel}</span>
+                              <span className="font-mono tabular-nums text-gray-200">
+                                {Math.round(config.audioDucking * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0}
+                              max={0.9}
+                              step={0.05}
+                              value={config.audioDucking}
+                              onChange={(e) =>
+                                onUpdateConfig({ audioDucking: Number(e.target.value) })
+                              }
+                              className="w-full studio-slider"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Transform & Keyframes */}
+                <div className="pt-3 border-t border-[#262B38] space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-200 flex items-center gap-1.5">
+                      <Move className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                      <span>{t.clipTransformTitle}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateClip(selectedClip.id, {
+                          transform: { ...DEFAULT_CLIP_TRANSFORM },
+                        })
+                      }
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-[10px] text-gray-300 hover:text-amber-300 cursor-pointer transition-colors"
+                    >
+                      <RotateCcw className="w-2.5 h-2.5" aria-hidden="true" />
+                      <span>{t.resetTransformBtn}</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-gray-400">{t.clipScaleStartLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {clipTransform.scale.toFixed(2)}×
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.4}
+                        max={2.2}
+                        step={0.05}
+                        value={clipTransform.scale}
+                        onChange={(e) => updateSelectedTransform({ scale: Number(e.target.value) })}
+                        className="w-full studio-slider"
+                      />
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-gray-400">{t.clipScaleEndLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {clipTransform.endScale.toFixed(2)}×
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.4}
+                        max={2.2}
+                        step={0.05}
+                        value={clipTransform.endScale}
+                        onChange={(e) =>
+                          updateSelectedTransform({ endScale: Number(e.target.value) })
+                        }
+                        className="w-full studio-slider"
+                      />
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-gray-400">{t.clipOffsetXLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {Math.round(clipTransform.offsetX * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-0.45}
+                        max={0.45}
+                        step={0.02}
+                        value={clipTransform.offsetX}
+                        onChange={(e) =>
+                          updateSelectedTransform({
+                            offsetX: Number(e.target.value),
+                            endOffsetX: Number(e.target.value),
+                          })
+                        }
+                        className="w-full studio-slider"
+                      />
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-gray-400">{t.clipOffsetYLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {Math.round(clipTransform.offsetY * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-0.45}
+                        max={0.45}
+                        step={0.02}
+                        value={clipTransform.offsetY}
+                        onChange={(e) =>
+                          updateSelectedTransform({
+                            offsetY: Number(e.target.value),
+                            endOffsetY: Number(e.target.value),
+                          })
+                        }
+                        className="w-full studio-slider"
+                      />
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-gray-400">{t.clipRotationLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {clipTransform.rotationDeg}°
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-45}
+                        max={45}
+                        step={1}
+                        value={clipTransform.rotationDeg}
+                        onChange={(e) =>
+                          updateSelectedTransform({ rotationDeg: Number(e.target.value) })
+                        }
+                        className="w-full studio-slider"
+                      />
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px]">
+                        <span className="text-gray-400">{t.clipOpacityLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {Math.round(clipTransform.opacity * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1}
+                        step={0.05}
+                        value={clipTransform.opacity}
+                        onChange={(e) =>
+                          updateSelectedTransform({ opacity: Number(e.target.value) })
+                        }
+                        className="w-full studio-slider"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-gray-400">{t.clipEasingLabel}</span>
+                    <select
+                      value={clipTransform.easing}
+                      onChange={(e) =>
+                        updateSelectedTransform({ easing: e.target.value as KeyframeEasing })
+                      }
+                      className="rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-[11px] text-gray-100"
+                    >
+                      <option value="linear">Linear</option>
+                      <option value="ease_in_out">Ease In-Out</option>
+                      <option value="ease_out">Ease Out</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Outgoing Transition */}
+                {mediaItems.length > 1 && (
+                  <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-[#262B38]">
+                    <div className="space-y-1">
+                      <span className="text-[10px] text-gray-400 block">
+                        {t.clipTransitionLabel}
+                      </span>
+                      <select
+                        value={selectedClip.transitionOut}
+                        onChange={(e) =>
+                          onUpdateClip(selectedClip.id, {
+                            transitionOut: e.target.value as SlideTransitionType,
+                          })
+                        }
+                        className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-[11px] text-gray-100"
+                      >
+                        <option value="crossfade">{t.transitionCrossfade}</option>
+                        <option value="dip_black">{t.transitionDipBlack}</option>
+                        <option value="slide">{t.transitionSlide}</option>
+                        <option value="cut">{t.transitionCut}</option>
+                      </select>
+                    </div>
+
+                    <label className="space-y-1 block">
+                      <span className="text-[10px] text-gray-400 block">
+                        {t.clipTransDurationLabel}
+                      </span>
+                      <input
+                        type="number"
+                        min={0.1}
+                        max={2.5}
+                        step={0.1}
+                        value={Number(selectedClip.transitionDurationSec.toFixed(1))}
+                        onChange={(e) =>
+                          onUpdateClip(selectedClip.id, {
+                            transitionDurationSec: Math.max(
+                              0.1,
+                              Math.min(2.5, Number(e.target.value) || 0.6)
+                            ),
+                          })
+                        }
+                        className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-[#262B38] bg-[#141821]/60 p-6 text-center space-y-2">
+                <SlidersHorizontal className="w-6 h-6 text-amber-400/70 mx-auto" aria-hidden="true" />
+                <p className="text-xs text-gray-400 leading-relaxed">{t.noClipSelectedHint}</p>
+              </div>
+            )}
+          </>
+        )}
+
         {activeTab === 'effects' && (
           <>
             <div className="space-y-2 pb-3 border-b border-[#262B38]">
