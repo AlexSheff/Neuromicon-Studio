@@ -13,6 +13,14 @@ import {
 } from '../audioAnalyzer';
 import { parseID3Tags } from '../id3Parser';
 import { DEFAULT_CLIP_TRANSFORM, DEFAULT_STUDIO_CONFIG } from '../presets';
+import {
+  hexToHueDeg,
+  hsvToHex,
+  hsvToRgb,
+  normalizeHueDeg,
+  rgbToHsv,
+  shiftHexHue,
+} from '../proceduralShaders';
 import { formatSrtTime, parseSubtitles } from '../subtitleParser';
 
 function makeClip(id: string, durationSec: number): VisualMediaState {
@@ -278,4 +286,27 @@ test('parseID3Tags decodes UTF-8, Windows-1251, unsynchronised frames, and ID3v2
   );
   assert.equal(parsedUnsync.title, 'Cosmic Pulse');
   assert.equal(parsedUnsync.artist, 'Привет');
+});
+
+test('HSV hue utilities cover full 0-360 spectrum cleanly without saturation collapse', () => {
+  assert.equal(normalizeHueDeg(-90), 270);
+  assert.equal(normalizeHueDeg(720), 0);
+
+  // Full 60-degree sweep around red primary hits all 6 primary/secondary hues accurately
+  const expected = ['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff', '#ff0000'];
+  const degs = [0, 60, 120, 180, 240, 300, 360];
+  degs.forEach((deg, idx) => {
+    assert.equal(shiftHexHue('#ff0000', deg), expected[idx]);
+  });
+
+  // Preserve saturation and value on rich pastel/studio colors across full rotation
+  const shifted = shiftHexHue('#f59e0b', 180);
+  const [h0, s0, v0] = rgbToHsv(245 / 255, 158 / 255, 11 / 255);
+  const roundRgb = hsvToRgb(h0 + 180, s0, v0);
+  assert.ok(s0 > 0.9 && v0 > 0.9);
+  assert.ok(Math.abs(hexToHueDeg(hsvToHex(120, 1, 1)) - 120) <= 1);
+  assert.equal(shiftHexHue('#f59e0b', 0), '#f59e0b');
+  assert.equal(shiftHexHue('#f59e0b', 360), '#f59e0b');
+  assert.notEqual(shifted, '#f59e0b');
+  assert.ok(roundRgb[2] > roundRgb[0]);
 });

@@ -99,16 +99,17 @@ export function sanitizeOutputFileName(
 
 export function buildSocialMetadataText(
   config: StudioConfig,
-  audio: AudioTrackState,
-  dims: ExportDimensions
+  audio: AudioTrackState | null,
+  dims: ExportDimensions,
+  clipDurationOverride?: number
 ): string {
-  const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+  const clipDuration = clipDurationOverride ?? Math.max(0.5, config.trimEnd - config.trimStart);
   const mins = Math.floor(clipDuration / 60);
   const secs = Math.floor(clipDuration % 60);
   const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
 
   return [
-    `${config.artistText ? `${config.artistText} — ` : ''}${config.titleText || audio.fileName}`,
+    `${config.artistText ? `${config.artistText} — ` : ''}${config.titleText || audio?.fileName || 'Neuromicon Project'}`,
     config.albumText ? `Release: ${config.albumText}` : '',
     `Format: ${dims.width}x${dims.height} (${dims.aspectLabel}) @ ${config.fps}fps`,
     `Duration: ${durationStr} (Fade In: ${config.fadeInSec.toFixed(1)}s, Fade Out: ${config.fadeOutSec.toFixed(1)}s)`,
@@ -331,7 +332,7 @@ async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Prom
 }
 
 async function renderTrimmedAudioWithFades(
-  sourceBuffer: AudioBuffer,
+  sourceBuffer: AudioBuffer | null,
   config: StudioConfig,
   mediaItems: VisualMediaState[],
   beatCutTimestamps: number[],
@@ -339,22 +340,25 @@ async function renderTrimmedAudioWithFades(
 ): Promise<AudioBuffer> {
   const clipDuration = Math.max(0.25, config.trimEnd - config.trimStart);
   const frameCount = Math.ceil(clipDuration * targetSampleRate);
-  const channels = Math.min(2, sourceBuffer.numberOfChannels);
+  const channels = sourceBuffer ? Math.min(2, sourceBuffer.numberOfChannels) : 2;
   const offline = new OfflineAudioContext(channels, frameCount, targetSampleRate);
 
-  const src = offline.createBufferSource();
-  src.buffer = sourceBuffer;
-  const mainGain = offline.createGain();
-  src.connect(mainGain);
-  mainGain.connect(offline.destination);
-  src.start(0, config.trimStart, clipDuration);
+  let mainGain: GainNode | null = null;
+  if (sourceBuffer) {
+    const src = offline.createBufferSource();
+    src.buffer = sourceBuffer;
+    mainGain = offline.createGain();
+    mainGain.gain.setValueAtTime(1, 0);
+    src.connect(mainGain);
+    mainGain.connect(offline.destination);
+    src.start(0, config.trimStart, clipDuration);
+  }
 
   // Mix unmuted video clip audio tracks & schedule ducking envelope on main track
   const segments = computeClipTimelineSegments(mediaItems, clipDuration, config, beatCutTimestamps);
   const duckAmt = Math.max(0, Math.min(0.9, config.audioDucking || 0));
   const duckGain = 1 - duckAmt;
 
-  mainGain.gain.setValueAtTime(1, 0);
   for (const seg of segments) {
     const clip = mediaItems[seg.clipIndex];
     if (!clip || clip.kind !== 'video' || clip.clipAudioMuted || clip.clipAudioVolume <= 0.01) {
@@ -362,7 +366,6 @@ async function renderTrimmedAudioWithFades(
     }
     if (!clip.decodedAudioBuffer) continue;
 
-    const segDur = Math.max(0.05, seg.endSec - seg.startSec);
     const clipSrc = offline.createBufferSource();
     clipSrc.buffer = clip.decodedAudioBuffer;
     clipSrc.loop = true;
@@ -377,7 +380,7 @@ async function renderTrimmedAudioWithFades(
     clipSrc.start(seg.startSec, offsetInClip);
     clipSrc.stop(seg.endSec);
 
-    if (duckAmt > 0.02) {
+    if (mainGain && duckAmt > 0.02) {
       mainGain.gain.setTargetAtTime(duckGain, seg.startSec, 0.08);
       mainGain.gain.setTargetAtTime(1, seg.endSec, 0.12);
     }
@@ -398,7 +401,7 @@ async function renderTrimmedAudioWithFades(
 }
 
 export async function exportStudioVideo(params: {
-  audio: AudioTrackState;
+  audio: AudioTrackState | null;
   mediaItems: VisualMediaState[];
   config: StudioConfig;
   abortSignal: AbortSignal;
@@ -414,9 +417,20 @@ export async function exportStudioVideo(params: {
     config.customWidth,
     config.customHeight
   );
-  const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
-  const totalFrames = Math.max(1, Math.ceil(clipDuration * config.fps));
-  const videoBitrate = config.bitrateMbps * 1_000_000;
+  const rawClipsTotal = mediaItems.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+  const effectiveConfig: StudioConfig = audio
+    ? config
+    : {
+        ...config,
+        trimStart: 0,
+        trimEnd:
+          mediaItems.length > 0
+            ? Math.max(0.5, rawClipsTotal)
+            : Math.max(0.5, config.trimEnd - config.trimStart),
+      };
+  const clipDuration = Math.max(0.5, effectiveConfig.trimEnd - effectiveConfig.trimStart);
+  const totalFrames = Math.max(1, Math.ceil(clipDuration * effectiveConfig.fps));
+  const videoBitrate = effectiveConfig.bitrateMbps * 1_000_000;
 
   onProgress({
     phase: 'preparing',
@@ -431,37 +445,40 @@ export async function exportStudioVideo(params: {
   });
 
   try {
-    await document.fonts.load(`${config.fontWeight} 48px "${config.fontFamily}"`);
+    await document.fonts.load(
+      `${effectiveConfig.fontWeight} 48px "${effectiveConfig.fontFamily}"`
+    );
   } catch {
     // Continue even if font check rejects
   }
 
-  const monoData = buildMonoAudioData(audio.buffer);
+  const audioSampleRate = audio?.sampleRate || 48000;
+  const monoData = audio ? buildMonoAudioData(audio.buffer) : new Float32Array(0);
   const autoCuts =
-    config.slideshowMode === 'beat_cut'
+    audio && effectiveConfig.slideshowMode === 'beat_cut'
       ? computeBeatCutTimestamps(
           monoData,
-          audio.sampleRate,
-          config.trimStart,
-          config.trimEnd,
-          config.minBeatCutSec,
-          config.beatSensitivity
+          audioSampleRate,
+          effectiveConfig.trimStart,
+          effectiveConfig.trimEnd,
+          effectiveConfig.minBeatCutSec,
+          effectiveConfig.beatSensitivity
         )
       : [0];
   const beatCutTimestamps = resolveBeatCutPoints(
     autoCuts,
-    config.manualBeatMarkers,
-    config.trimStart,
+    effectiveConfig.manualBeatMarkers,
+    effectiveConfig.trimStart,
     clipDuration
   );
-  const channels = Math.min(2, audio.numberOfChannels);
+  const channels = audio ? Math.min(2, audio.numberOfChannels) : 2;
 
   const profile = await probeBestWebCodecsProfile(
     dims.width,
     dims.height,
-    config.fps,
+    effectiveConfig.fps,
     videoBitrate,
-    audio.sampleRate,
+    audioSampleRate,
     channels
   );
 
@@ -469,10 +486,11 @@ export async function exportStudioVideo(params: {
     return await exportWithWebCodecs({
       profile,
       audio,
+      audioSampleRate,
       monoData,
       mediaItems,
       beatCutTimestamps,
-      config,
+      config: effectiveConfig,
       dims,
       clipDuration,
       totalFrames,
@@ -488,10 +506,11 @@ export async function exportStudioVideo(params: {
 
   return await exportWithMediaRecorder({
     audio,
+    audioSampleRate,
     monoData,
     mediaItems,
     beatCutTimestamps,
-    config,
+    config: effectiveConfig,
     dims,
     clipDuration,
     totalFrames,
@@ -505,7 +524,8 @@ export async function exportStudioVideo(params: {
 
 async function exportWithWebCodecs(params: {
   profile: ProbedWebCodecsProfile;
-  audio: AudioTrackState;
+  audio: AudioTrackState | null;
+  audioSampleRate: number;
   monoData: Float32Array;
   mediaItems: VisualMediaState[];
   beatCutTimestamps: number[];
@@ -524,7 +544,8 @@ async function exportWithWebCodecs(params: {
   const {
     profile,
     audio,
-    monoData,
+    audioSampleRate,
+    monoData: masterMonoData,
     mediaItems,
     beatCutTimestamps,
     config,
@@ -542,12 +563,15 @@ async function exportWithWebCodecs(params: {
 
   const targetSampleRate = profile.audioSampleRate;
   const trimmedAudio = await renderTrimmedAudioWithFades(
-    audio.buffer,
+    audio ? audio.buffer : null,
     config,
     mediaItems,
     beatCutTimestamps,
     targetSampleRate
   );
+  // When exporting standalone MP4/video clips without a separate master track, drive audio visualizers from mixed clip audio
+  const activeMonoData = audio ? masterMonoData : buildMonoAudioData(trimmedAudio);
+  const analysisSampleRate = audio ? audioSampleRate : targetSampleRate;
 
   if (abortSignal.aborted) {
     return {
@@ -779,9 +803,9 @@ async function exportWithWebCodecs(params: {
       }
 
       const metrics = analyzeAudioAtTime(
-        monoData,
-        audio.sampleRate,
-        sourceAudioTime,
+        activeMonoData,
+        analysisSampleRate,
+        audio ? sourceAudioTime : localTime,
         config.beatSensitivity,
         smoothState,
         config.visualizerSmoothing,
@@ -950,7 +974,8 @@ async function exportWithWebCodecs(params: {
 }
 
 async function exportWithMediaRecorder(params: {
-  audio: AudioTrackState;
+  audio: AudioTrackState | null;
+  audioSampleRate: number;
   monoData: Float32Array;
   mediaItems: VisualMediaState[];
   beatCutTimestamps: number[];
@@ -966,7 +991,8 @@ async function exportWithMediaRecorder(params: {
 }): Promise<ExportProgressState> {
   const {
     audio,
-    monoData,
+    audioSampleRate,
+    monoData: masterMonoData,
     mediaItems,
     beatCutTimestamps,
     config,
@@ -1012,12 +1038,14 @@ async function exportWithMediaRecorder(params: {
   }
 
   const mixedAudioBuffer = await renderTrimmedAudioWithFades(
-    audio.buffer,
+    audio ? audio.buffer : null,
     config,
     mediaItems,
     beatCutTimestamps,
     audioCtx.sampleRate
   );
+  const activeMonoData = audio ? masterMonoData : buildMonoAudioData(mixedAudioBuffer);
+  const analysisSampleRate = audio ? audioSampleRate : audioCtx.sampleRate;
 
   const dest = audioCtx.createMediaStreamDestination();
   const src = audioCtx.createBufferSource();
@@ -1150,9 +1178,9 @@ async function exportWithMediaRecorder(params: {
     const currentFrame = Math.min(totalFrames, Math.floor(localTime * config.fps));
     const sourceAudioTime = config.trimStart + localTime;
     const metrics = analyzeAudioAtTime(
-      monoData,
-      audio.sampleRate,
-      sourceAudioTime,
+      activeMonoData,
+      analysisSampleRate,
+      audio ? sourceAudioTime : localTime,
       config.beatSensitivity,
       smoothState,
       config.visualizerSmoothing,

@@ -23,24 +23,25 @@
 - **Undo / Redo (`Ctrl+Z` / `Ctrl+Y`)** across 30 history steps with interactive element keyboard-focus protection.
 
 ### Procedural Visual Generators (10 WebGL2 Shaders + Custom GLSL Sandbox)
-Add **any** of the 11 procedural generators onto clips, the FX overlay lane, or as standalone scenes from the portal **`+ Generator`** menu, customize **per-clip shader overrides**, and render cleanly with automatic 2D Canvas fallback on WebGL context loss:
+Add **any** of the 11 procedural generators onto clips, the FX overlay lane, or as standalone scenes from the portal **`+ Generator`** menu, customize **per-clip shader overrides** with HDR-safe **0°–360° full-spectrum HSV Hue** sliders, and render cleanly with automatic 2D Canvas fallback on WebGL context loss:
 1. **Julia Fractal** · 2. **Fractal Kaleidoscope** · 3. **Mandelbrot Orbit** · 4. **Deep Space Nebula** · 5. **Spiral Galaxy** · 6. **Solar Aurora** · 7. **Event Horizon** · 8. **Cosmic Particle Warp** · 9. **Synthwave Cyber Grid** · 10. **Voronoi Bio-Plasma** · 11. **Custom GLSL Sandbox**
 
-### Beat-Synced Visualizers & Optics
-- **6 Real-Time FFT Presets**: *Spectrum Bars*, *Radial Pulse*, *Horizon Wave*, *Beat Pulse Zoom*, *Reactive Particles*, and *Editorial Frame* (with **Show/Hide Visualizer** toggle and custom **Visualizer Color** picker).
+### MP4 Video & Beat-Synced Visualizers
+- **Full `.mp4` / `.mov` / `.webm` Support**: Upload `.mp4` files as visual clips (automatically unmuted when no master track is present), extract audio from `.mp4` directly into the Audio Track (`Use Clip Audio as Master Track`) for waveform beat-sync, or load `.mp4` straight into the audio slot.
+- **6 Real-Time FFT Presets**: *Spectrum Bars*, *Radial Pulse*, *Horizon Wave*, *Beat Pulse Zoom*, *Reactive Particles*, and *Editorial Frame* (with **Show/Hide Visualizer** toggle and full **360° Hue Spectrum** + hex color controls).
 - **One-Click Studio Moods**: *Deep Cosmos*, *Neon Synthwave*, *Fractal Mandala*, and *Editorial Noir*.
 - **Framing, Color LUTs & Safari Compatibility**: Automatic software downscaled blur fallback when `CanvasRenderingContext2D.filter` is unavailable (e.g. Safari), with an inline non-blocking compatibility indicator.
 
 ### Animated Typography, Subtitles & Timed Overlays
-- **6 Bundled Cyrillic + Latin Fonts** (`@fontsource` offline bundles): *Manrope*, *Montserrat*, *Oswald*, *Cormorant Garamond*, *Playfair Display*, and *JetBrains Mono*.
+- **6 Bundled Cyrillic + Latin Fonts** (`@fontsource` offline bundles): *Manrope*, *Montserrat*, *Oswald*, *Cormorant Garamond*, *Playfair Display*, and *JetBrains Mono*, paired with a full **0°–360° Accent Hue** slider.
 - **ID3v2 Metadata**: Automatic title, artist, album, year, Windows-1251 Cyrillic heuristic decoding, and cover art extraction from MP3 files.
 - **Subtitles (SRT / VTT)** & **Timed Overlays (`Start (s)` / `Dur (s)`)**: Place text badges and PNG/SVG watermarks over specific timeline spans or the whole video.
 - **Guided 4-Step Onboarding Checklist**: Appears on empty projects with instant `16:9` / `9:16` / `1:1` aspect buttons and demo synth beat loader.
 
 ### Social Auto-Trim, Persistence & Direct-to-Disk 4K Export
 - **IndexedDB Autosave Status & Quota Guard**: Real-time `Saved / Saving / Error` indicator in the top bar plus automatic orphan blob pruning.
-- **WebCodecs Pre-Flight Check & Direct-to-Disk Streaming**: Probes hardware/software H.264/VP9/AAC/Opus codec support before export, warns when large 4K/long renders exceed safe RAM budgets, and streams MP4/WebM straight to disk via `FileSystemWritableFileStreamTarget` (`showSaveFilePicker`) when supported, with automatic `MediaRecorder` fallback.
-- **Batch Export (`16:9 + 9:16 + 1:1`)**, `.srt` export, `.json` project portability, and `.txt` social description export.
+- **WebCodecs Pre-Flight Check & Direct-to-Disk Streaming**: Exports standalone `.mp4`/clip projects as well as master-audio music videos. Probes hardware/software H.264/VP9/AAC/Opus codec support before export, warns when large 4K/long renders exceed safe RAM budgets, and streams MP4/WebM straight to disk via `FileSystemWritableFileStreamTarget` (`showSaveFilePicker`) when supported, with automatic `MediaRecorder` fallback.
+- **Batch Export (`16:9 + 9:16 + 1:1`)**, `.srt` export, `.json` project portability, and `.txt` social description export (set optional `VITE_GITHUB_URL` in `.env` to link a custom fork/repo in the top bar).
 
 ## Keyboard Shortcuts
 

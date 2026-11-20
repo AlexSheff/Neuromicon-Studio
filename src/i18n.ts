@@ -13,7 +13,7 @@ export const TRANSLATIONS = {
     // Media inputs & Clip editor
     audioSectionTitle: 'Аудиодорожка',
     audioDropTitle: 'Перетащите аудио или нажмите для выбора',
-    audioDropHint: 'MP3, WAV, FLAC, OGG, M4A',
+    audioDropHint: 'MP3, WAV, FLAC, OGG, M4A, MP4 (извлечёт звук)',
     loadDemoBeat: 'Загрузить демо-бит',
     replaceAudio: 'Заменить аудио',
     audioSyntheticNote: 'Встроенный синтезатор',
@@ -172,7 +172,7 @@ export const TRANSLATIONS = {
     exportSummaryTitle: 'Итоговые параметры рендера',
     exportVideoBtn: 'Рендерить и скачать клип',
     exportMetaTxtBtn: 'Скачать описание (.txt)',
-    needAudioAlert: 'Сначала загрузите аудиодорожку или демо-бит',
+    needAudioAlert: 'Добавьте аудиодорожку или хотя бы один клип / MP4-видео',
 
     // Export Modal
     exportModalTitle: 'Высококачественный экспорт клипа',
@@ -190,7 +190,7 @@ export const TRANSLATIONS = {
     codecLabel: 'Кодек',
     sizeLabel: 'Размер',
     exportFallbackWarning: 'Используется MediaRecorder (в реальном времени): возможны отличия в синхронизации и качестве.',
-    errInvalidAudio: 'Не удалось декодировать аудиофайл. Проверьте формат (MP3, WAV, FLAC, OGG, M4A).',
+    errInvalidAudio: 'Не удалось декодировать аудиодорожку. Проверьте формат (MP3, WAV, FLAC, OGG, M4A, MP4).',
     errInvalidVisual: 'Не удалось загрузить медиафайл',
     errUnsupportedFile: 'Неподдерживаемый тип или повреждённый файл',
 
@@ -372,7 +372,7 @@ export const TRANSLATIONS = {
     onboardingStep2: '2. Загрузите фото/видео или добавьте 3D/фрактал-сцену',
     onboardingStep3: '3. Выберите стиль BeatFX или отключите визуализатор',
     onboardingStep4: '4. Выберите формат (16:9 / 9:16 / 1:1) и экспортируйте',
-    onboardingMissingAudio: 'Сначала выберите аудио — без него экспорт недоступен',
+    onboardingMissingAudio: 'Добавьте аудио, демо-бит или MP4-клип для воспроизведения и экспорта',
     dismissOnboarding: 'Скрыть подсказку',
     safariFilterWarning: 'Браузер без CSS-фильтров на Canvas: используется программное размытие (экспорт 100% поддерживается)',
     preflightEngineLabel: 'Движок рендера',
@@ -385,6 +385,16 @@ export const TRANSLATIONS = {
     overlayFadeSecLabel: 'Затухание',
     overlayDuplicateBtn: 'Дубл.',
     snapshotSavedNotice: 'PNG-снимок кадра сохранён',
+    githubLinkLabel: 'GitHub',
+    githubLinkTitle: 'Открыть репозиторий на GitHub',
+    donateLinkLabel: 'Донат',
+    donateLinkTitle: 'Поддержать проект через PayPal',
+    useClipAudioAsMasterBtn: 'Сделать звук видео главной дорожкой',
+    clipAudioExtractedToast: 'Звук из MP4 установлен как главная аудиодорожка',
+    clipNoAudioNote: 'Без мастер-трека экспорт использует звук MP4-клипов',
+    hueResetBtn: '0°',
+    accentHueLabel: 'Спектр акцента (Hue)',
+    visualizerHueLabel: 'Спектр визуала (Hue)',
 
     presets: {
       spectrum_bars: { name: 'Спектр-бары', desc: 'Эквалайзер с реакцией на бас и верх' },
@@ -414,7 +424,7 @@ export const TRANSLATIONS = {
 
     audioSectionTitle: 'Audio Track',
     audioDropTitle: 'Drop audio file or click to browse',
-    audioDropHint: 'MP3, WAV, FLAC, OGG, M4A',
+    audioDropHint: 'MP3, WAV, FLAC, OGG, M4A, MP4 (extracts audio)',
     loadDemoBeat: 'Load Built-in Synth Beat',
     replaceAudio: 'Replace Audio',
     audioSyntheticNote: 'Built-in Web Audio synth',
@@ -563,7 +573,7 @@ export const TRANSLATIONS = {
     exportSummaryTitle: 'Render Specification',
     exportVideoBtn: 'Render & Download Video',
     exportMetaTxtBtn: 'Download Description (.txt)',
-    needAudioAlert: 'Load an audio track or built-in synth beat first',
+    needAudioAlert: 'Load an audio track or at least one media / MP4 clip first',
 
     exportModalTitle: 'High-Resolution Clip Export',
     exportPreparing: 'Analyzing audio and preparing render...',
@@ -580,7 +590,7 @@ export const TRANSLATIONS = {
     codecLabel: 'Codec',
     sizeLabel: 'File Size',
     exportFallbackWarning: 'Using real-time MediaRecorder fallback: frame timing and quality may be less deterministic than WebCodecs.',
-    errInvalidAudio: 'Failed to decode audio file. Please verify the file is valid MP3, WAV, FLAC, OGG, or M4A.',
+    errInvalidAudio: 'Failed to decode audio track. Please verify the file is valid MP3, WAV, FLAC, OGG, M4A, or MP4.',
     errInvalidVisual: 'Failed to decode media file',
     errUnsupportedFile: 'Unsupported or empty file',
 
@@ -762,7 +772,7 @@ export const TRANSLATIONS = {
     onboardingStep2: '2. Drop photos/videos or add a generative scene',
     onboardingStep3: '3. Customize BeatFX visualizer (or hide it in Beat FX tab)',
     onboardingStep4: '4. Pick social aspect (16:9 / 9:16 / 1:1) and Export',
-    onboardingMissingAudio: 'Audio required: load a track or demo beat to unlock playback & export',
+    onboardingMissingAudio: 'Load an audio track, demo beat, or MP4 clip to unlock playback & export',
     dismissOnboarding: 'Dismiss guide',
     safariFilterWarning: 'Canvas CSS filters unavailable in this browser: using soft-blur fallback',
     preflightEngineLabel: 'Render Engine',
@@ -775,6 +785,16 @@ export const TRANSLATIONS = {
     overlayFadeSecLabel: 'Fade',
     overlayDuplicateBtn: 'Dup',
     snapshotSavedNotice: 'PNG snapshot saved',
+    githubLinkLabel: 'GitHub',
+    githubLinkTitle: 'Open GitHub repository',
+    donateLinkLabel: 'Donate',
+    donateLinkTitle: 'Support via PayPal',
+    useClipAudioAsMasterBtn: 'Use Clip Audio as Master Track',
+    clipAudioExtractedToast: 'MP4 audio promoted to master audio track',
+    clipNoAudioNote: 'Without a master track, export mixes unmuted MP4 audio',
+    hueResetBtn: '0°',
+    accentHueLabel: 'Accent Spectrum (Hue)',
+    visualizerHueLabel: 'Visualizer Hue',
 
     presets: {
       spectrum_bars: { name: 'Spectrum Bars', desc: 'Bass-and-treble reactive frequency bars' },

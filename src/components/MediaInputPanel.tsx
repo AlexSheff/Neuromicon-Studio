@@ -234,7 +234,7 @@ export function MediaInputPanel({
               <input
                 ref={audioInputRef}
                 type="file"
-                accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a"
+                accept="audio/*,video/mp4,video/webm,video/quicktime,.mp3,.wav,.flac,.ogg,.m4a,.mp4,.mov,.webm,.aac"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -315,7 +315,7 @@ export function MediaInputPanel({
                 ref={visualInputRef}
                 type="file"
                 multiple
-                accept="image/*,video/mp4,video/webm,video/quicktime"
+                accept="image/*,video/mp4,video/webm,video/quicktime,.mp4,.mov,.webm,.m4v"
                 className="hidden"
                 onChange={(e) => {
                   const files = Array.from(e.target.files || []);

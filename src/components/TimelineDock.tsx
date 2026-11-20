@@ -830,7 +830,7 @@ export function TimelineDock({
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*,video/mp4,video/webm,video/quicktime"
+        accept="image/*,video/mp4,video/webm,video/quicktime,.mp4,.mov,.webm,.m4v"
         className="hidden"
         onChange={(e) => {
           const files = Array.from(e.target.files || []);

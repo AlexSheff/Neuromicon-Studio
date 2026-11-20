@@ -82,6 +82,16 @@ const IDLE_EXPORT_STATE: ExportProgressState = {
 
 const MAX_UPLOAD_BYTES = 512 * 1024 * 1024; // 512 MB guard
 const MAX_HISTORY_STEPS = 30;
+const clipMonoCache = new WeakMap<AudioBuffer, Float32Array>();
+
+function getCachedClipMono(buffer: AudioBuffer): Float32Array {
+  let cached = clipMonoCache.get(buffer);
+  if (!cached) {
+    cached = buildMonoAudioData(buffer);
+    clipMonoCache.set(buffer, cached);
+  }
+  return cached;
+}
 
 interface HistorySnapshot {
   config: StudioConfig;
@@ -877,14 +887,14 @@ export default function App() {
                 height: video.videoHeight || 1920,
                 videoElement: video,
                 videoDuration: vDur,
-                durationSec: Number(Math.min(8, Math.max(1, vDur)).toFixed(1)),
+                durationSec: Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
                 sourceStartSec: 0,
                 playbackRate: 1.0,
                 transitionOut: 'crossfade',
                 transitionDurationSec: 0.65,
                 transform: { ...DEFAULT_CLIP_TRANSFORM },
                 clipAudioVolume: 0.8,
-                clipAudioMuted: true,
+                clipAudioMuted: Boolean(audioRef.current),
               },
               selectedClipIdRef.current
             )
@@ -1271,6 +1281,33 @@ export default function App() {
     [applyAudioBuffer, getAudioContext, lang, showError]
   );
 
+  const handleUseClipAudioAsMaster = useCallback(
+    (clipId: string) => {
+      const clip = mediaItemsRef.current.find((m) => m.id === clipId);
+      if (!clip?.decodedAudioBuffer) return;
+      pushImmediateHistory();
+      audioBlobKeyRef.current = undefined;
+      // Mute clip element audio so it doesn't double-play alongside the extracted master track
+      setMediaItems((prev) =>
+        prev.map((m) => (m.id === clipId ? { ...m, clipAudioMuted: true } : m))
+      );
+      applyAudioBuffer(
+        clip.decodedAudioBuffer,
+        clip.fileName,
+        0,
+        {
+          title: clip.fileName.replace(/\.[^.]+$/, ''),
+          artist: '',
+          album: '',
+          year: '',
+        },
+        false
+      );
+      showUndoToast(tFor(langRef.current).clipAudioExtractedToast);
+    },
+    [applyAudioBuffer, pushImmediateHistory, showUndoToast]
+  );
+
   const handleLoadDemoBeat = useCallback(async () => {
     setIsLoadingAudio(true);
     try {
@@ -1302,7 +1339,7 @@ export default function App() {
           showError(`${tFor(lang).errUnsupportedFile}: ${file?.name || ''}`);
           continue;
         }
-        const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(file.name);
+        const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v)$/i.test(file.name);
         const isImage =
           file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(file.name);
         if (!isVideo && !isImage) {
@@ -2840,10 +2877,37 @@ export default function App() {
       const absTime = currentTimeRef.current;
       const localTime = Math.max(0, Math.min(clipDuration, absTime - bounds.trimBase));
 
+      let analysisMono = monoDataRef.current;
+      let analysisSampleRate = audio?.sampleRate || 48000;
+      let analysisTime = absTime;
+
+      if (!audio && analysisMono.length === 0 && mediaItems.length > 0) {
+        const slice = resolveActiveSlideshowSlice(
+          mediaItems,
+          localTime,
+          clipDuration,
+          config,
+          beatCutTimestamps
+        );
+        const activeClip = mediaItems[slice.activeIndex];
+        if (
+          activeClip?.decodedAudioBuffer &&
+          !activeClip.clipAudioMuted &&
+          activeClip.clipAudioVolume > 0.01
+        ) {
+          analysisMono = getCachedClipMono(activeClip.decodedAudioBuffer);
+          analysisSampleRate = activeClip.decodedAudioBuffer.sampleRate;
+          const vDur = activeClip.videoDuration || activeClip.decodedAudioBuffer.duration || 1;
+          analysisTime =
+            (activeClip.sourceStartSec + slice.slideLocalTime * (activeClip.playbackRate || 1)) %
+            Math.max(0.1, vDur);
+        }
+      }
+
       const metrics = analyzeAudioAtTime(
-        monoDataRef.current,
-        audio?.sampleRate || 48000,
-        absTime,
+        analysisMono,
+        analysisSampleRate,
+        analysisTime,
         config.beatSensitivity,
         isPlaying ? smoothStateRef.current : undefined,
         config.visualizerSmoothing,
@@ -3051,7 +3115,7 @@ export default function App() {
   ]);
 
   const handleStartExport = useCallback(async () => {
-    if (!audio) return;
+    if (!audio && mediaItems.length === 0) return;
     stopPlayback();
 
     if (exportState.outputUrl) {
@@ -3088,7 +3152,7 @@ export default function App() {
   }, [audio, config, exportState.outputUrl, mediaItems, stopPlayback]);
 
   const handleStartStreamExport = useCallback(async () => {
-    if (!audio) return;
+    if (!audio && mediaItems.length === 0) return;
     const picker = (
       window as unknown as {
         showSaveFilePicker?: (opts?: {
@@ -3113,8 +3177,8 @@ export default function App() {
       dims.height,
       config.fps,
       config.bitrateMbps,
-      audio.sampleRate,
-      audio.numberOfChannels
+      audio?.sampleRate || 48000,
+      Math.min(2, audio?.numberOfChannels || 2)
     );
     if (caps.engine === 'mediarecorder') {
       handleStartExport();
@@ -3178,7 +3242,7 @@ export default function App() {
   }, [audio, config, exportState.outputUrl, handleStartExport, mediaItems, stopPlayback]);
 
   const handleStartBatchExport = useCallback(async () => {
-    if (!audio) return;
+    if (!audio && mediaItems.length === 0) return;
     stopPlayback();
 
     if (exportState.outputUrl) {
@@ -3234,14 +3298,17 @@ export default function App() {
   }, [audio, config, exportState.outputUrl, mediaItems, stopPlayback]);
 
   const handleDownloadMetadataTxt = useCallback(() => {
-    if (!audio) return;
+    if (!audio && mediaItems.length === 0) return;
     const dims = resolveExportDimensions(
       config.aspectMode,
       mediaItems,
       config.customWidth,
       config.customHeight
     );
-    const content = buildSocialMetadataText(config, audio, dims);
+    const clipDurationOverride = audio
+      ? undefined
+      : getEffectiveTimelineBounds(config, mediaItems, null).clipDuration;
+    const content = buildSocialMetadataText(config, audio, dims, clipDurationOverride);
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -3249,7 +3316,7 @@ export default function App() {
     a.download = `${(config.titleText || 'track').replace(/[<>:"/\\|?*]/g, '')}_description.txt`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [audio, config, mediaItems]);
+  }, [audio, config, getEffectiveTimelineBounds, mediaItems]);
 
   const handleSnapshotPng = useCallback(() => {
     const cfg = configRef.current;
@@ -3270,10 +3337,36 @@ export default function App() {
     const absTime = currentTimeRef.current;
     const localTime = Math.max(0, Math.min(clipDuration, absTime - bounds.trimBase));
 
+    let analysisMono = monoDataRef.current;
+    let analysisSampleRate = audioRef.current?.sampleRate || 48000;
+    let analysisTime = absTime;
+    if (!audioRef.current && analysisMono.length === 0 && mediaItemsRef.current.length > 0) {
+      const slice = resolveActiveSlideshowSlice(
+        mediaItemsRef.current,
+        localTime,
+        clipDuration,
+        cfg,
+        beatCutTimestamps
+      );
+      const activeClip = mediaItemsRef.current[slice.activeIndex];
+      if (
+        activeClip?.decodedAudioBuffer &&
+        !activeClip.clipAudioMuted &&
+        activeClip.clipAudioVolume > 0.01
+      ) {
+        analysisMono = getCachedClipMono(activeClip.decodedAudioBuffer);
+        analysisSampleRate = activeClip.decodedAudioBuffer.sampleRate;
+        const vDur = activeClip.videoDuration || activeClip.decodedAudioBuffer.duration || 1;
+        analysisTime =
+          (activeClip.sourceStartSec + slice.slideLocalTime * (activeClip.playbackRate || 1)) %
+          Math.max(0.1, vDur);
+      }
+    }
+
     const metrics = analyzeAudioAtTime(
-      monoDataRef.current,
-      audioRef.current?.sampleRate || 48000,
-      absTime,
+      analysisMono,
+      analysisSampleRate,
+      analysisTime,
       cfg.beatSensitivity,
       undefined,
       cfg.visualizerSmoothing,
@@ -3358,7 +3451,7 @@ export default function App() {
       <TopBar
         lang={lang}
         activeTab={activeTab}
-        hasAudio={Boolean(audio)}
+        canExport={Boolean(audio) || mediaItems.length > 0}
         canUndo={historyFlags.canUndo}
         canRedo={historyFlags.canRedo}
         dimsLabel={`${stageDims.width}×${stageDims.height} · ${stageDims.aspectLabel} · ${config.fps}fps`}
@@ -3535,6 +3628,7 @@ export default function App() {
               onStartStreamExport={handleStartStreamExport}
               onStartBatchExport={handleStartBatchExport}
               onDownloadMetadataTxt={handleDownloadMetadataTxt}
+              onUseClipAudioAsMaster={handleUseClipAudioAsMaster}
             />
           </>
         )}

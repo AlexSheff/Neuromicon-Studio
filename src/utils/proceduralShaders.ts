@@ -103,11 +103,29 @@ vec2 applySymmetry(vec2 uv, float folds) {
   return vec2(cos(a), sin(a)) * r;
 }
 
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1.0e-6;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+vec3 hsv2rgb(vec3 c) {
+  vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
 vec3 hueShiftColor(vec3 col, float rad) {
-  if (abs(rad) < 0.001) return col;
-  vec3 k = vec3(0.57735, 0.57735, 0.57735);
-  float cosAngle = cos(rad);
-  return col * cosAngle + cross(k, col) * sin(rad) + k * dot(k, col) * (1.0 - cosAngle);
+  float turns = fract(rad / 6.28318530718);
+  if (turns < 0.0005 || turns > 0.9995) return col;
+  vec3 safeCol = max(vec3(0.0), col);
+  float maxC = max(1.0, max(safeCol.r, max(safeCol.g, safeCol.b)));
+  vec3 hsv = rgb2hsv(safeCol / maxC);
+  hsv.x = fract(hsv.x + turns);
+  return hsv2rgb(hsv) * maxC;
 }
 
 vec3 renderJulia(vec2 uv) {
@@ -434,14 +452,99 @@ vec3 renderCustom(vec2 uv) {
 }
 `;
 
-function hexToRgbNorm(hex: string): [number, number, number] {
-  const clean = hex.replace('#', '');
-  if (clean.length !== 6) return [0.96, 0.62, 0.04];
+export function normalizeHueDeg(deg: number): number {
+  if (!Number.isFinite(deg)) return 0;
+  return Math.round((((deg % 360) + 360) % 360) * 1000) / 1000;
+}
+
+export function hexToRgbNorm(hex: string): [number, number, number] {
+  const clean = hex.trim().replace('#', '');
+  const full =
+    clean.length === 3
+      ? clean
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : clean;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return [0.96, 0.62, 0.04];
   return [
-    parseInt(clean.slice(0, 2), 16) / 255,
-    parseInt(clean.slice(2, 4), 16) / 255,
-    parseInt(clean.slice(4, 6), 16) / 255,
+    parseInt(full.slice(0, 2), 16) / 255,
+    parseInt(full.slice(2, 4), 16) / 255,
+    parseInt(full.slice(4, 6), 16) / 255,
   ];
+}
+
+export function rgbToHexNorm(r: number, g: number, b: number): string {
+  const clampByte = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v * 255)))
+      .toString(16)
+      .padStart(2, '0');
+  return `#${clampByte(r)}${clampByte(g)}${clampByte(b)}`;
+}
+
+export function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  if (d > 1e-6) {
+    if (max === r) {
+      h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    } else if (max === g) {
+      h = ((b - r) / d + 2) / 6;
+    } else {
+      h = ((r - g) / d + 4) / 6;
+    }
+  }
+  const s = max > 1e-6 ? d / max : 0;
+  return [normalizeHueDeg(h * 360), s, max];
+}
+
+export function hsvToRgb(hDeg: number, s: number, v: number): [number, number, number] {
+  const h = normalizeHueDeg(hDeg) / 60;
+  const sat = Math.max(0, Math.min(1, s));
+  const val = Math.max(0, Math.min(1, v));
+  const i = Math.floor(h) % 6;
+  const f = h - Math.floor(h);
+  const p = val * (1 - sat);
+  const q = val * (1 - f * sat);
+  const t = val * (1 - (1 - f) * sat);
+  switch (i) {
+    case 0:
+      return [val, t, p];
+    case 1:
+      return [q, val, p];
+    case 2:
+      return [p, val, t];
+    case 3:
+      return [p, q, val];
+    case 4:
+      return [t, p, val];
+    default:
+      return [val, p, q];
+  }
+}
+
+export function hexToHsv(hex: string): [number, number, number] {
+  const [r, g, b] = hexToRgbNorm(hex);
+  return rgbToHsv(r, g, b);
+}
+
+export function hsvToHex(hDeg: number, s = 0.9, v = 0.96): string {
+  const [r, g, b] = hsvToRgb(hDeg, s, v);
+  return rgbToHexNorm(r, g, b);
+}
+
+export function hexToHueDeg(hex: string): number {
+  return Math.round(hexToHsv(hex)[0]);
+}
+
+export function shiftHexHue(hex: string, deg: number): string {
+  const shift = normalizeHueDeg(deg);
+  if (shift < 0.05 || shift > 359.95) return hex;
+  const [h, s, v] = hexToHsv(hex);
+  const [r, g, b] = hsvToRgb(h + shift, s, v);
+  return rgbToHexNorm(r, g, b);
 }
 
 function modeToInt(effect: Exclude<GeneratorEffectId, 'none'>): number {
@@ -472,7 +575,7 @@ function modeToInt(effect: Exclude<GeneratorEffectId, 'none'>): number {
 }
 
 class ProceduralShaderEngine {
-  private canvas: HTMLCanvasElement;
+  private canvas: HTMLCanvasElement | null = null;
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private vertexBuffer: WebGLBuffer | null = null;
@@ -484,6 +587,7 @@ class ProceduralShaderEngine {
   private customHelperCode: string = FALLBACK_CUSTOM_HELPER;
 
   constructor() {
+    if (typeof document === 'undefined') return;
     this.canvas = document.createElement('canvas');
     this.canvas.width = 640;
     this.canvas.height = 360;
@@ -552,7 +656,7 @@ class ProceduralShaderEngine {
   }
 
   private initGL(): boolean {
-    if (this.webglFailed || this.contextLost) return false;
+    if (this.webglFailed || this.contextLost || !this.canvas) return false;
     if (this.initialized) return Boolean(this.gl && this.program);
     this.initialized = true;
 
@@ -668,7 +772,7 @@ class ProceduralShaderEngine {
     opts: ProceduralRenderOptions
   ): void {
     const ok = this.initGL();
-    if (ok && this.gl && this.program && !this.gl.isContextLost()) {
+    if (ok && this.canvas && this.gl && this.program && !this.gl.isContextLost()) {
       const w = opts.width;
       const h = opts.height;
       if (this.canvas.width !== w || this.canvas.height !== h) {
@@ -682,6 +786,7 @@ class ProceduralShaderEngine {
 
       const accent = hexToRgbNorm(opts.accentHex);
       const secondary = hexToRgbNorm(opts.secondaryHex);
+      const hueRad = (normalizeHueDeg(opts.hueShiftDeg ?? 0) * Math.PI) / 180;
 
       gl.uniform1i(this.uniforms.uMode, modeToInt(opts.effect));
       gl.uniform2f(this.uniforms.uRes, w, h);
@@ -697,7 +802,7 @@ class ProceduralShaderEngine {
       gl.uniform1f(this.uniforms.uWarp, opts.warp ?? 0.35);
       gl.uniform1f(this.uniforms.uSymmetry, opts.symmetry ?? 1);
       gl.uniform1f(this.uniforms.uRotSpeed, opts.rotationSpeed ?? 0.15);
-      gl.uniform1f(this.uniforms.uHueShift, ((opts.hueShiftDeg ?? 0) * Math.PI) / 180);
+      gl.uniform1f(this.uniforms.uHueShift, hueRad);
       gl.uniform1f(this.uniforms.uGlow, opts.glow ?? 1.1);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -710,8 +815,21 @@ class ProceduralShaderEngine {
   }
 
   private renderFallback2D(ctx: CanvasRenderingContext2D, opts: ProceduralRenderOptions): void {
-    const { effect, width, height, time, metrics, accentHex, secondaryHex, speed, scale, beatReact } =
-      opts;
+    const {
+      effect,
+      width,
+      height,
+      time,
+      metrics,
+      accentHex: rawAccentHex,
+      secondaryHex: rawSecondaryHex,
+      hueShiftDeg = 0,
+      speed,
+      scale,
+      beatReact,
+    } = opts;
+    const accentHex = shiftHexHue(rawAccentHex, hueShiftDeg);
+    const secondaryHex = shiftHexHue(rawSecondaryHex, hueShiftDeg);
     const minDim = Math.min(width, height);
     const t = time * speed;
     const pulse = 1 + metrics.beatPulse * 0.24 * beatReact;

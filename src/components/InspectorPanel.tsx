@@ -52,6 +52,12 @@ import {
   STUDIO_MOOD_PRESETS,
 } from '../utils/presets';
 import {
+  hexToHueDeg,
+  hexToHsv,
+  hsvToHex,
+  normalizeHueDeg,
+} from '../utils/proceduralShaders';
+import {
   ExportCapabilityReport,
   probeExportCapabilities,
   resolveExportDimensions,
@@ -98,6 +104,7 @@ interface InspectorPanelProps {
   onStartStreamExport?: () => void;
   onStartBatchExport: () => void;
   onDownloadMetadataTxt: () => void;
+  onUseClipAudioAsMaster?: (clipId: string) => void;
   widthPx?: number;
 }
 
@@ -150,6 +157,7 @@ export function InspectorPanel({
   onStartStreamExport,
   onStartBatchExport,
   onDownloadMetadataTxt,
+  onUseClipAudioAsMaster,
   widthPx,
 }: InspectorPanelProps) {
   const t = tFor(lang);
@@ -159,7 +167,13 @@ export function InspectorPanel({
     config.customWidth,
     config.customHeight
   );
-  const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+  const rawClipsTotal = mediaItems.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+  const clipDuration = audio
+    ? Math.max(0.5, config.trimEnd - config.trimStart)
+    : mediaItems.length > 0
+      ? Math.max(0.5, rawClipsTotal)
+      : 12;
+  const canExport = Boolean(audio) || mediaItems.length > 0;
   const [capabilities, setCapabilities] = useState<ExportCapabilityReport | null>(null);
 
   useEffect(() => {
@@ -569,25 +583,44 @@ export function InspectorPanel({
                             className="w-full studio-slider"
                           />
                         </label>
-                        <label className="space-y-0.5 block">
-                          <div className="flex justify-between text-[10px]">
-                            <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
-                            <span className="font-mono text-gray-200">
-                              {clipGenParams.hueShift ?? config.generatorHueShift}°
+                        <div className="col-span-2 space-y-1 pt-0.5">
+                          <div className="flex items-center justify-between text-[10px]">
+                            <span className="text-gray-400 flex items-center gap-1.5">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-white/25 shrink-0"
+                                style={{
+                                  backgroundColor: `hsl(${Math.round(normalizeHueDeg(clipGenParams.hueShift ?? config.generatorHueShift))}, 92%, 56%)`,
+                                }}
+                              />
+                              <span>{t.generatorHueShiftLabel}</span>
                             </span>
+                            <div className="flex items-center gap-1.5">
+                              {Math.round(normalizeHueDeg(clipGenParams.hueShift ?? config.generatorHueShift)) !== 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateSelectedGenParams({ hueShift: 0 })}
+                                  className="px-1 py-0.2 rounded border border-[#262B38] text-[9px] font-mono text-gray-400 hover:text-amber-300 cursor-pointer"
+                                >
+                                  {t.hueResetBtn}
+                                </button>
+                              )}
+                              <span className="font-mono tabular-nums text-gray-200">
+                                {Math.round(normalizeHueDeg(clipGenParams.hueShift ?? config.generatorHueShift))}°
+                              </span>
+                            </div>
                           </div>
                           <input
                             type="range"
-                            min={-180}
-                            max={180}
-                            step={5}
-                            value={clipGenParams.hueShift ?? config.generatorHueShift}
+                            min={0}
+                            max={360}
+                            step={1}
+                            value={Math.round(normalizeHueDeg(clipGenParams.hueShift ?? config.generatorHueShift))}
                             onChange={(e) =>
                               updateSelectedGenParams({ hueShift: Number(e.target.value) })
                             }
-                            className="w-full studio-slider"
+                            className="w-full studio-hue-slider"
                           />
-                        </label>
+                        </div>
                         <label className="space-y-0.5 block">
                           <div className="flex justify-between text-[10px]">
                             <span className="text-gray-400">{t.generatorGlowLabel}</span>
@@ -726,6 +759,16 @@ export function InspectorPanel({
                             />
                           </div>
                         </div>
+                      )}
+
+                      {selectedClip.decodedAudioBuffer && onUseClipAudioAsMaster && (
+                        <button
+                          type="button"
+                          onClick={() => onUseClipAudioAsMaster(selectedClip.id)}
+                          className="w-full py-1.5 px-2.5 rounded border border-amber-500/45 bg-amber-500/10 hover:bg-amber-500/20 text-[11px] font-medium text-amber-300 cursor-pointer transition-colors"
+                        >
+                          {t.useClipAudioAsMasterBtn}
+                        </button>
                       )}
                     </div>
                   </div>
@@ -977,7 +1020,7 @@ export function InspectorPanel({
                         />
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-2">
                         <label className="space-y-0.5 block">
                           <div className="flex justify-between text-[10px]">
                             <span className="text-gray-400">{t.generatorSpeedLabel}</span>
@@ -995,23 +1038,42 @@ export function InspectorPanel({
                             className="w-full studio-slider"
                           />
                         </label>
-                        <label className="space-y-0.5 block">
-                          <div className="flex justify-between text-[10px]">
-                            <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
-                            <span className="font-mono text-gray-200">
-                              {selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift}°
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[10px]">
+                            <span className="text-gray-400 flex items-center gap-1.5">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-white/25 shrink-0"
+                                style={{
+                                  backgroundColor: `hsl(${Math.round(normalizeHueDeg(selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift))}, 92%, 56%)`,
+                                }}
+                              />
+                              <span>{t.generatorHueShiftLabel}</span>
                             </span>
+                            <div className="flex items-center gap-1.5">
+                              {Math.round(normalizeHueDeg(selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift)) !== 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateClipOverlayParams({ hueShift: 0 })}
+                                  className="px-1 rounded border border-[#262B38] text-[9px] font-mono text-gray-400 hover:text-cyan-200 cursor-pointer"
+                                >
+                                  {t.hueResetBtn}
+                                </button>
+                              )}
+                              <span className="font-mono tabular-nums text-gray-200">
+                                {Math.round(normalizeHueDeg(selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift))}°
+                              </span>
+                            </div>
                           </div>
                           <input
                             type="range"
-                            min={-180}
-                            max={180}
-                            step={5}
-                            value={selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift}
+                            min={0}
+                            max={360}
+                            step={1}
+                            value={Math.round(normalizeHueDeg(selectedClip.overlayEffect.params?.hueShift ?? config.generatorHueShift))}
                             onChange={(e) => updateClipOverlayParams({ hueShift: Number(e.target.value) })}
-                            className="w-full studio-slider"
+                            className="w-full studio-hue-slider"
                           />
-                        </label>
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-1.5 pt-0.5">
@@ -1139,30 +1201,71 @@ export function InspectorPanel({
                 </label>
 
                 {config.showVisualizer !== false && (
-                  <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#262B38]">
-                    <span className="text-[11px] text-gray-300">{t.visualizerColorLabel}</span>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => onUpdateConfig({ visualizerColor: 'auto' })}
-                        className={`px-2 py-0.5 rounded border text-[10px] font-medium cursor-pointer ${
-                          config.visualizerColor === 'auto' || !config.visualizerColor
-                            ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
-                            : 'border-[#262B38] bg-[#0B0D11] text-gray-400 hover:text-gray-200'
-                        }`}
-                      >
-                        {t.visualizerColorAuto}
-                      </button>
+                  <div className="space-y-2 pt-1.5 border-t border-[#262B38]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-gray-300">{t.visualizerColorLabel}</span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onUpdateConfig({ visualizerColor: 'auto' })}
+                          className={`px-2 py-0.5 rounded border text-[10px] font-medium cursor-pointer ${
+                            config.visualizerColor === 'auto' || !config.visualizerColor
+                              ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                              : 'border-[#262B38] bg-[#0B0D11] text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          {t.visualizerColorAuto}
+                        </button>
+                        <input
+                          type="color"
+                          aria-label={t.visualizerColorLabel}
+                          value={
+                            config.visualizerColor && config.visualizerColor !== 'auto'
+                              ? config.visualizerColor
+                              : '#F59E0B'
+                          }
+                          onChange={(e) => onUpdateConfig({ visualizerColor: e.target.value })}
+                          className="w-6 h-5 bg-transparent border-0 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] text-gray-400">
+                        <span>{t.visualizerHueLabel}</span>
+                        <span className="font-mono tabular-nums text-gray-300">
+                          {hexToHueDeg(
+                            config.visualizerColor && config.visualizerColor !== 'auto'
+                              ? config.visualizerColor
+                              : '#F59E0B'
+                          )}°
+                        </span>
+                      </div>
                       <input
-                        type="color"
-                        aria-label={t.visualizerColorLabel}
-                        value={
+                        type="range"
+                        min={0}
+                        max={360}
+                        step={1}
+                        aria-label={t.visualizerHueLabel}
+                        value={hexToHueDeg(
                           config.visualizerColor && config.visualizerColor !== 'auto'
                             ? config.visualizerColor
                             : '#F59E0B'
-                        }
-                        onChange={(e) => onUpdateConfig({ visualizerColor: e.target.value })}
-                        className="w-6 h-5 bg-transparent border-0 cursor-pointer"
+                        )}
+                        onChange={(e) => {
+                          const baseHex =
+                            config.visualizerColor && config.visualizerColor !== 'auto'
+                              ? config.visualizerColor
+                              : '#F59E0B';
+                          const [, s, v] = hexToHsv(baseHex);
+                          onUpdateConfig({
+                            visualizerColor: hsvToHex(
+                              Number(e.target.value),
+                              Math.max(0.75, s),
+                              Math.max(0.85, v)
+                            ),
+                          });
+                        }}
+                        className="w-full studio-hue-slider"
                       />
                     </div>
                   </div>
@@ -1665,23 +1768,42 @@ export function InspectorPanel({
                       className="w-full studio-slider"
                     />
                   </label>
-                  <label className="space-y-0.5 block">
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-gray-400">{t.generatorHueShiftLabel}</span>
-                      <span className="font-mono text-gray-200">
-                        {selectedFx.params?.hueShift ?? config.generatorHueShift}°
+                  <div className="col-span-2 space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-gray-400 flex items-center gap-1.5">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full border border-white/25 shrink-0"
+                          style={{
+                            backgroundColor: `hsl(${Math.round(normalizeHueDeg(selectedFx.params?.hueShift ?? config.generatorHueShift))}, 92%, 56%)`,
+                          }}
+                        />
+                        <span>{t.generatorHueShiftLabel}</span>
                       </span>
+                      <div className="flex items-center gap-1.5">
+                        {Math.round(normalizeHueDeg(selectedFx.params?.hueShift ?? config.generatorHueShift)) !== 0 && (
+                          <button
+                            type="button"
+                            onClick={() => updateSelectedFxParams({ hueShift: 0 })}
+                            className="px-1 rounded border border-[#262B38] text-[9px] font-mono text-gray-400 hover:text-cyan-200 cursor-pointer"
+                          >
+                            {t.hueResetBtn}
+                          </button>
+                        )}
+                        <span className="font-mono tabular-nums text-gray-200">
+                          {Math.round(normalizeHueDeg(selectedFx.params?.hueShift ?? config.generatorHueShift))}°
+                        </span>
+                      </div>
                     </div>
                     <input
                       type="range"
-                      min={-180}
-                      max={180}
-                      step={5}
-                      value={selectedFx.params?.hueShift ?? config.generatorHueShift}
+                      min={0}
+                      max={360}
+                      step={1}
+                      value={Math.round(normalizeHueDeg(selectedFx.params?.hueShift ?? config.generatorHueShift))}
                       onChange={(e) => updateSelectedFxParams({ hueShift: Number(e.target.value) })}
-                      className="w-full studio-slider"
+                      className="w-full studio-hue-slider"
                     />
-                  </label>
+                  </div>
                 </div>
 
                 {selectedClip && (
@@ -1970,22 +2092,40 @@ export function InspectorPanel({
                   />
                 </div>
 
-                <div className="space-y-1">
-                  <div className="flex justify-between text-xs">
-                    <span className="text-gray-300">{t.generatorHueShiftLabel}</span>
-                    <span className="font-mono tabular-nums text-gray-200">
-                      {config.generatorHueShift > 0 ? '+' : ''}
-                      {config.generatorHueShift}°
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-300 flex items-center gap-1.5">
+                      <span
+                        className="w-3 h-3 rounded-full border border-white/25 shrink-0"
+                        style={{
+                          backgroundColor: `hsl(${Math.round(normalizeHueDeg(config.generatorHueShift))}, 92%, 56%)`,
+                        }}
+                      />
+                      <span>{t.generatorHueShiftLabel}</span>
                     </span>
+                    <div className="flex items-center gap-1.5">
+                      {Math.round(normalizeHueDeg(config.generatorHueShift)) !== 0 && (
+                        <button
+                          type="button"
+                          onClick={() => onUpdateConfig({ generatorHueShift: 0 })}
+                          className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#141821] hover:border-amber-500/60 text-[10px] font-mono text-gray-300 hover:text-amber-300 cursor-pointer"
+                        >
+                          {t.hueResetBtn}
+                        </button>
+                      )}
+                      <span className="font-mono tabular-nums text-gray-200">
+                        {Math.round(normalizeHueDeg(config.generatorHueShift))}°
+                      </span>
+                    </div>
                   </div>
                   <input
                     type="range"
-                    min={-180}
-                    max={180}
-                    step={5}
-                    value={config.generatorHueShift}
+                    min={0}
+                    max={360}
+                    step={1}
+                    value={Math.round(normalizeHueDeg(config.generatorHueShift))}
                     onChange={(e) => onUpdateConfig({ generatorHueShift: Number(e.target.value) })}
-                    className="w-full studio-slider"
+                    className="w-full studio-hue-slider"
                   />
                 </div>
 
@@ -2357,6 +2497,35 @@ export function InspectorPanel({
                   />
                 </label>
               </div>
+
+              <div className="space-y-1 pt-1">
+                <div className="flex justify-between text-[11px]">
+                  <span className="text-gray-400">{t.accentHueLabel}</span>
+                  <span className="font-mono tabular-nums text-gray-200">
+                    {hexToHueDeg(config.customAccentColor)}° · {config.customAccentColor.toUpperCase()}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={360}
+                  step={1}
+                  aria-label={t.accentHueLabel}
+                  value={hexToHueDeg(config.customAccentColor)}
+                  onChange={(e) => {
+                    const [, s, v] = hexToHsv(config.customAccentColor);
+                    onUpdateConfig({
+                      colorSchemeId: 'custom',
+                      customAccentColor: hsvToHex(
+                        Number(e.target.value),
+                        Math.max(0.75, s),
+                        Math.max(0.85, v)
+                      ),
+                    });
+                  }}
+                  className="w-full studio-hue-slider"
+                />
+              </div>
             </div>
           </>
         )}
@@ -2537,13 +2706,17 @@ export function InspectorPanel({
               </div>
             )}
 
-            {!audio && <p className="text-xs text-amber-400/90">{t.needAudioAlert}</p>}
+            {!canExport ? (
+              <p className="text-xs text-amber-400/90">{t.needAudioAlert}</p>
+            ) : !audio ? (
+              <p className="text-xs text-cyan-300/90">{t.clipNoAudioNote}</p>
+            ) : null}
 
             <div className="space-y-2 pt-1">
               <button
                 type="button"
                 onClick={onStartExport}
-                disabled={!audio}
+                disabled={!canExport}
                 className="w-full py-2.5 px-4 rounded-md bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-zinc-950 transition-colors flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
@@ -2554,7 +2727,7 @@ export function InspectorPanel({
                 <button
                   type="button"
                   onClick={onStartStreamExport}
-                  disabled={!audio}
+                  disabled={!canExport}
                   className="w-full py-2 px-4 rounded-md border border-emerald-500/50 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-emerald-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <HardDriveDownload className="w-3.5 h-3.5" aria-hidden="true" />
@@ -2565,7 +2738,7 @@ export function InspectorPanel({
               <button
                 type="button"
                 onClick={onStartBatchExport}
-                disabled={!audio}
+                disabled={!canExport}
                 className="w-full py-2 px-4 rounded-md border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-amber-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Layers className="w-3.5 h-3.5" aria-hidden="true" />
@@ -2575,7 +2748,7 @@ export function InspectorPanel({
               <button
                 type="button"
                 onClick={onDownloadMetadataTxt}
-                disabled={!audio}
+                disabled={!canExport}
                 className="w-full py-2 px-4 rounded-md border border-[#262B38] bg-[#141821] hover:border-gray-500 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-medium text-gray-200 transition-colors flex items-center justify-center gap-2 cursor-pointer"
               >
                 <FileText className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
