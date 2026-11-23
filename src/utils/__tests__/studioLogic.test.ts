@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MediaBinItem, StudioConfig, VisualMediaState } from '../../types/studio';
 import {
+  AUTO_CLIP_PRESETS,
   clampManualClipMove,
   computeAutoBeatAlignedClips,
   computeClipTimelineSegments,
@@ -651,6 +652,91 @@ test('generateAutoClipPlan supports auto_rhythm energy phrasing, sequential slic
   assert.equal(seqPlan.filter((p) => p.binItemId === 'img-still-1').length, 1);
 });
 
+test('AUTO_CLIP_PRESETS, append startOffsetSec, transition/motion styles, and duration caps behave accurately', () => {
+  assert.equal(AUTO_CLIP_PRESETS.length, 6);
+  const binItems: MediaBinItem[] = [
+    {
+      id: 'v1',
+      kind: 'video',
+      fileName: 'clip1.mp4',
+      url: 'blob:v1',
+      width: 1920,
+      height: 1080,
+      videoDuration: 30,
+      defaultDurationSec: 30,
+    },
+    {
+      id: 'v2',
+      kind: 'video',
+      fileName: 'clip2.mp4',
+      url: 'blob:v2',
+      width: 1920,
+      height: 1080,
+      videoDuration: 30,
+      defaultDurationSec: 30,
+    },
+    {
+      id: 'i1',
+      kind: 'image',
+      fileName: 'still.jpg',
+      url: 'blob:i1',
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4,
+    },
+  ];
+  const beats = Array.from({ length: 120 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats };
+
+  // 1. All presets generate valid non-overlapping plans
+  for (const preset of AUTO_CLIP_PRESETS) {
+    const plan = generateAutoClipPlan(binItems, beatGrid, [], 0, 24, {
+      ...preset.config,
+      hasAudio: true,
+    });
+    assert.ok(plan.length >= 2, `Preset ${preset.id} produced too few clips`);
+    for (let i = 1; i < plan.length; i++) {
+      assert.ok(plan[i].startSec >= plan[i - 1].startSec + plan[i - 1].durationSec - 0.02);
+    }
+    if (preset.config.transitionStyle === 'dissolve') {
+      assert.ok(plan.every((p) => p.transitionOut === 'crossfade'));
+    }
+    if (preset.config.transitionStyle === 'cuts_only') {
+      assert.ok(plan.every((p) => p.transitionOut === 'cut'));
+    }
+    if (preset.config.motionLevel === 'off') {
+      assert.ok(plan.every((p) => p.scaleStart === 1.0 && p.scaleEnd === 1.0));
+    }
+  }
+
+  // 2. Append mode (startOffsetSec = 10, targetDurationSec = 8) places clips cleanly after 10s
+  //    and excludes already-used image & video ranges
+  const usedImgs = new Set<string>(['blob:i1']);
+  const usedVidRanges = new Map<string, Array<[number, number]>>([['blob:v1', [[0, 12]]]]);
+  const appended = generateAutoClipPlan(binItems, beatGrid, [], 0, 50, {
+    mode: 'random',
+    rhythm: 'beats_4',
+    startOffsetSec: 10,
+    targetDurationSec: 8,
+    minClipSec: 1.5,
+    maxClipSec: 3.0,
+    excludeUsedUrls: usedImgs,
+    excludeVideoRangesByUrl: usedVidRanges,
+    hasAudio: true,
+  });
+  assert.ok(appended.length >= 2);
+  assert.ok(appended[0].startSec >= 10);
+  const lastEnd = appended[appended.length - 1].startSec + appended[appended.length - 1].durationSec;
+  assert.ok(lastEnd <= 18.05, `Expected appended end <= 18s, got ${lastEnd}`);
+  assert.equal(appended.some((p) => p.binItemId === 'i1'), false);
+  for (const p of appended) {
+    assert.ok(p.durationSec >= 1.4 && p.durationSec <= 3.1);
+    if (p.binItemId === 'v1') {
+      assert.ok(p.sourceStartSec >= 11.98, `Expected v1 slice to avoid [0..12], got ${p.sourceStartSec}`);
+    }
+  }
+});
+
 test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
   assert.ok(STUDIO_CINEMA_PRESETS.length >= 5);
   for (const preset of STUDIO_CINEMA_PRESETS) {
@@ -660,6 +746,7 @@ test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
     assert.ok(preset.patch.mediaFilter !== undefined);
   }
 });
+
 
 
 

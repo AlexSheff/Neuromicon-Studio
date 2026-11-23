@@ -112,6 +112,7 @@ interface TimelineDockProps {
   onSetTrimStart: (sec: number) => void;
   onSetTrimEnd: (sec: number) => void;
   onChangeSlideshowMode?: (mode: SlideshowMode) => void;
+  autoZoomSignal?: { nonce: number; targetZoom: number; focusStartSec?: number } | null;
 }
 
 type GenAddTarget = 'fx_track' | 'clip_overlay' | 'clip_scene';
@@ -301,6 +302,7 @@ export function TimelineDock({
   onSetTrimStart,
   onSetTrimEnd,
   onChangeSlideshowMode,
+  autoZoomSignal,
 }: TimelineDockProps) {
   const t = tFor(lang);
 
@@ -580,15 +582,17 @@ export function TimelineDock({
   const rulerTicks = useMemo(() => {
     const visibleSec = clipDuration / timelineZoom;
     const step =
-      visibleSec <= 6
-        ? 0.5
-        : visibleSec <= 15
-          ? 1
-          : visibleSec <= 35
-            ? 2
-            : visibleSec <= 80
-              ? 5
-              : 10;
+      visibleSec <= 3
+        ? 0.25
+        : visibleSec <= 6
+          ? 0.5
+          : visibleSec <= 15
+            ? 1
+            : visibleSec <= 35
+              ? 2
+              : visibleSec <= 80
+                ? 5
+                : 10;
     const ticks: number[] = [];
     for (let s = 0; s <= clipDuration + 0.001; s += step) {
       ticks.push(Number(s.toFixed(2)));
@@ -674,7 +678,7 @@ export function TimelineDock({
   // Anchored zoom: preserve timeline second at anchor screen X when zoom changes
   const applyAnchoredZoom = useCallback(
     (rawNextZoom: number, viewportClientX?: number) => {
-      const nextZoom = Math.max(1, Math.min(8, Number(rawNextZoom.toFixed(1))));
+      const nextZoom = Math.max(1, Math.min(16, Number(rawNextZoom.toFixed(1))));
       const scrollEl = seqScrollRef.current;
       if (!scrollEl) {
         setTimelineZoom(nextZoom);
@@ -704,6 +708,21 @@ export function TimelineDock({
     },
     [playheadPct]
   );
+
+  // Auto-zoom cleanly when auto-clip generates dense or appended segments so clips stay readable
+  useEffect(() => {
+    if (!autoZoomSignal) return;
+    const nextZoom = Math.max(1, Math.min(16, Number(autoZoomSignal.targetZoom.toFixed(1))));
+    setTimelineZoom(nextZoom);
+    const focusSec = autoZoomSignal.focusStartSec ?? 0;
+    requestAnimationFrame(() => {
+      const el = seqScrollRef.current;
+      if (!el) return;
+      const contentW = el.clientWidth * nextZoom;
+      const targetX = clipDuration > 0 ? (focusSec / clipDuration) * contentW : 0;
+      el.scrollLeft = Math.max(0, Math.min(contentW - el.clientWidth, targetX - el.clientWidth * 0.15));
+    });
+  }, [autoZoomSignal, clipDuration]);
 
   // Auto-follow playhead when zoomed in
   useEffect(() => {
@@ -1304,7 +1323,7 @@ export function TimelineDock({
               <input
                 type="range"
                 min={1}
-                max={8}
+                max={16}
                 step={0.5}
                 value={timelineZoom}
                 onChange={(e) => applyAnchoredZoom(Number(e.target.value))}
@@ -1314,14 +1333,14 @@ export function TimelineDock({
               <button
                 type="button"
                 onClick={() => applyAnchoredZoom(timelineZoom + 0.5)}
-                disabled={timelineZoom >= 8}
+                disabled={timelineZoom >= 16}
                 title={t.timelineZoomIn}
                 aria-label={t.timelineZoomIn}
                 className="p-0.5 rounded border border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500 disabled:opacity-35 cursor-pointer"
               >
                 <ZoomIn className="w-3 h-3" />
               </button>
-              <span className="text-[10px] font-mono tabular-nums text-gray-300 w-6 text-right">
+              <span className="text-[10px] font-mono tabular-nums text-gray-300 w-7 text-right">
                 {timelineZoom}×
               </span>
               {timelineZoom > 1 && (
@@ -1887,10 +1906,11 @@ export function TimelineDock({
                                   }}
                                   style={{
                                     left: `${leftPct}%`,
-                                    width: `${Math.max(1.2, widthPct)}%`,
+                                    width: `${widthPct}%`,
+                                    minWidth: '3px',
                                   }}
                                   title={`${clip.fileName} · ${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s (${segDur.toFixed(1)}s)`}
-                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-2.5 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
+                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-1.5 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
                                     isManualMode
                                       ? 'cursor-grab active:cursor-grabbing'
                                       : 'cursor-pointer'

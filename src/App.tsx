@@ -28,8 +28,7 @@ import {
 } from './types/studio';
 import {
   analyzeAudioAtTime,
-  AutoClipMode,
-  AutoClipRhythm,
+  AutoClipGenerateConfig,
   buildMonoAudioData,
   clampManualClipMove,
   computeAutoBeatAlignedClips,
@@ -235,6 +234,11 @@ export default function App() {
   const [historyFlags, setHistoryFlags] = useState({ canUndo: false, canRedo: false });
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
   const [undoToast, setUndoToast] = useState<string | null>(null);
+  const [autoTimelineZoomSignal, setAutoTimelineZoomSignal] = useState<{
+    nonce: number;
+    targetZoom: number;
+    focusStartSec?: number;
+  } | null>(null);
 
   const [leftOpen, setLeftOpen] = useState(() =>
     readStoredPanelBool('neuromicon_left_panel_open_v1', true)
@@ -263,6 +267,8 @@ export default function App() {
   const startPlaybackAtRef = useRef<(sec: number) => void>(() => {});
   const exportAbortRef = useRef<AbortController | null>(null);
   const reducedMotionRef = useRef(false);
+  const pendingVideoSeekRef = useRef<WeakMap<HTMLVideoElement, number>>(new WeakMap());
+  const pendingSeekHookedRef = useRef<WeakSet<HTMLVideoElement>>(new WeakSet());
 
   const configRef = useRef<StudioConfig>(config);
   const mediaBinRef = useRef<MediaBinItem[]>(mediaBin);
@@ -715,12 +721,42 @@ export default function App() {
           v.playbackRate = rate;
         }
 
+        const applySafeSeek = (sec: number) => {
+          if (v.readyState >= 1) {
+            if (!v.seeking) v.currentTime = sec;
+          } else {
+            pendingVideoSeekRef.current.set(v, sec);
+            if (!pendingSeekHookedRef.current.has(v)) {
+              pendingSeekHookedRef.current.add(v);
+              v.addEventListener(
+                'loadedmetadata',
+                () => {
+                  const pending = pendingVideoSeekRef.current.get(v);
+                  if (pending !== undefined) {
+                    pendingVideoSeekRef.current.delete(v);
+                    const safeDur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : vDur;
+                    const clamped = Math.min(Math.max(0, safeDur - 0.04), Math.max(0, pending));
+                    try {
+                      v.currentTime = clamped;
+                    } catch {
+                      // ignore seek error on unready source
+                    }
+                  }
+                },
+                { once: true }
+              );
+            }
+          }
+        };
+
         if (activeIds.has(item.id)) {
           if (shouldPlay) {
             v.muted = !isActive || item.clipAudioMuted || item.clipAudioVolume <= 0.01;
             v.volume = Math.max(0, Math.min(1, item.clipAudioVolume));
             if (v.paused) {
-              if (Math.abs(v.currentTime - targetSec) > 0.06 && !v.seeking) {
+              if (v.readyState < 1) {
+                applySafeSeek(targetSec);
+              } else if (Math.abs(v.currentTime - targetSec) > 0.06 && !v.seeking) {
                 v.currentTime = targetSec;
               }
               v.play().catch(() => {});
@@ -729,21 +765,21 @@ export default function App() {
               const modDiff = Math.min(rawDiff, Math.max(0, vDur - rawDiff));
               // Only seek on large drift so playback never stutters or flashes seeking frames right after cuts
               if (modDiff > 0.75 && !v.seeking) {
-                v.currentTime = targetSec;
+                applySafeSeek(targetSec);
               }
             }
           } else {
             v.muted = true;
             if (!v.paused) v.pause();
-            if (!v.seeking && Math.abs(v.currentTime - targetSec) > 0.04) {
-              v.currentTime = targetSec;
+            if (v.readyState < 1 || (!v.seeking && Math.abs(v.currentTime - targetSec) > 0.04)) {
+              applySafeSeek(targetSec);
             }
           }
         } else if (item.id === prewarmClipId) {
           v.muted = true;
           if (!v.paused) v.pause();
-          if (!v.seeking && v.readyState >= 1 && Math.abs(v.currentTime - prewarmTargetSec) > 0.08) {
-            v.currentTime = prewarmTargetSec;
+          if (v.readyState < 1 || (!v.seeking && Math.abs(v.currentTime - prewarmTargetSec) > 0.08)) {
+            applySafeSeek(prewarmTargetSec);
           }
         } else {
           v.muted = true;
@@ -1926,23 +1962,72 @@ export default function App() {
   );
 
   const handleCreateRandomBeatAutoClip = useCallback(
-    (rhythm: AutoClipRhythm = 'auto', mode: AutoClipMode = 'auto_rhythm') => {
+    (autoCfg: AutoClipGenerateConfig) => {
       const binList = mediaBinRef.current;
       if (binList.length === 0) return;
       stopPlayback();
 
       const cfg = configRef.current;
       const aud = audioRef.current;
-      const bounds = getEffectiveTimelineBounds(cfg, mediaItemsRef.current, aud);
+      const prevItems = mediaItemsRef.current;
+      const bounds = getEffectiveTimelineBounds(cfg, prevItems, aud);
+
+      const isAppend = autoCfg.targetMode === 'append' && prevItems.length > 0;
+      let startOffsetSec = 0;
+      const normalizedPrev =
+        isAppend && cfg.slideshowMode !== 'manual'
+          ? snapshotSegmentDurations(prevItems, bounds.clipDuration, cfg, beatCutTimestamps)
+          : isAppend
+            ? (() => {
+                const ivs = getNormalizedManualClipIntervals(prevItems);
+                const startById = new Map(ivs.map((iv) => [iv.id, iv.startSec]));
+                return prevItems.map((c) => ({
+                  ...c,
+                  startSec: Number((startById.get(c.id) ?? 0).toFixed(2)),
+                }));
+              })()
+            : prevItems;
+
+      const excludeUsedUrls = new Set<string>();
+      const excludeVideoRangesByUrl = new Map<string, Array<[number, number]>>();
+
+      if (isAppend) {
+        const prevIntervals = getNormalizedManualClipIntervals(normalizedPrev);
+        startOffsetSec =
+          prevIntervals.length > 0 ? prevIntervals[prevIntervals.length - 1].endSec : 0;
+        for (const c of normalizedPrev) {
+          if (!c.url) continue;
+          if (c.kind === 'image') {
+            excludeUsedUrls.add(c.url);
+          } else if (c.kind === 'video') {
+            const list = excludeVideoRangesByUrl.get(c.url) || [];
+            const srcStart = Math.max(0, c.sourceStartSec || 0);
+            const srcEnd = srcStart + Math.max(0.4, c.durationSec) * Math.max(0.25, c.playbackRate || 1);
+            list.push([Number(srcStart.toFixed(2)), Number(srcEnd.toFixed(2))]);
+            excludeVideoRangesByUrl.set(c.url, list);
+          }
+        }
+      }
+
+      const maxLimit = aud ? Math.max(bounds.clipDuration, startOffsetSec + 0.5) : 3600;
       const placements = generateAutoClipPlan(
         binList,
         trackBeatGrid,
         cfg.manualBeatMarkers,
         bounds.trimBase,
-        aud ? bounds.clipDuration : 3600,
+        maxLimit,
         {
-          mode,
-          rhythm,
+          mode: autoCfg.mode,
+          rhythm: autoCfg.rhythm,
+          transitionStyle: autoCfg.transitionStyle,
+          motionLevel: autoCfg.motionLevel,
+          minClipSec: autoCfg.minClipSec,
+          maxClipSec: autoCfg.maxClipSec,
+          targetDurationSec: autoCfg.targetDurationSec,
+          startOffsetSec,
+          avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
+          excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
+          excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
           hasAudio: Boolean(aud),
           monoData: monoDataRef.current,
           sampleRate: aud?.sampleRate,
@@ -1951,10 +2036,12 @@ export default function App() {
       if (placements.length === 0) return;
 
       pushImmediateHistory();
-      for (const prevClip of mediaItemsRef.current) {
-        if (prevClip.kind === 'video' && prevClip.videoElement) {
-          prevClip.videoElement.pause();
-          prevClip.videoElement.preload = 'metadata';
+      if (!isAppend) {
+        for (const prevClip of prevItems) {
+          if (prevClip.kind === 'video' && prevClip.videoElement) {
+            prevClip.videoElement.pause();
+            prevClip.videoElement.preload = 'metadata';
+          }
         }
       }
 
@@ -1983,21 +2070,53 @@ export default function App() {
       }
 
       if (builtClips.length === 0) return;
-      setMediaItems(builtClips);
+      const nextItems = isAppend ? [...normalizedPrev, ...builtClips] : builtClips;
+      setMediaItems(nextItems);
       setSelectedClipId(builtClips[0].id);
       setSelectedFxId(null);
       if (cfg.slideshowMode !== 'manual') {
         setConfig((prev) => ({ ...prev, slideshowMode: 'manual' }));
       }
-      const startAbs = aud ? bounds.trimBase : 0;
-      currentTimeRef.current = startAbs;
-      setCurrentTime(startAbs);
-      // Pre-warm only the first slice right away without locking decoders
+      const focusLocal = isAppend ? startOffsetSec : 0;
+      const focusAbs = (aud ? bounds.trimBase : 0) + focusLocal;
+      currentTimeRef.current = focusAbs;
+      setCurrentTime(focusAbs);
+
+      // Pre-warm only the first slice of the new auto-clip block
       if (builtClips[0].kind === 'video' && builtClips[0].videoElement) {
         builtClips[0].videoElement.preload = 'auto';
       }
+
+      // Auto-adjust timeline zoom cleanly so newly created dense clips never look squished into slivers
+      const lastClip = nextItems[nextItems.length - 1];
+      const totalSpan = Math.max(
+        1,
+        aud ? bounds.clipDuration : (lastClip.startSec ?? 0) + (lastClip.durationSec || 4)
+      );
+      const workspaceSpan = aud
+        ? totalSpan
+        : Math.max(24, Math.ceil((totalSpan + Math.max(12, totalSpan * 0.35)) / 4) * 4);
+      const avgNewDur =
+        builtClips.reduce((acc, c) => acc + Math.max(0.4, c.durationSec || 2), 0) /
+        builtClips.length;
+      const desiredZoom = Math.max(
+        1,
+        Math.min(16, Number((((54 / 760) * workspaceSpan) / Math.max(0.5, avgNewDur)).toFixed(1)))
+      );
+      setAutoTimelineZoomSignal({
+        nonce: Date.now(),
+        targetZoom: desiredZoom,
+        focusStartSec: focusLocal,
+      });
     },
-    [buildClipFromBinItem, getEffectiveTimelineBounds, pushImmediateHistory, stopPlayback, trackBeatGrid]
+    [
+      beatCutTimestamps,
+      buildClipFromBinItem,
+      getEffectiveTimelineBounds,
+      pushImmediateHistory,
+      stopPlayback,
+      trackBeatGrid,
+    ]
   );
 
   const handleRemoveBinItem = useCallback(
@@ -2147,7 +2266,9 @@ export default function App() {
         cfg.snapToBeats
       );
       setMediaItems((prev) =>
-        prev.map((m) => (m.id === clipId ? { ...m, startSec: clampedStart } : m))
+        prev
+          .map((m) => (m.id === clipId ? { ...m, startSec: clampedStart } : m))
+          .sort((a, b) => (a.startSec ?? 0) - (b.startSec ?? 0))
       );
     },
     [getEffectiveTimelineBounds, queueDebouncedHistory, trackBeatGrid.beats]
@@ -2259,6 +2380,7 @@ export default function App() {
       const next = [...prev];
       if (configRef.current.slideshowMode === 'manual') {
         next.push(copyItem);
+        next.sort((a, b) => (a.startSec ?? 0) - (b.startSec ?? 0));
       } else {
         next.splice(idx + 1, 0, copyItem);
       }
@@ -4688,6 +4810,7 @@ export default function App() {
         onSetTrimStart={handleSetTrimStart}
         onSetTrimEnd={handleSetTrimEnd}
         onChangeSlideshowMode={(mode) => handleUpdateConfig({ slideshowMode: mode })}
+        autoZoomSignal={autoTimelineZoomSignal}
       />
 
       {exportState.phase !== 'idle' && (

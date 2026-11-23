@@ -1296,6 +1296,122 @@ export function resolveOverlayWindow(
 
 export type AutoClipMode = 'auto_rhythm' | 'sequential' | 'random';
 export type AutoClipRhythm = 'auto' | 'smooth' | 'beats_1' | 'beats_2' | 'beats_4' | 'mixed';
+export type AutoClipTransitionStyle = 'musical' | 'dissolve' | 'cuts_only' | 'punchy';
+export type AutoClipMotionLevel = 'off' | 'gentle' | 'dynamic';
+export type AutoClipTargetMode = 'replace' | 'append';
+export type AutoClipPresetId =
+  | 'music_story'
+  | 'cinema_flow'
+  | 'dynamic_drop'
+  | 'story_order'
+  | 'remix_shuffle'
+  | 'beat_flash';
+
+export interface AutoClipGenerateConfig {
+  presetId?: AutoClipPresetId;
+  mode: AutoClipMode;
+  rhythm: AutoClipRhythm;
+  transitionStyle: AutoClipTransitionStyle;
+  motionLevel: AutoClipMotionLevel;
+  targetMode: AutoClipTargetMode;
+  minClipSec: number;
+  maxClipSec: number;
+  targetDurationSec: number | null; // null = auto / full available span
+  avoidAdjacentRepeat: boolean;
+}
+
+export interface AutoClipPresetDef {
+  id: AutoClipPresetId;
+  config: Omit<AutoClipGenerateConfig, 'presetId' | 'targetMode' | 'targetDurationSec'>;
+}
+
+export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
+  {
+    id: 'music_story',
+    config: {
+      mode: 'auto_rhythm',
+      rhythm: 'auto',
+      transitionStyle: 'musical',
+      motionLevel: 'gentle',
+      minClipSec: 1.0,
+      maxClipSec: 5.5,
+      avoidAdjacentRepeat: true,
+    },
+  },
+  {
+    id: 'cinema_flow',
+    config: {
+      mode: 'auto_rhythm',
+      rhythm: 'smooth',
+      transitionStyle: 'dissolve',
+      motionLevel: 'gentle',
+      minClipSec: 2.2,
+      maxClipSec: 8.0,
+      avoidAdjacentRepeat: true,
+    },
+  },
+  {
+    id: 'dynamic_drop',
+    config: {
+      mode: 'auto_rhythm',
+      rhythm: 'beats_2',
+      transitionStyle: 'punchy',
+      motionLevel: 'dynamic',
+      minClipSec: 0.75,
+      maxClipSec: 3.4,
+      avoidAdjacentRepeat: true,
+    },
+  },
+  {
+    id: 'story_order',
+    config: {
+      mode: 'sequential',
+      rhythm: 'beats_4',
+      transitionStyle: 'dissolve',
+      motionLevel: 'gentle',
+      minClipSec: 1.6,
+      maxClipSec: 6.5,
+      avoidAdjacentRepeat: true,
+    },
+  },
+  {
+    id: 'remix_shuffle',
+    config: {
+      mode: 'random',
+      rhythm: 'auto',
+      transitionStyle: 'musical',
+      motionLevel: 'gentle',
+      minClipSec: 1.0,
+      maxClipSec: 4.5,
+      avoidAdjacentRepeat: true,
+    },
+  },
+  {
+    id: 'beat_flash',
+    config: {
+      mode: 'random',
+      rhythm: 'beats_1',
+      transitionStyle: 'cuts_only',
+      motionLevel: 'off',
+      minClipSec: 0.5,
+      maxClipSec: 2.2,
+      avoidAdjacentRepeat: true,
+    },
+  },
+];
+
+export const DEFAULT_AUTO_CLIP_CONFIG: AutoClipGenerateConfig = {
+  presetId: 'music_story',
+  mode: 'auto_rhythm',
+  rhythm: 'auto',
+  transitionStyle: 'musical',
+  motionLevel: 'gentle',
+  targetMode: 'replace',
+  minClipSec: 1.0,
+  maxClipSec: 5.5,
+  targetDurationSec: null,
+  avoidAdjacentRepeat: true,
+};
 
 export interface AutoBeatSlicePlacement {
   binItemId: string;
@@ -1387,6 +1503,27 @@ export function computePhraseEnergyCurve(
   });
 }
 
+function subtractUsedIntervals(
+  baseRange: [number, number],
+  used: Array<[number, number]>,
+  minLen: number
+): Array<[number, number]> {
+  let ranges: Array<[number, number]> = [baseRange];
+  for (const [us, ue] of used) {
+    const next: Array<[number, number]> = [];
+    for (const [rs, re] of ranges) {
+      if (ue <= rs + 0.02 || us >= re - 0.02) {
+        next.push([rs, re]);
+      } else {
+        if (us - rs >= minLen) next.push([rs, us]);
+        if (re - ue >= minLen) next.push([ue, re]);
+      }
+    }
+    ranges = next;
+  }
+  return ranges;
+}
+
 /**
  * Generates an editorial beat-aligned montage in one of 3 user-selectable modes:
  * - `auto_rhythm`: analyzes musical phrase energy so calm intros/bridges play as smooth
@@ -1396,8 +1533,9 @@ export function computePhraseEnergyCurve(
  * - `random`: non-repeating random selection across unused images and non-overlapping
  *   video intervals without back-to-back source repeats.
  *
- * Uses smooth unidirectional drift (zero zoom-bounce whiplash) and comfortable cut floors
- * so both playback decoders and viewing comfort remain silky smooth.
+ * Supports `startOffsetSec` for appending a 2nd auto-clip after existing clips without
+ * compressing prior timeline items, plus customizable transition style, motion level,
+ * min/max slice durations, and optional target span cap.
  */
 export function generateAutoClipPlan(
   binItems: MediaBinItem[],
@@ -1408,6 +1546,15 @@ export function generateAutoClipPlan(
   options: {
     mode?: AutoClipMode;
     rhythm?: AutoClipRhythm;
+    transitionStyle?: AutoClipTransitionStyle;
+    motionLevel?: AutoClipMotionLevel;
+    minClipSec?: number;
+    maxClipSec?: number;
+    targetDurationSec?: number | null;
+    startOffsetSec?: number;
+    avoidAdjacentRepeat?: boolean;
+    excludeUsedUrls?: Set<string>;
+    excludeVideoRangesByUrl?: Map<string, Array<[number, number]>>;
     hasAudio?: boolean;
     monoData?: Float32Array;
     sampleRate?: number;
@@ -1418,30 +1565,52 @@ export function generateAutoClipPlan(
   const mode: AutoClipMode = options.mode ?? 'auto_rhythm';
   const rawRhythm = options.rhythm ?? 'auto';
   const rhythm: Exclude<AutoClipRhythm, 'mixed'> = rawRhythm === 'mixed' ? 'auto' : rawRhythm;
+  const transitionStyle: AutoClipTransitionStyle = options.transitionStyle ?? 'musical';
+  const motionLevel: AutoClipMotionLevel = options.motionLevel ?? 'gentle';
+  const avoidAdjacentRepeat = options.avoidAdjacentRepeat ?? true;
   const hasAudio = options.hasAudio ?? true;
   const rng = options.rng ?? Math.random;
   const beatSec =
     beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
-  const targetLimit = hasAudio ? Math.max(0.5, maxTimelineSec) : Math.max(60, maxTimelineSec);
+  const startOffsetSec = Math.max(0, Number((options.startOffsetSec ?? 0).toFixed(2)));
+
+  const baseLimit = hasAudio ? Math.max(0.5, maxTimelineSec) : Math.max(60, maxTimelineSec);
+  const targetLimit =
+    options.targetDurationSec && options.targetDurationSec > 0.5
+      ? Math.min(baseLimit, startOffsetSec + options.targetDurationSec)
+      : baseLimit;
+  if (startOffsetSec >= targetLimit - 0.45) return [];
+
+  const minClipBound = Math.max(
+    0.45,
+    Math.min(12, options.minClipSec ?? (rhythm === 'beats_1' ? 0.5 : rhythm === 'smooth' ? 1.8 : 0.95))
+  );
+  const maxClipBound = Math.max(
+    minClipBound + 0.3,
+    Math.min(20, options.maxClipSec ?? (rhythm === 'beats_1' ? 2.5 : rhythm === 'smooth' ? 8.5 : 5.5))
+  );
 
   const manualRel = manualMarkersAbs
     .map((m) => Number((m - trimStart).toFixed(3)))
-    .filter((t) => t > 0.15 && t < targetLimit - 0.15)
+    .filter((t) => t > startOffsetSec + 0.15 && t < targetLimit - 0.15)
     .sort((a, b) => a - b);
 
   let baseBeats: number[];
   if (manualRel.length >= 2) {
-    baseBeats = [0, ...manualRel];
+    baseBeats = [startOffsetSec, ...manualRel];
   } else if (beatGrid.beats.length >= 2) {
-    baseBeats = [0, ...beatGrid.beats.filter((b) => b > 0.15 && b < targetLimit - 0.15)];
+    baseBeats = [
+      startOffsetSec,
+      ...beatGrid.beats.filter((b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15),
+    ];
   } else {
-    baseBeats = [0];
+    baseBeats = [startOffsetSec];
   }
   const beatTimes = Array.from(new Set(baseBeats.map((b) => Number(b.toFixed(3))))).sort(
     (a, b) => a - b
   );
-  if (beatTimes.length === 0 || beatTimes[0] > 0.05) {
-    beatTimes.unshift(0);
+  if (beatTimes.length === 0 || beatTimes[0] > startOffsetSec + 0.05) {
+    beatTimes.unshift(startOffsetSec);
   }
   let lastBeat = beatTimes[beatTimes.length - 1];
   while (lastBeat + beatSec < targetLimit + beatSec * 6 && beatTimes.length < 1500) {
@@ -1472,99 +1641,112 @@ export function generateAutoClipPlan(
   }
   type PoolAsset = PoolImage | PoolVideo;
 
-  // Enforce a comfortable minimum slice length (except explicit fast beats_1)
-  const comfortableFloorSec =
-    rhythm === 'beats_1'
-      ? Math.max(0.55, beatSec * 0.9)
-      : rhythm === 'smooth'
-        ? 1.6
-        : 0.95;
-  const minSliceMediaSec = Math.max(0.6, comfortableFloorSec * 0.9);
+  const minSliceMediaSec = Math.max(0.45, minClipBound * 0.9);
 
-  const pool: PoolAsset[] = [];
-  for (const b of binItems) {
-    if (b.kind === 'image') {
-      pool.push({ kind: 'image', binItem: b, used: false });
-    } else {
-      const vDur = Math.max(0.5, b.videoDuration || b.defaultDurationSec || 10);
-      const rate = Math.max(0.25, Math.min(4, b.defaultPlaybackRate ?? 1.0));
-      const initStart = Math.max(
-        0,
-        Math.min(Math.max(0, vDur - minSliceMediaSec), b.defaultSourceStartSec ?? 0)
-      );
-      if (vDur - initStart >= minSliceMediaSec) {
-        pool.push({
-          kind: 'video',
-          binItem: b,
-          rate,
-          seqCursor: Number(initStart.toFixed(2)),
-          maxEnd: Number(vDur.toFixed(2)),
-          freeRanges: [[Number(initStart.toFixed(2)), Number(vDur.toFixed(2))]],
-        });
+  const buildPool = (respectExclusions: boolean): PoolAsset[] => {
+    const out: PoolAsset[] = [];
+    for (const b of binItems) {
+      if (b.kind === 'image') {
+        const alreadyUsed = respectExclusions && Boolean(options.excludeUsedUrls?.has(b.url));
+        if (!alreadyUsed) {
+          out.push({ kind: 'image', binItem: b, used: false });
+        }
+      } else {
+        const vDur = Math.max(0.5, b.videoDuration || b.defaultDurationSec || 10);
+        const rate = Math.max(0.25, Math.min(4, b.defaultPlaybackRate ?? 1.0));
+        const initStart = Math.max(
+          0,
+          Math.min(Math.max(0, vDur - minSliceMediaSec), b.defaultSourceStartSec ?? 0)
+        );
+        if (vDur - initStart >= minSliceMediaSec) {
+          const baseRange: [number, number] = [
+            Number(initStart.toFixed(2)),
+            Number(vDur.toFixed(2)),
+          ];
+          const usedForUrl = respectExclusions
+            ? options.excludeVideoRangesByUrl?.get(b.url) || []
+            : [];
+          const freeRanges =
+            usedForUrl.length > 0
+              ? subtractUsedIntervals(baseRange, usedForUrl, minSliceMediaSec)
+              : [baseRange];
+          if (freeRanges.length > 0) {
+            out.push({
+              kind: 'video',
+              binItem: b,
+              rate,
+              seqCursor: freeRanges[0][0],
+              maxEnd: freeRanges[freeRanges.length - 1][1],
+              freeRanges,
+            });
+          }
+        }
       }
     }
-  }
+    return out;
+  };
 
+  let pool = buildPool(true);
+  if (pool.length === 0 && (options.excludeUsedUrls || options.excludeVideoRangesByUrl)) {
+    // Fallback cleanly if appending after all source footage was already used once
+    pool = buildPool(false);
+  }
   if (pool.length === 0) return [];
 
   const canAssetFitDur = (entry: PoolAsset, dur: number): boolean => {
     if (entry.kind === 'image') return !entry.used;
     const mediaNeed = dur * entry.rate;
     if (mode === 'sequential') {
-      return entry.maxEnd - entry.seqCursor >= mediaNeed - 0.02;
+      return entry.freeRanges.some(([rs, re]) => re - Math.max(rs, entry.seqCursor) >= mediaNeed - 0.02);
     }
     return entry.freeRanges.some(([rs, re]) => re - rs >= mediaNeed - 0.02);
   };
 
   const getBeatStepsForIndex = (bIdx: number): { steps: number[]; energy: number } => {
     const energy = phraseEnergy[bIdx] ?? 0.5;
+    let rawSteps: number[];
     if (rhythm === 'beats_1') {
-      // Keep 1-beat punch usable without microscopic sub-0.5s micro-cuts at ultra-high BPM
-      return { steps: beatSec < 0.44 ? [2, 1] : [1, 2], energy };
-    }
-    if (rhythm === 'beats_2') {
-      return { steps: beatSec < 0.48 ? [3, 2, 4] : [2, 4, 1], energy };
-    }
-    if (rhythm === 'beats_4') {
-      return { steps: [4, 2, 1], energy };
-    }
-    if (rhythm === 'smooth') {
-      return { steps: energy > 0.72 ? [4, 6, 2] : [6, 8, 4, 2], energy };
-    }
-
-    // 'auto' pacing
-    if (mode === 'auto_rhythm') {
+      rawSteps = beatSec < 0.44 ? [2, 1] : [1, 2];
+    } else if (rhythm === 'beats_2') {
+      rawSteps = beatSec < 0.48 ? [3, 2, 4] : [2, 4, 1];
+    } else if (rhythm === 'beats_4') {
+      rawSteps = [4, 2, 1];
+    } else if (rhythm === 'smooth') {
+      rawSteps = energy > 0.72 ? [4, 6, 2] : [6, 8, 4, 2];
+    } else if (mode === 'auto_rhythm') {
       if (energy < 0.36) {
-        // Calm lyrical / ambient phrase -> slow 6-beat or 4-beat glides
-        return { steps: [6, 4, 8, 2], energy };
+        rawSteps = [6, 4, 8, 2];
+      } else if (energy < 0.68) {
+        rawSteps = bIdx % 8 === 0 ? [4, 2] : [3, 4, 2];
+      } else {
+        rawSteps = beatSec >= 0.62 && rng() < 0.25 ? [1, 2] : [2, 4, 1];
       }
-      if (energy < 0.68) {
-        // Flowing mid groove -> steady 4-beat or 2-beat phrasing
-        return { steps: bIdx % 8 === 0 ? [4, 2] : [3, 4, 2], energy };
-      }
-      // Rhythmic energetic drop/scene -> punchy 2-beat cuts (or 4-beat anchor on downbeats)
-      return {
-        steps: beatSec >= 0.62 && rng() < 0.25 ? [1, 2] : [2, 4, 1],
-        energy,
-      };
+    } else if (mode === 'sequential') {
+      rawSteps = [4, 2, 6, 1];
+    } else {
+      const roll = rng();
+      rawSteps = roll < 0.45 ? [4, 2] : roll < 0.85 ? [2, 4] : [6, 4, 2];
     }
 
-    if (mode === 'sequential') {
-      return { steps: [4, 2, 6, 1], energy };
+    // Clamp candidate beat counts to respect user's minClipBound .. maxClipBound cleanly
+    const minSteps = Math.max(1, Math.ceil(minClipBound / beatSec - 0.05));
+    const maxSteps = Math.max(minSteps, Math.floor(maxClipBound / beatSec + 0.05));
+    const clampedSet = new Set<number>();
+    for (const s of rawSteps) {
+      clampedSet.add(Math.max(minSteps, Math.min(maxSteps, s)));
     }
-
-    // 'random' with balanced natural feel (avoid frantic 1-beat twitchiness)
-    const roll = rng();
-    if (roll < 0.45) return { steps: [4, 2], energy };
-    if (roll < 0.85) return { steps: [2, 4], energy };
-    return { steps: [6, 4, 2], energy };
+    clampedSet.add(minSteps);
+    if (maxSteps > minSteps) {
+      clampedSet.add(Math.round((minSteps + maxSteps) / 2));
+    }
+    return { steps: Array.from(clampedSet), energy };
   };
 
   const placements: AutoBeatSlicePlacement[] = [];
   let beatIdx = 0;
   let lastBinItemId: string | null = null;
   let seqPoolPointer = 0;
-  // Cap clip count so browser decoders and editability stay fast & uncluttered
+  // Cap generated segment count so browser decoders and editability stay fast & uncluttered
   const maxPlacements = 96;
 
   while (beatIdx < beatTimes.length - 1 && placements.length < maxPlacements) {
@@ -1585,14 +1767,14 @@ export function generateAutoClipPlan(
       if (nextIdx <= beatIdx) continue;
       const rawEnd = Math.min(targetLimit, beatTimes[nextIdx]);
       const dur = Number((rawEnd - startSec).toFixed(2));
-      if (dur < (rhythm === 'beats_1' ? 0.45 : 0.72)) continue;
+      const minAllow = Math.max(0.45, Math.min(minClipBound * 0.85, targetLimit - startSec));
+      if (dur < minAllow) continue;
 
       const eligible: PoolAsset[] = pool.filter((entry) => canAssetFitDur(entry, dur));
       if (eligible.length === 0) continue;
 
       let chosen: PoolAsset;
       if (mode === 'sequential') {
-        // Pick the next eligible asset strictly in Media Library list order
         let found: PoolAsset | null = null;
         for (let offset = 0; offset < pool.length; offset++) {
           const idx = (seqPoolPointer + offset) % pool.length;
@@ -1605,12 +1787,11 @@ export function generateAutoClipPlan(
         chosen = found || eligible[0];
       } else {
         const nonAdjacent: PoolAsset[] =
-          lastBinItemId && eligible.length > 1
+          avoidAdjacentRepeat && lastBinItemId && eligible.length > 1
             ? eligible.filter((e) => e.binItem.id !== lastBinItemId)
             : eligible;
         const poolToPick: PoolAsset[] = nonAdjacent.length > 0 ? nonAdjacent : eligible;
 
-        // In auto_rhythm calm phrases, slightly favor videos/images with longer unbroken spans
         if (mode === 'auto_rhythm' && energy < 0.4 && poolToPick.length > 1) {
           const calmSorted: PoolAsset[] = [...poolToPick].sort((a, b) => {
             const aSpan =
@@ -1643,9 +1824,18 @@ export function generateAutoClipPlan(
         };
       } else if (mode === 'sequential') {
         const mediaNeed = dur * chosen.rate;
-        const avail = chosen.maxEnd - chosen.seqCursor;
+        let rangePicked: [number, number] | null = null;
+        for (const [rs, re] of chosen.freeRanges) {
+          const startAt = Math.max(rs, chosen.seqCursor);
+          if (re - startAt >= mediaNeed - 0.02) {
+            rangePicked = [startAt, re];
+            break;
+          }
+        }
+        const [rs, re] = rangePicked || chosen.freeRanges[0];
+        const avail = Math.max(0, re - rs);
         const clampedNeed = Math.min(mediaNeed, avail);
-        const srcStart = Number(chosen.seqCursor.toFixed(2));
+        const srcStart = Number(rs.toFixed(2));
         chosen.seqCursor = Number((srcStart + clampedNeed).toFixed(2));
         const effectiveDur = Number(Math.min(dur, clampedNeed / chosen.rate).toFixed(2));
         chosenResult = {
@@ -1697,10 +1887,15 @@ export function generateAutoClipPlan(
       chosenResult.asset.used = true;
     }
 
-    // Smooth, intentional transition choice without chaotic directional whip-lash
     let trType: SlideTransitionType;
     if (chosenResult.asset.binItem.defaultTransitionOut) {
       trType = chosenResult.asset.binItem.defaultTransitionOut;
+    } else if (transitionStyle === 'dissolve') {
+      trType = 'crossfade';
+    } else if (transitionStyle === 'cuts_only') {
+      trType = 'cut';
+    } else if (transitionStyle === 'punchy') {
+      trType = placements.length % 3 === 2 ? 'zoom_cross' : 'cut';
     } else if (mode === 'auto_rhythm') {
       if (energy < 0.42 || rhythm === 'smooth') {
         trType = 'crossfade';
@@ -1711,16 +1906,13 @@ export function generateAutoClipPlan(
       }
     } else if (mode === 'sequential') {
       trType = chosenResult.dur >= 2.0 ? 'crossfade' : 'cut';
+    } else if (rhythm === 'smooth' || chosenResult.dur >= 2.4) {
+      trType = 'crossfade';
+    } else if (rhythm === 'beats_1') {
+      trType = 'cut';
     } else {
-      // Balanced Random: primarily crossfade or clean cut, occasional gentle zoom_cross
-      if (rhythm === 'smooth' || chosenResult.dur >= 2.4) {
-        trType = 'crossfade';
-      } else if (rhythm === 'beats_1') {
-        trType = 'cut';
-      } else {
-        const roll = rng();
-        trType = roll < 0.58 ? 'crossfade' : roll < 0.88 ? 'cut' : 'zoom_cross';
-      }
+      const roll = rng();
+      trType = roll < 0.58 ? 'crossfade' : roll < 0.88 ? 'cut' : 'zoom_cross';
     }
 
     const idealTrans =
@@ -1730,21 +1922,25 @@ export function generateAutoClipPlan(
             Math.max(
               0.18,
               Math.min(
-                energy < 0.45 || rhythm === 'smooth' ? 0.85 : 0.48,
+                transitionStyle === 'dissolve' || energy < 0.45 || rhythm === 'smooth' ? 0.85 : 0.48,
                 chosenResult.dur * 0.34
               )
             ).toFixed(2)
           );
 
-    // Gentle unidirectional breathing zoom ONLY on stills; keep live video native (zero yo-yo)
     const isImage = chosenResult.asset.kind === 'image';
-    const scaleEnd = isImage
-      ? chosenResult.dur >= 2.2
-        ? 1.035
-        : 1.02
-      : mode === 'auto_rhythm' && energy < 0.38
-        ? 1.015
-        : 1.0;
+    let scaleEnd = 1.0;
+    if (motionLevel === 'gentle') {
+      scaleEnd = isImage
+        ? chosenResult.dur >= 2.2
+          ? 1.035
+          : 1.02
+        : mode === 'auto_rhythm' && energy < 0.38
+          ? 1.015
+          : 1.0;
+    } else if (motionLevel === 'dynamic') {
+      scaleEnd = isImage ? (chosenResult.dur >= 2.2 ? 1.06 : 1.035) : 1.02;
+    }
 
     placements.push({
       binItemId: chosenResult.asset.binItem.id,
@@ -1791,5 +1987,6 @@ export function generateRandomBeatAutoClips(
     { ...options, mode: 'random' }
   );
 }
+
 
 

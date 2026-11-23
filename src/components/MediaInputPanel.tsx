@@ -37,8 +37,15 @@ import {
   VisualMediaState,
 } from '../types/studio';
 import {
+  AUTO_CLIP_PRESETS,
+  AutoClipGenerateConfig,
   AutoClipMode,
+  AutoClipMotionLevel,
+  AutoClipPresetId,
   AutoClipRhythm,
+  AutoClipTargetMode,
+  AutoClipTransitionStyle,
+  DEFAULT_AUTO_CLIP_CONFIG,
   getTimelineSpanSec,
 } from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
@@ -67,7 +74,7 @@ interface MediaInputPanelProps {
     patch: Partial<MediaBinItem>,
     syncPlacedClips?: boolean
   ) => void;
-  onCreateRandomBeatAutoClip: (rhythm: AutoClipRhythm, mode?: AutoClipMode) => void;
+  onCreateRandomBeatAutoClip: (cfg: AutoClipGenerateConfig) => void;
   onRemoveBinItem: (binItemId: string) => void;
   onClearBin: () => void;
   onAddGeneratorScene: (
@@ -164,11 +171,38 @@ export function MediaInputPanel({
   const [panelFileDragOver, setPanelFileDragOver] = useState(false);
   const [expandedBinId, setExpandedBinId] = useState<string | null>(null);
   const [previewBinId, setPreviewBinId] = useState<string | null>(null);
-  const [autoClipMode, setAutoClipMode] = useState<AutoClipMode>('auto_rhythm');
-  const [autoRhythm, setAutoRhythm] = useState<AutoClipRhythm>('auto');
+  const [autoClipCfg, setAutoClipCfg] = useState<AutoClipGenerateConfig>(DEFAULT_AUTO_CLIP_CONFIG);
+  const [autoSettingsOpen, setAutoSettingsOpen] = useState(false);
   const [genToAdd, setGenToAdd] = useState<Exclude<GeneratorEffectId, 'none'>>('galaxy_spiral');
   const [syncWithMotion, setSyncWithMotion] = useState(true);
   const [srtDraft, setSrtDraft] = useState('');
+
+  const applyAutoClipPreset = (presetId: AutoClipPresetId) => {
+    const found = AUTO_CLIP_PRESETS.find((p) => p.id === presetId);
+    if (!found) return;
+    setAutoClipCfg((prev) => ({
+      ...prev,
+      ...found.config,
+      presetId,
+    }));
+  };
+
+  const presetLabel = (id: AutoClipPresetId): string => {
+    switch (id) {
+      case 'music_story':
+        return t.autoPresetMusicStory;
+      case 'cinema_flow':
+        return t.autoPresetCinemaFlow;
+      case 'dynamic_drop':
+        return t.autoPresetDynamicDrop;
+      case 'story_order':
+        return t.autoPresetStoryOrder;
+      case 'remix_shuffle':
+        return t.autoPresetRemixShuffle;
+      case 'beat_flash':
+        return t.autoPresetBeatFlash;
+    }
+  };
 
   const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
   const previewAsset = previewBinId
@@ -805,20 +839,58 @@ export function MediaInputPanel({
                     })}
                   </div>
 
-                  {/* Beat Auto-Clip Generator with Modes */}
+                  {/* Beat Auto-Clip Generator with Presets, Modes & Settings */}
                   <div className="rounded-lg border border-amber-500/35 bg-[#151A25] p-2.5 space-y-2 mt-2">
-                    <div className="min-w-0">
-                      <h3 className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
-                        <Shuffle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                        <span className="truncate">{t.binAutoClipTitle}</span>
-                      </h3>
-                      <p className="text-[10px] text-gray-400 leading-snug mt-0.5">
-                        {autoClipMode === 'auto_rhythm'
-                          ? t.autoClipModeHintAuto
-                          : autoClipMode === 'sequential'
-                            ? t.autoClipModeHintSeq
-                            : t.autoClipModeHintRandom}
-                      </p>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <h3 className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
+                          <Shuffle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                          <span className="truncate">{t.binAutoClipTitle}</span>
+                        </h3>
+                        <p className="text-[10px] text-gray-400 leading-snug mt-0.5">
+                          {autoClipCfg.mode === 'auto_rhythm'
+                            ? t.autoClipModeHintAuto
+                            : autoClipCfg.mode === 'sequential'
+                              ? t.autoClipModeHintSeq
+                              : t.autoClipModeHintRandom}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAutoSettingsOpen((v) => !v)}
+                        title={t.autoClipSettingsToggle}
+                        aria-expanded={autoSettingsOpen}
+                        className={`p-1 rounded border text-[10px] cursor-pointer shrink-0 transition-colors ${
+                          autoSettingsOpen
+                            ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                            : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:text-gray-200 hover:border-gray-500'
+                        }`}
+                      >
+                        <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+                      </button>
+                    </div>
+
+                    {/* Quick Auto-Clip Presets */}
+                    <div className="space-y-1">
+                      <span className="text-[9.5px] uppercase tracking-wider text-gray-500 font-medium block">
+                        {t.autoClipPresetsLabel}
+                      </span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {AUTO_CLIP_PRESETS.map((preset) => (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => applyAutoClipPreset(preset.id)}
+                            className={`py-1 px-1 rounded border text-[9.5px] font-medium cursor-pointer truncate transition-colors ${
+                              autoClipCfg.presetId === preset.id
+                                ? 'border-amber-400/90 bg-amber-500/20 text-amber-200'
+                                : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
+                            }`}
+                          >
+                            {presetLabel(preset.id)}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     {/* 3 Auto-Creation Modes */}
@@ -833,9 +905,15 @@ export function MediaInputPanel({
                         <button
                           key={m.id}
                           type="button"
-                          onClick={() => setAutoClipMode(m.id)}
+                          onClick={() =>
+                            setAutoClipCfg((prev) => ({
+                              ...prev,
+                              mode: m.id,
+                              presetId: undefined,
+                            }))
+                          }
                           className={`py-1 px-1 rounded border text-[10px] font-semibold cursor-pointer truncate ${
-                            autoClipMode === m.id
+                            autoClipCfg.mode === m.id
                               ? 'border-amber-400 bg-amber-500/20 text-amber-200'
                               : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
                           }`}
@@ -859,9 +937,15 @@ export function MediaInputPanel({
                         <button
                           key={r.id}
                           type="button"
-                          onClick={() => setAutoRhythm(r.id)}
+                          onClick={() =>
+                            setAutoClipCfg((prev) => ({
+                              ...prev,
+                              rhythm: r.id,
+                              presetId: undefined,
+                            }))
+                          }
                           className={`py-1 px-0.5 rounded border text-[9.5px] font-medium cursor-pointer truncate ${
-                            autoRhythm === r.id
+                            autoClipCfg.rhythm === r.id
                               ? 'border-cyan-500/80 bg-cyan-500/15 text-cyan-200'
                               : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:border-gray-500'
                           }`}
@@ -871,13 +955,222 @@ export function MediaInputPanel({
                       ))}
                     </div>
 
+                    {/* Target Mode: Replace vs Append (prevents overwriting / squeezing existing timeline edits) */}
+                    {mediaItems.length > 0 && (
+                      <div className="grid grid-cols-2 gap-1">
+                        {(
+                          [
+                            { id: 'replace', label: t.autoClipTargetReplace },
+                            { id: 'append', label: t.autoClipTargetAppend },
+                          ] as { id: AutoClipTargetMode; label: string }[]
+                        ).map((tm) => (
+                          <button
+                            key={tm.id}
+                            type="button"
+                            onClick={() =>
+                              setAutoClipCfg((prev) => ({ ...prev, targetMode: tm.id }))
+                            }
+                            className={`py-1 px-1.5 rounded border text-[10px] font-medium cursor-pointer truncate ${
+                              autoClipCfg.targetMode === tm.id
+                                ? 'border-emerald-500/80 bg-emerald-500/15 text-emerald-200'
+                                : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:border-gray-500'
+                            }`}
+                          >
+                            {tm.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Expandable Fine Settings */}
+                    {autoSettingsOpen && (
+                      <div className="rounded-md border border-[#262B38] bg-[#0E1016] p-2 space-y-2">
+                        {/* Transition Style */}
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-gray-400 block">
+                            {t.autoClipTransLabel}
+                          </span>
+                          <div className="grid grid-cols-4 gap-1">
+                            {(
+                              [
+                                { id: 'musical', label: t.autoClipTransMusical },
+                                { id: 'dissolve', label: t.autoClipTransDissolve },
+                                { id: 'cuts_only', label: t.autoClipTransCutsOnly },
+                                { id: 'punchy', label: t.autoClipTransPunchy },
+                              ] as { id: AutoClipTransitionStyle; label: string }[]
+                            ).map((tr) => (
+                              <button
+                                key={tr.id}
+                                type="button"
+                                onClick={() =>
+                                  setAutoClipCfg((prev) => ({
+                                    ...prev,
+                                    transitionStyle: tr.id,
+                                    presetId: undefined,
+                                  }))
+                                }
+                                className={`py-1 px-1 rounded border text-[9.5px] cursor-pointer truncate ${
+                                  autoClipCfg.transitionStyle === tr.id
+                                    ? 'border-amber-400/80 bg-amber-500/15 text-amber-200'
+                                    : 'border-[#262B38] bg-[#141821] text-gray-400 hover:border-gray-500'
+                                }`}
+                              >
+                                {tr.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Motion Level */}
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-gray-400 block">
+                            {t.autoClipMotionLabel}
+                          </span>
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                { id: 'off', label: t.autoClipMotionOff },
+                                { id: 'gentle', label: t.autoClipMotionGentle },
+                                { id: 'dynamic', label: t.autoClipMotionDynamic },
+                              ] as { id: AutoClipMotionLevel; label: string }[]
+                            ).map((ml) => (
+                              <button
+                                key={ml.id}
+                                type="button"
+                                onClick={() =>
+                                  setAutoClipCfg((prev) => ({
+                                    ...prev,
+                                    motionLevel: ml.id,
+                                    presetId: undefined,
+                                  }))
+                                }
+                                className={`py-1 px-1 rounded border text-[9.5px] cursor-pointer truncate ${
+                                  autoClipCfg.motionLevel === ml.id
+                                    ? 'border-cyan-500/80 bg-cyan-500/15 text-cyan-200'
+                                    : 'border-[#262B38] bg-[#141821] text-gray-400 hover:border-gray-500'
+                                }`}
+                              >
+                                {ml.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Min & Max Clip Duration Sliders */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="block space-y-0.5">
+                            <div className="flex justify-between text-[9.5px] text-gray-400">
+                              <span>{t.autoClipMinDurLabel}</span>
+                              <span className="font-mono text-gray-200">
+                                {autoClipCfg.minClipSec.toFixed(1)}s
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={5.0}
+                              step={0.1}
+                              value={autoClipCfg.minClipSec}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setAutoClipCfg((prev) => ({
+                                  ...prev,
+                                  minClipSec: val,
+                                  maxClipSec: Math.max(prev.maxClipSec, Number((val + 0.5).toFixed(1))),
+                                  presetId: undefined,
+                                }));
+                              }}
+                              className="w-full studio-slider"
+                            />
+                          </label>
+                          <label className="block space-y-0.5">
+                            <div className="flex justify-between text-[9.5px] text-gray-400">
+                              <span>{t.autoClipMaxDurLabel}</span>
+                              <span className="font-mono text-gray-200">
+                                {autoClipCfg.maxClipSec.toFixed(1)}s
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={1.5}
+                              max={14.0}
+                              step={0.5}
+                              value={autoClipCfg.maxClipSec}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setAutoClipCfg((prev) => ({
+                                  ...prev,
+                                  maxClipSec: val,
+                                  minClipSec: Math.min(prev.minClipSec, Number((val - 0.5).toFixed(1))),
+                                  presetId: undefined,
+                                }));
+                              }}
+                              className="w-full studio-slider"
+                            />
+                          </label>
+                        </div>
+
+                        {/* Duration Span Limit */}
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-gray-400 block">
+                            {t.autoClipSpanLabel}
+                          </span>
+                          <div className="grid grid-cols-4 gap-1">
+                            {(
+                              [
+                                { val: null, label: t.autoClipSpanFull },
+                                { val: 15, label: '15s' },
+                                { val: 30, label: '30s' },
+                                { val: 60, label: '60s' },
+                              ] as { val: number | null; label: string }[]
+                            ).map((sp) => (
+                              <button
+                                key={String(sp.val)}
+                                type="button"
+                                onClick={() =>
+                                  setAutoClipCfg((prev) => ({ ...prev, targetDurationSec: sp.val }))
+                                }
+                                className={`py-1 px-1 rounded border text-[9.5px] cursor-pointer truncate ${
+                                  autoClipCfg.targetDurationSec === sp.val
+                                    ? 'border-amber-400/80 bg-amber-500/15 text-amber-200'
+                                    : 'border-[#262B38] bg-[#141821] text-gray-400 hover:border-gray-500'
+                                }`}
+                              >
+                                {sp.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Avoid Back-to-Back Repeat */}
+                        <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer pt-0.5">
+                          <span>{t.autoClipAvoidRepeatLabel}</span>
+                          <input
+                            type="checkbox"
+                            checked={autoClipCfg.avoidAdjacentRepeat}
+                            onChange={(e) =>
+                              setAutoClipCfg((prev) => ({
+                                ...prev,
+                                avoidAdjacentRepeat: e.target.checked,
+                              }))
+                            }
+                            className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                          />
+                        </label>
+                      </div>
+                    )}
+
                     <button
                       type="button"
-                      onClick={() => onCreateRandomBeatAutoClip(autoRhythm, autoClipMode)}
+                      onClick={() => onCreateRandomBeatAutoClip(autoClipCfg)}
                       className="w-full py-1.5 px-3 rounded-md border border-amber-500/70 bg-amber-500/18 hover:bg-amber-500/28 text-xs font-semibold text-amber-200 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
-                      <span>{t.binAutoClipBtn}</span>
+                      <span>
+                        {mediaItems.length > 0 && autoClipCfg.targetMode === 'append'
+                          ? t.autoClipAppendBtn
+                          : t.binAutoClipBtn}
+                      </span>
                     </button>
                   </div>
                 </div>
