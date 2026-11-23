@@ -512,6 +512,11 @@ function drawSingleClipLayer(
   if (config.framingMode === 'fit_blur') {
     drawFitBlurBackdrop(ctx, drawSource, drawSrcW, drawSrcH, width, height, pulseScale, config);
   } else {
+    const safeHeadroom = Math.max(0, totalScale - 1);
+    const maxPanX = width * safeHeadroom * 0.42;
+    const maxPanY = height * safeHeadroom * 0.42;
+    const clampedPanX = media.kind === 'video' ? 0 : Math.max(-maxPanX, Math.min(maxPanX, panX));
+    const clampedPanY = media.kind === 'video' ? 0 : Math.max(-maxPanY, Math.min(maxPanY, panY));
     const hasFilter = supportsCanvasFilter(ctx);
     if (hasFilter) {
       ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
@@ -523,8 +528,8 @@ function drawSingleClipLayer(
         width,
         height,
         totalScale,
-        panX,
-        panY
+        clampedPanX,
+        clampedPanY
       );
     } else if (config.mediaBlur > 0.4) {
       drawDownscaledBlurFallback(
@@ -538,8 +543,8 @@ function drawSingleClipLayer(
         height,
         config.mediaBlur,
         totalScale,
-        panX,
-        panY,
+        clampedPanX,
+        clampedPanY,
         true
       );
       applyFallbackColorAndBrightness(
@@ -560,8 +565,8 @@ function drawSingleClipLayer(
         width,
         height,
         totalScale,
-        panX,
-        panY
+        clampedPanX,
+        clampedPanY
       );
       applyFallbackColorAndBrightness(
         ctx,
@@ -854,12 +859,12 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     const p = slice.transitionProgress;
 
     const slideKenActive =
-      config.kenBurnsMotion && !reducedMotion
-        ? pulseScale * (1 + Math.min(0.08, slice.slideLocalTime * 0.012))
+      config.kenBurnsMotion && !reducedMotion && activeMedia?.kind === 'image'
+        ? pulseScale * (1 + Math.min(0.055, slice.slideLocalTime * 0.01))
         : pulseScale;
     const slideKenPrev =
-      config.kenBurnsMotion && !reducedMotion
-        ? pulseScale * (1 + Math.min(0.08, slice.prevSlideLocalTime * 0.012))
+      config.kenBurnsMotion && !reducedMotion && prevMedia?.kind === 'image'
+        ? pulseScale * (1 + Math.min(0.055, slice.prevSlideLocalTime * 0.01))
         : pulseScale;
     const activeClipDur = Math.max(0.2, slice.activeSegmentDuration || activeMedia?.durationSec || clipDuration);
     const prevClipDur = Math.max(0.2, slice.prevSegmentDuration || prevMedia?.durationSec || clipDuration);

@@ -28,6 +28,7 @@ import {
 } from './types/studio';
 import {
   analyzeAudioAtTime,
+  AutoClipMode,
   AutoClipRhythm,
   buildMonoAudioData,
   clampManualClipMove,
@@ -39,8 +40,8 @@ import {
   createSmoothState,
   detectTrackBpmAndBeats,
   findManualInsertionSlot,
+  generateAutoClipPlan,
   generateDemoAudioBuffer,
-  generateRandomBeatAutoClips,
   getNormalizedManualClipIntervals,
   getTimelineSpanSec,
   insertManualClipAtAnchor,
@@ -669,20 +670,29 @@ export default function App() {
         activeIds.add(items[slice.prevIndex].id);
       }
 
-      // Pre-warm the next upcoming video clip up to 0.85s before its boundary so it never flashes black on cut
+      // Rolling lookahead window: promote only active/transitioning + next 2 upcoming clips (within 2.4s)
+      // to preload='auto' so bulk sliced timelines never exhaust GPU/decoder slots.
+      const preloadWindowIds = new Set<string>(activeIds);
       let prewarmClipId: string | null = null;
       let prewarmTargetSec = 0;
-      const nextSeg = segments.find(
-        (s) => s.startSec - localTime > 0 && s.startSec - localTime <= 0.85
-      );
-      if (nextSeg) {
-        const upcoming = items[nextSeg.clipIndex];
-        if (upcoming && upcoming.kind === 'video' && !activeIds.has(upcoming.id)) {
-          prewarmClipId = upcoming.id;
-          const vDur = upcoming.videoDuration || 1;
-          const maxSafe = Math.max(0, vDur - 0.04);
-          prewarmTargetSec = Math.min(maxSafe, Math.max(0, upcoming.sourceStartSec % vDur));
+      let upcomingVideoCount = 0;
+      for (const s of segments) {
+        const dt = s.startSec - localTime;
+        if (dt <= 0) continue;
+        if (dt > 2.6 && upcomingVideoCount >= 2) break;
+        const upcoming = items[s.clipIndex];
+        if (!upcoming || upcoming.kind !== 'video' || activeIds.has(upcoming.id)) continue;
+        if (dt <= 2.6 || upcomingVideoCount < 2) {
+          preloadWindowIds.add(upcoming.id);
+          upcomingVideoCount++;
+          if (!prewarmClipId && dt <= 1.65) {
+            prewarmClipId = upcoming.id;
+            const vDur = upcoming.videoDuration || 1;
+            const maxSafe = Math.max(0, vDur - 0.04);
+            prewarmTargetSec = Math.min(maxSafe, Math.max(0, upcoming.sourceStartSec % vDur));
+          }
         }
+        if (upcomingVideoCount >= 2 && dt > 2.6) break;
       }
 
       items.forEach((item) => {
@@ -695,6 +705,12 @@ export default function App() {
         const clipOffset = isActive ? slice.slideLocalTime : slice.prevSlideLocalTime;
         const targetSec = Math.min(maxSafe, Math.max(0, (item.sourceStartSec + clipOffset * rate) % vDur));
 
+        if (preloadWindowIds.has(item.id)) {
+          if (v.preload !== 'auto') v.preload = 'auto';
+        } else {
+          if (v.preload !== 'metadata') v.preload = 'metadata';
+        }
+
         if (Math.abs(v.playbackRate - rate) > 0.01) {
           v.playbackRate = rate;
         }
@@ -704,7 +720,9 @@ export default function App() {
             v.muted = !isActive || item.clipAudioMuted || item.clipAudioVolume <= 0.01;
             v.volume = Math.max(0, Math.min(1, item.clipAudioVolume));
             if (v.paused) {
-              v.currentTime = targetSec;
+              if (Math.abs(v.currentTime - targetSec) > 0.06 && !v.seeking) {
+                v.currentTime = targetSec;
+              }
               v.play().catch(() => {});
             } else {
               const rawDiff = Math.abs(v.currentTime - targetSec);
@@ -716,7 +734,7 @@ export default function App() {
             }
           } else {
             v.muted = true;
-            v.pause();
+            if (!v.paused) v.pause();
             if (!v.seeking && Math.abs(v.currentTime - targetSec) > 0.04) {
               v.currentTime = targetSec;
             }
@@ -724,7 +742,7 @@ export default function App() {
         } else if (item.id === prewarmClipId) {
           v.muted = true;
           if (!v.paused) v.pause();
-          if (!v.seeking && Math.abs(v.currentTime - prewarmTargetSec) > 0.08) {
+          if (!v.seeking && v.readyState >= 1 && Math.abs(v.currentTime - prewarmTargetSec) > 0.08) {
             v.currentTime = prewarmTargetSec;
           }
         } else {
@@ -886,7 +904,7 @@ export default function App() {
       video.muted = true;
       video.loop = true;
       video.playsInline = true;
-      video.preload = 'auto';
+      video.preload = 'metadata';
       video.src = binItem.url;
       const vDur = binItem.videoDuration || 10;
       const resolvedMuted = binItem.defaultClipAudioMuted ?? Boolean(audioRef.current);
@@ -1303,8 +1321,12 @@ export default function App() {
           }
         }
 
-        // Cache blobKey -> objectURL so shared Media Library and timeline clips reuse URLs cleanly
+        // Cache blobKey -> objectURL and decoded video metadata/audio so sliced auto-clips restore instantaneously
         const restoredUrlByKey = new Map<string, string>();
+        const restoredVideoMetaByKey = new Map<
+          string,
+          { duration: number; width: number; height: number; decodedAudio?: AudioBuffer }
+        >();
         const restoredBin: MediaBinItem[] = [];
         for (const sb of saved.mediaBin || []) {
           if (!sb.blobKey) continue;
@@ -1355,13 +1377,21 @@ export default function App() {
                 // silent video
               }
               const vDur = video.duration || sb.videoDuration || 10;
+              const vW = video.videoWidth || sb.width;
+              const vH = video.videoHeight || sb.height;
+              restoredVideoMetaByKey.set(sb.blobKey, {
+                duration: vDur,
+                width: vW,
+                height: vH,
+                decodedAudio: decodedBuf,
+              });
               restoredBin.push({
                 id: sb.id || `bin-${createItemId()}`,
                 kind: 'video',
                 fileName: sb.fileName,
                 url,
-                width: video.videoWidth || sb.width,
-                height: video.videoHeight || sb.height,
+                width: vW,
+                height: vH,
                 videoDuration: vDur,
                 decodedAudioBuffer: decodedBuf,
                 defaultDurationSec:
@@ -1375,7 +1405,14 @@ export default function App() {
           }
         }
 
-        // Rehydrate media clips cleanly in saved order
+        // Rehydrate media clips cleanly in saved order without re-decoding shared video blobs
+        const restoredImageByKey = new Map<string, HTMLImageElement>();
+        for (const b of restoredBin) {
+          const k = b.url ? blobKeyMapRef.current.get(b.url) : undefined;
+          if (k && b.kind === 'image' && b.imageElement) {
+            restoredImageByKey.set(k, b.imageElement);
+          }
+        }
         const restoredClips: VisualMediaState[] = [];
         for (const sc of saved.clips || []) {
           const restoredOverlay = sc.overlayEffect
@@ -1407,21 +1444,25 @@ export default function App() {
             });
           } else if (sc.blobKey) {
             let url = restoredUrlByKey.get(sc.blobKey);
-            const blob = await loadBlobFromIDB(sc.blobKey);
-            if (!blob) continue;
             if (!url) {
+              const blob = await loadBlobFromIDB(sc.blobKey);
+              if (!blob) continue;
               url = URL.createObjectURL(blob);
               restoredUrlByKey.set(sc.blobKey, url);
               blobKeyMapRef.current.set(url, sc.blobKey);
             }
 
             if (sc.kind === 'image') {
-              const img = await new Promise<HTMLImageElement | null>((resolve) => {
-                const el = new Image();
-                el.onload = () => resolve(el);
-                el.onerror = () => resolve(null);
-                el.src = url!;
-              });
+              let img = restoredImageByKey.get(sc.blobKey) ?? null;
+              if (!img) {
+                img = await new Promise<HTMLImageElement | null>((resolve) => {
+                  const el = new Image();
+                  el.onload = () => resolve(el);
+                  el.onerror = () => resolve(null);
+                  el.src = url!;
+                });
+                if (img) restoredImageByKey.set(sc.blobKey, img);
+              }
               if (img) {
                 restoredClips.push({
                   id: sc.id,
@@ -1463,31 +1504,51 @@ export default function App() {
               video.muted = true;
               video.loop = true;
               video.playsInline = true;
-              video.preload = 'auto';
-              const ok = await new Promise<boolean>((resolve) => {
-                video.onloadedmetadata = () => resolve(true);
-                video.onerror = () => resolve(false);
-                video.src = url!;
-              });
-              if (ok) {
-                let decodedBuf: AudioBuffer | undefined;
-                try {
-                  const arr = await blob.arrayBuffer();
-                  decodedBuf = await getAudioContext().decodeAudioData(arr);
-                } catch {
-                  // silent video
+              video.preload = 'metadata';
+
+              let cachedMeta = restoredVideoMetaByKey.get(sc.blobKey);
+              let ok = Boolean(cachedMeta);
+              if (!cachedMeta) {
+                ok = await new Promise<boolean>((resolve) => {
+                  video.onloadedmetadata = () => resolve(true);
+                  video.onerror = () => resolve(false);
+                  video.src = url!;
+                });
+                if (ok) {
+                  let decodedBuf: AudioBuffer | undefined;
+                  try {
+                    const blob = await loadBlobFromIDB(sc.blobKey);
+                    if (blob) {
+                      const arr = await blob.arrayBuffer();
+                      decodedBuf = await getAudioContext().decodeAudioData(arr);
+                    }
+                  } catch {
+                    // silent video
+                  }
+                  cachedMeta = {
+                    duration: video.duration || sc.videoDuration || 10,
+                    width: video.videoWidth || sc.width,
+                    height: video.videoHeight || sc.height,
+                    decodedAudio: decodedBuf,
+                  };
+                  restoredVideoMetaByKey.set(sc.blobKey, cachedMeta);
                 }
-                const vDur = video.duration || sc.videoDuration || 10;
+              } else {
+                video.src = url!;
+              }
+
+              if (ok && cachedMeta) {
+                const vDur = cachedMeta.duration;
                 restoredClips.push({
                   id: sc.id,
                   kind: 'video',
                   fileName: sc.fileName,
                   url,
-                  width: video.videoWidth || sc.width,
-                  height: video.videoHeight || sc.height,
+                  width: cachedMeta.width,
+                  height: cachedMeta.height,
                   videoElement: video,
                   videoDuration: vDur,
-                  decodedAudioBuffer: decodedBuf,
+                  decodedAudioBuffer: cachedMeta.decodedAudio,
                   startSec: sc.startSec,
                   durationSec: sc.durationSec,
                   sourceStartSec: sc.sourceStartSec,
@@ -1508,10 +1569,10 @@ export default function App() {
                     kind: 'video',
                     fileName: sc.fileName,
                     url,
-                    width: video.videoWidth || sc.width,
-                    height: video.videoHeight || sc.height,
+                    width: cachedMeta.width,
+                    height: cachedMeta.height,
                     videoDuration: vDur,
-                    decodedAudioBuffer: decodedBuf,
+                    decodedAudioBuffer: cachedMeta.decodedAudio,
                     defaultDurationSec: Number(Math.max(0.5, Math.min(600, vDur)).toFixed(1)),
                   });
                 }
@@ -1865,23 +1926,38 @@ export default function App() {
   );
 
   const handleCreateRandomBeatAutoClip = useCallback(
-    (rhythm: AutoClipRhythm = 'mixed') => {
+    (rhythm: AutoClipRhythm = 'auto', mode: AutoClipMode = 'auto_rhythm') => {
       const binList = mediaBinRef.current;
       if (binList.length === 0) return;
+      stopPlayback();
+
       const cfg = configRef.current;
       const aud = audioRef.current;
       const bounds = getEffectiveTimelineBounds(cfg, mediaItemsRef.current, aud);
-      const placements = generateRandomBeatAutoClips(
+      const placements = generateAutoClipPlan(
         binList,
         trackBeatGrid,
         cfg.manualBeatMarkers,
         bounds.trimBase,
         aud ? bounds.clipDuration : 3600,
-        { rhythm, hasAudio: Boolean(aud) }
+        {
+          mode,
+          rhythm,
+          hasAudio: Boolean(aud),
+          monoData: monoDataRef.current,
+          sampleRate: aud?.sampleRate,
+        }
       );
       if (placements.length === 0) return;
 
       pushImmediateHistory();
+      for (const prevClip of mediaItemsRef.current) {
+        if (prevClip.kind === 'video' && prevClip.videoElement) {
+          prevClip.videoElement.pause();
+          prevClip.videoElement.preload = 'metadata';
+        }
+      }
+
       const binById = new Map(binList.map((b) => [b.id, b]));
       const builtClips: VisualMediaState[] = [];
       for (const p of placements) {
@@ -1916,8 +1992,12 @@ export default function App() {
       const startAbs = aud ? bounds.trimBase : 0;
       currentTimeRef.current = startAbs;
       setCurrentTime(startAbs);
+      // Pre-warm only the first slice right away without locking decoders
+      if (builtClips[0].kind === 'video' && builtClips[0].videoElement) {
+        builtClips[0].videoElement.preload = 'auto';
+      }
     },
-    [buildClipFromBinItem, getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]
+    [buildClipFromBinItem, getEffectiveTimelineBounds, pushImmediateHistory, stopPlayback, trackBeatGrid]
   );
 
   const handleRemoveBinItem = useCallback(
@@ -2136,7 +2216,7 @@ export default function App() {
         clonedVideo.muted = true;
         clonedVideo.loop = true;
         clonedVideo.playsInline = true;
-        clonedVideo.preload = 'auto';
+        clonedVideo.preload = 'metadata';
         clonedVideo.src = orig.url;
       }
 
@@ -2562,7 +2642,22 @@ export default function App() {
   const handleReverseClips = useCallback(() => {
     if (mediaItemsRef.current.length < 2) return;
     pushImmediateHistory();
-    setMediaItems((prev) => [...prev].reverse());
+    setMediaItems((prev) => {
+      if (configRef.current.slideshowMode !== 'manual') {
+        return [...prev].reverse();
+      }
+      const intervals = getNormalizedManualClipIntervals(prev);
+      const minStart = intervals.length > 0 ? intervals[0].startSec : 0;
+      const byId = new Map(prev.map((m) => [m.id, m]));
+      const ordered = [...intervals].reverse().map((iv) => byId.get(iv.id)!).filter(Boolean);
+      let cursor = minStart;
+      return ordered.map((m) => {
+        const dur = Math.max(0.4, m.durationSec || 4);
+        const start = Number(cursor.toFixed(2));
+        cursor += dur;
+        return { ...m, startSec: start };
+      });
+    });
   }, [pushImmediateHistory]);
 
   const handleSetClipTransition = useCallback(
@@ -2623,7 +2718,7 @@ export default function App() {
           clonedVideo.muted = true;
           clonedVideo.loop = true;
           clonedVideo.playsInline = true;
-          clonedVideo.preload = 'auto';
+          clonedVideo.preload = 'metadata';
           clonedVideo.src = orig.url;
         }
         additions.push({
@@ -2685,21 +2780,6 @@ export default function App() {
     [pushImmediateHistory]
   );
 
-  const handleMoveVisual = useCallback(
-    (index: number, direction: -1 | 1) => {
-      pushImmediateHistory();
-      setMediaItems((prev) => {
-        const target = index + direction;
-        if (target < 0 || target >= prev.length) return prev;
-        const copy = [...prev];
-        const [moved] = copy.splice(index, 1);
-        copy.splice(target, 0, moved);
-        return copy;
-      });
-    },
-    [pushImmediateHistory]
-  );
-
   const handleReorderClip = useCallback(
     (fromIdx: number, toIdx: number) => {
       if (fromIdx === toIdx) return;
@@ -2708,13 +2788,43 @@ export default function App() {
         if (fromIdx < 0 || toIdx < 0 || fromIdx >= prev.length || toIdx >= prev.length) {
           return prev;
         }
-        const copy = [...prev];
-        const [moved] = copy.splice(fromIdx, 1);
-        copy.splice(toIdx, 0, moved);
-        return copy;
+        if (configRef.current.slideshowMode !== 'manual') {
+          const copy = [...prev];
+          const [moved] = copy.splice(fromIdx, 1);
+          copy.splice(toIdx, 0, moved);
+          return copy;
+        }
+        const movedItem = prev[fromIdx];
+        const targetItem = prev[toIdx];
+        const intervals = getNormalizedManualClipIntervals(prev);
+        const minStart = intervals.length > 0 ? intervals[0].startSec : 0;
+        const byId = new Map(prev.map((m) => [m.id, m]));
+        const ordered = intervals.map((iv) => byId.get(iv.id)!).filter(Boolean);
+        const oFrom = ordered.findIndex((m) => m.id === movedItem.id);
+        const oTo = ordered.findIndex((m) => m.id === targetItem.id);
+        if (oFrom >= 0 && oTo >= 0) {
+          const [moved] = ordered.splice(oFrom, 1);
+          ordered.splice(oTo, 0, moved);
+        }
+        let cursor = minStart;
+        return ordered.map((m) => {
+          const dur = Math.max(0.4, m.durationSec || 4);
+          const start = Number(cursor.toFixed(2));
+          cursor += dur;
+          return { ...m, startSec: start };
+        });
       });
     },
     [pushImmediateHistory]
+  );
+
+  const handleMoveVisual = useCallback(
+    (index: number, direction: -1 | 1) => {
+      const target = index + direction;
+      if (target < 0 || target >= mediaItemsRef.current.length) return;
+      handleReorderClip(index, target);
+    },
+    [handleReorderClip]
   );
 
   const handleSplitClipAtPlayhead = useCallback(() => {
@@ -2752,7 +2862,7 @@ export default function App() {
       vid.muted = true;
       vid.loop = true;
       vid.playsInline = true;
-      vid.preload = 'auto';
+      vid.preload = 'metadata';
       vid.src = clip.url;
       return vid;
     };
@@ -3419,28 +3529,43 @@ export default function App() {
               video.muted = true;
               video.loop = true;
               video.playsInline = true;
-              video.preload = 'auto';
-              const ok = await new Promise<boolean>((resolve) => {
-                video.onloadedmetadata = () => resolve(true);
-                video.onerror = () => resolve(false);
-                video.src = url!;
-              });
-              if (ok) {
-                let decodedBuf: AudioBuffer | undefined;
-                try {
-                  const arr = await blob.arrayBuffer();
-                  decodedBuf = await getAudioContext().decodeAudioData(arr);
-                } catch {
-                  // silent video
+              video.preload = 'metadata';
+              const existingBin = nextBin.find(
+                (b) => b.kind === 'video' && b.url && blobKeyMapRef.current.get(b.url) === sc.blobKey
+              );
+              let ok = Boolean(existingBin);
+              let decodedBuf: AudioBuffer | undefined = existingBin?.decodedAudioBuffer;
+              let vDur = existingBin?.videoDuration || sc.videoDuration || 10;
+              let vW = existingBin?.width || sc.width || 1080;
+              let vH = existingBin?.height || sc.height || 1920;
+              if (!existingBin) {
+                ok = await new Promise<boolean>((resolve) => {
+                  video.onloadedmetadata = () => resolve(true);
+                  video.onerror = () => resolve(false);
+                  video.src = url!;
+                });
+                if (ok) {
+                  try {
+                    const arr = await blob.arrayBuffer();
+                    decodedBuf = await getAudioContext().decodeAudioData(arr);
+                  } catch {
+                    // silent video
+                  }
+                  vDur = video.duration || vDur;
+                  vW = video.videoWidth || vW;
+                  vH = video.videoHeight || vH;
                 }
-                const vDur = video.duration || sc.videoDuration || 10;
+              } else {
+                video.src = url!;
+              }
+              if (ok) {
                 nextClips.push({
                   id: sc.id || createItemId(),
                   kind: 'video',
                   fileName: sc.fileName,
                   url,
-                  width: video.videoWidth || sc.width || 1080,
-                  height: video.videoHeight || sc.height || 1920,
+                  width: vW,
+                  height: vH,
                   videoElement: video,
                   videoDuration: vDur,
                   decodedAudioBuffer: decodedBuf,

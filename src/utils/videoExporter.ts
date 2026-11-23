@@ -287,10 +287,32 @@ type VideoWithFrameCallback = HTMLVideoElement & {
 };
 
 async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Promise<void> {
+  if (video.preload !== 'auto') {
+    video.preload = 'auto';
+  }
+  if (video.readyState < 1) {
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finishMeta = () => {
+        if (done) return;
+        done = true;
+        video.removeEventListener('loadedmetadata', finishMeta);
+        video.removeEventListener('error', finishMeta);
+        clearTimeout(metaTimer);
+        resolve();
+      };
+      const metaTimer = setTimeout(finishMeta, 1500);
+      video.addEventListener('loadedmetadata', finishMeta, { once: true });
+      video.addEventListener('error', finishMeta, { once: true });
+    });
+  }
+
   const dur = video.duration || 1;
   const maxSafe = Math.max(0, dur - 0.04);
   const wrapped = Math.min(maxSafe, Math.max(0, targetSec % dur));
-  if (!video.seeking && Math.abs(video.currentTime - wrapped) < 0.004) return;
+  if (video.readyState >= 2 && !video.seeking && Math.abs(video.currentTime - wrapped) < 0.004) {
+    return;
+  }
 
   await new Promise<void>((resolve) => {
     let settled = false;

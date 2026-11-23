@@ -36,7 +36,11 @@ import {
   TrimPresetId,
   VisualMediaState,
 } from '../types/studio';
-import { AutoClipRhythm, getTimelineSpanSec } from '../utils/audioAnalyzer';
+import {
+  AutoClipMode,
+  AutoClipRhythm,
+  getTimelineSpanSec,
+} from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
 import { MediaPreviewModal } from './MediaPreviewModal';
 
@@ -63,7 +67,7 @@ interface MediaInputPanelProps {
     patch: Partial<MediaBinItem>,
     syncPlacedClips?: boolean
   ) => void;
-  onCreateRandomBeatAutoClip: (rhythm: AutoClipRhythm) => void;
+  onCreateRandomBeatAutoClip: (rhythm: AutoClipRhythm, mode?: AutoClipMode) => void;
   onRemoveBinItem: (binItemId: string) => void;
   onClearBin: () => void;
   onAddGeneratorScene: (
@@ -160,7 +164,8 @@ export function MediaInputPanel({
   const [panelFileDragOver, setPanelFileDragOver] = useState(false);
   const [expandedBinId, setExpandedBinId] = useState<string | null>(null);
   const [previewBinId, setPreviewBinId] = useState<string | null>(null);
-  const [autoRhythm, setAutoRhythm] = useState<AutoClipRhythm>('mixed');
+  const [autoClipMode, setAutoClipMode] = useState<AutoClipMode>('auto_rhythm');
+  const [autoRhythm, setAutoRhythm] = useState<AutoClipRhythm>('auto');
   const [genToAdd, setGenToAdd] = useState<Exclude<GeneratorEffectId, 'none'>>('galaxy_spiral');
   const [syncWithMotion, setSyncWithMotion] = useState(true);
   const [srtDraft, setSrtDraft] = useState('');
@@ -553,6 +558,7 @@ export function MediaInputPanel({
                                 <video
                                   src={asset.url}
                                   muted
+                                  preload="metadata"
                                   className="w-full h-full object-cover pointer-events-none"
                                 />
                               )}
@@ -799,37 +805,65 @@ export function MediaInputPanel({
                     })}
                   </div>
 
-                  {/* Random Non-Repeating Beat Auto-Clip Generator */}
+                  {/* Beat Auto-Clip Generator with Modes */}
                   <div className="rounded-lg border border-amber-500/35 bg-[#151A25] p-2.5 space-y-2 mt-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <h3 className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
-                          <Shuffle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                          <span className="truncate">{t.binAutoClipTitle}</span>
-                        </h3>
-                        <p className="text-[10px] text-gray-400 leading-snug mt-0.5">
-                          {t.binAutoClipDesc}
-                        </p>
-                      </div>
+                    <div className="min-w-0">
+                      <h3 className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
+                        <Shuffle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span className="truncate">{t.binAutoClipTitle}</span>
+                      </h3>
+                      <p className="text-[10px] text-gray-400 leading-snug mt-0.5">
+                        {autoClipMode === 'auto_rhythm'
+                          ? t.autoClipModeHintAuto
+                          : autoClipMode === 'sequential'
+                            ? t.autoClipModeHintSeq
+                            : t.autoClipModeHintRandom}
+                      </p>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-1">
+                    {/* 3 Auto-Creation Modes */}
+                    <div className="grid grid-cols-3 gap-1">
                       {(
                         [
-                          { id: 'beats_1', label: '1 beat' },
-                          { id: 'beats_2', label: '2 beats' },
-                          { id: 'beats_4', label: '4 beats' },
-                          { id: 'mixed', label: t.autoClipMixed },
+                          { id: 'auto_rhythm', label: t.autoClipModeAutoRhythm },
+                          { id: 'sequential', label: t.autoClipModeSequential },
+                          { id: 'random', label: t.autoClipModeRandom },
+                        ] as { id: AutoClipMode; label: string }[]
+                      ).map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setAutoClipMode(m.id)}
+                          className={`py-1 px-1 rounded border text-[10px] font-semibold cursor-pointer truncate ${
+                            autoClipMode === m.id
+                              ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                              : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
+                          }`}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Pacing Options */}
+                    <div className="grid grid-cols-5 gap-1">
+                      {(
+                        [
+                          { id: 'auto', label: t.autoClipPaceAuto },
+                          { id: 'smooth', label: t.autoClipPaceSmooth },
+                          { id: 'beats_2', label: t.autoClipPace2Beats },
+                          { id: 'beats_4', label: t.autoClipPace4Beats },
+                          { id: 'beats_1', label: t.autoClipPace1Beat },
                         ] as { id: AutoClipRhythm; label: string }[]
                       ).map((r) => (
                         <button
                           key={r.id}
                           type="button"
                           onClick={() => setAutoRhythm(r.id)}
-                          className={`py-1 px-1 rounded border text-[10px] font-medium cursor-pointer truncate ${
+                          className={`py-1 px-0.5 rounded border text-[9.5px] font-medium cursor-pointer truncate ${
                             autoRhythm === r.id
-                              ? 'border-amber-500/80 bg-amber-500/20 text-amber-200'
-                              : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
+                              ? 'border-cyan-500/80 bg-cyan-500/15 text-cyan-200'
+                              : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:border-gray-500'
                           }`}
                         >
                           {r.label}
@@ -839,7 +873,7 @@ export function MediaInputPanel({
 
                     <button
                       type="button"
-                      onClick={() => onCreateRandomBeatAutoClip(autoRhythm)}
+                      onClick={() => onCreateRandomBeatAutoClip(autoRhythm, autoClipMode)}
                       className="w-full py-1.5 px-3 rounded-md border border-amber-500/70 bg-amber-500/18 hover:bg-amber-500/28 text-xs font-semibold text-amber-200 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />

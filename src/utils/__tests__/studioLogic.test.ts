@@ -6,8 +6,10 @@ import {
   computeAutoBeatAlignedClips,
   computeClipTimelineSegments,
   computeFadeEnvelope,
+  computePhraseEnergyCurve,
   detectTrackBpmAndBeats,
   findManualInsertionSlot,
+  generateAutoClipPlan,
   generateRandomBeatAutoClips,
   getTimelineSpanSec,
   insertManualClipAtAnchor,
@@ -545,6 +547,110 @@ test('generateRandomBeatAutoClips creates non-repeating, non-sequential beat sli
   }
 });
 
+test('generateAutoClipPlan supports auto_rhythm energy phrasing, sequential slicing, and smooth random cuts', () => {
+  const binItems: MediaBinItem[] = [
+    {
+      id: 'vid-seq-1',
+      kind: 'video',
+      fileName: 'intro_shot.mp4',
+      url: 'blob:vid-seq-1',
+      width: 1920,
+      height: 1080,
+      videoDuration: 18.0,
+      defaultDurationSec: 18.0,
+    },
+    {
+      id: 'vid-seq-2',
+      kind: 'video',
+      fileName: 'chorus_shot.mp4',
+      url: 'blob:vid-seq-2',
+      width: 1920,
+      height: 1080,
+      videoDuration: 18.0,
+      defaultDurationSec: 18.0,
+    },
+    {
+      id: 'img-still-1',
+      kind: 'image',
+      fileName: 'frame.png',
+      url: 'blob:img-still-1',
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4.0,
+    },
+  ];
+
+  // Build synthetic 20s mono audio buffer at 8 kHz:
+  // quiet ambient intro [0..6s], loud rhythmic drop [6..14s], quiet outro [14..20s]
+  const sr = 8000;
+  const totalSec = 20;
+  const mono = new Float32Array(sr * totalSec);
+  for (let i = 0; i < mono.length; i++) {
+    const t = i / sr;
+    const isDrop = t >= 6 && t < 14;
+    const amp = isDrop ? 0.85 * (0.4 + 0.6 * Math.abs(Math.sin(Math.PI * 2 * t))) : 0.04;
+    mono[i] = amp * Math.sin(2 * Math.PI * (isDrop ? 110 : 220) * t);
+  }
+
+  const beats = Array.from({ length: 42 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats };
+
+  // Phrase energy curve should distinguish quiet intro/outro from energetic middle
+  const energy = computePhraseEnergyCurve(beats, 0, totalSec, mono, sr);
+  assert.ok(energy[2] < 0.35, `Expected calm intro energy < 0.35, got ${energy[2]}`);
+  assert.ok(energy[20] > 0.65, `Expected energetic drop energy > 0.65, got ${energy[20]}`);
+  assert.ok(energy[36] < 0.35, `Expected calm outro energy < 0.35, got ${energy[36]}`);
+
+  // 1. Auto-Rhythm mode: calm intro has longer crossfade clips; drop has shorter cuts; smooth scaling
+  let seed1 = 77;
+  const rng1 = () => {
+    seed1 = (seed1 * 1664525 + 1013904223) >>> 0;
+    return seed1 / 4294967296;
+  };
+  const autoPlan = generateAutoClipPlan(binItems, beatGrid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    hasAudio: true,
+    monoData: mono,
+    sampleRate: sr,
+    rng: rng1,
+  });
+
+  assert.ok(autoPlan.length >= 6);
+  const calmClips = autoPlan.filter((p) => p.startSec < 5.0 || p.startSec >= 14.5);
+  const dropClips = autoPlan.filter((p) => p.startSec >= 6.0 && p.startSec < 13.0);
+  assert.ok(calmClips.length >= 2 && dropClips.length >= 2);
+  const avgCalmDur = calmClips.reduce((s, p) => s + p.durationSec, 0) / calmClips.length;
+  const avgDropDur = dropClips.reduce((s, p) => s + p.durationSec, 0) / dropClips.length;
+  assert.ok(
+    avgCalmDur > avgDropDur,
+    `Expected calm clips (${avgCalmDur.toFixed(2)}s) > energetic drop clips (${avgDropDur.toFixed(2)}s)`
+  );
+  assert.ok(calmClips.every((p) => p.transitionOut === 'crossfade'));
+  for (const p of autoPlan) {
+    assert.equal(p.scaleStart, 1.0);
+    assert.ok(p.scaleEnd >= 1.0 && p.scaleEnd <= 1.04);
+    assert.ok(['crossfade', 'cut', 'zoom_cross'].includes(p.transitionOut));
+  }
+
+  // 2. Sequential mode: strictly preserves Media Library order & monotonically advances sourceStartSec
+  const seqPlan = generateAutoClipPlan(binItems, beatGrid, [], 0, totalSec, {
+    mode: 'sequential',
+    rhythm: 'beats_4',
+    hasAudio: true,
+  });
+  assert.ok(seqPlan.length >= 4);
+  assert.equal(seqPlan[0].binItemId, 'vid-seq-1');
+  assert.equal(seqPlan[1].binItemId, 'vid-seq-2');
+  assert.equal(seqPlan[2].binItemId, 'img-still-1');
+  assert.equal(seqPlan[3].binItemId, 'vid-seq-1');
+  const seqVid1Starts = seqPlan.filter((p) => p.binItemId === 'vid-seq-1').map((p) => p.sourceStartSec);
+  for (let i = 1; i < seqVid1Starts.length; i++) {
+    assert.ok(seqVid1Starts[i] > seqVid1Starts[i - 1]);
+  }
+  assert.equal(seqPlan.filter((p) => p.binItemId === 'img-still-1').length, 1);
+});
+
 test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
   assert.ok(STUDIO_CINEMA_PRESETS.length >= 5);
   for (const preset of STUDIO_CINEMA_PRESETS) {
@@ -554,5 +660,6 @@ test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
     assert.ok(preset.patch.mediaFilter !== undefined);
   }
 });
+
 
 
