@@ -1,6 +1,7 @@
 import {
   AudioFrameMetrics,
   BeatSyncMode,
+  MediaBinItem,
   SlideTransitionType,
   StudioConfig,
   VisualMediaState,
@@ -1290,5 +1291,254 @@ export function resolveOverlayWindow(
     endSec,
     relTime: Math.max(0, localTime - startSec),
   };
+}
+
+export type AutoClipRhythm = 'beats_1' | 'beats_2' | 'beats_4' | 'mixed';
+
+export interface AutoBeatSlicePlacement {
+  binItemId: string;
+  startSec: number;
+  durationSec: number;
+  sourceStartSec: number;
+  playbackRate: number;
+  transitionOut: SlideTransitionType;
+  transitionDurationSec: number;
+  scaleStart: number;
+  scaleEnd: number;
+}
+
+/**
+ * Generates a completely non-repeating, non-sequential random montage along musical beats.
+ * - Each image asset is used at most once.
+ * - Each video asset is sliced into strictly non-overlapping random time ranges without reusing any segment.
+ * - Avoids placing two consecutive slices from the same source asset whenever another asset is available.
+ * - Stops cleanly once unique footage is exhausted or target timeline limit is reached (never loops).
+ */
+export function generateRandomBeatAutoClips(
+  binItems: MediaBinItem[],
+  beatGrid: TrackBeatGrid,
+  manualMarkersAbs: number[],
+  trimStart: number,
+  maxTimelineSec: number,
+  options: {
+    rhythm?: AutoClipRhythm;
+    hasAudio?: boolean;
+    rng?: () => number;
+  } = {}
+): AutoBeatSlicePlacement[] {
+  if (binItems.length === 0) return [];
+  const rhythm = options.rhythm ?? 'mixed';
+  const hasAudio = options.hasAudio ?? true;
+  const rng = options.rng ?? Math.random;
+  const beatSec =
+    beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
+  const targetLimit = hasAudio ? Math.max(0.5, maxTimelineSec) : Math.max(60, maxTimelineSec);
+
+  const manualRel = manualMarkersAbs
+    .map((m) => Number((m - trimStart).toFixed(3)))
+    .filter((t) => t > 0.15 && t < targetLimit - 0.15)
+    .sort((a, b) => a - b);
+
+  let baseBeats: number[];
+  if (manualRel.length >= 2) {
+    baseBeats = [0, ...manualRel];
+  } else if (beatGrid.beats.length >= 2) {
+    baseBeats = [0, ...beatGrid.beats.filter((b) => b > 0.15 && b < targetLimit - 0.15)];
+  } else {
+    baseBeats = [0];
+  }
+  const beatTimes = Array.from(new Set(baseBeats.map((b) => Number(b.toFixed(3))))).sort(
+    (a, b) => a - b
+  );
+  if (beatTimes.length === 0 || beatTimes[0] > 0.05) {
+    beatTimes.unshift(0);
+  }
+  // Extrapolate beat grid smoothly out to targetLimit if needed
+  let lastBeat = beatTimes[beatTimes.length - 1];
+  while (lastBeat + beatSec < targetLimit + beatSec * 4 && beatTimes.length < 1500) {
+    lastBeat = Number((lastBeat + beatSec).toFixed(3));
+    beatTimes.push(lastBeat);
+  }
+
+  interface PoolImage {
+    kind: 'image';
+    binItem: MediaBinItem;
+    used: boolean;
+  }
+  interface PoolVideo {
+    kind: 'video';
+    binItem: MediaBinItem;
+    rate: number;
+    freeRanges: Array<[number, number]>;
+  }
+  type PoolAsset = PoolImage | PoolVideo;
+
+  const pool: PoolAsset[] = [];
+  for (const b of binItems) {
+    if (b.kind === 'image') {
+      pool.push({ kind: 'image', binItem: b, used: false });
+    } else {
+      const vDur = Math.max(0.5, b.videoDuration || b.defaultDurationSec || 10);
+      const rate = Math.max(0.25, Math.min(4, b.defaultPlaybackRate ?? 1.0));
+      const initStart = Math.max(
+        0,
+        Math.min(Math.max(0, vDur - 0.45), b.defaultSourceStartSec ?? 0)
+      );
+      if (vDur - initStart >= 0.45) {
+        pool.push({
+          kind: 'video',
+          binItem: b,
+          rate,
+          freeRanges: [[Number(initStart.toFixed(2)), Number(vDur.toFixed(2))]],
+        });
+      }
+    }
+  }
+
+  if (pool.length === 0) return [];
+
+  const minSliceMediaSec = 0.42;
+  const rhythmicTransitions: SlideTransitionType[] = [
+    'cut',
+    'crossfade',
+    'zoom_cross',
+    'wipe_right',
+    'slide',
+  ];
+
+  const pickDesiredBeatSteps = (): number[] => {
+    if (rhythm === 'beats_1') return [1];
+    if (rhythm === 'beats_2') return [2, 1];
+    if (rhythm === 'beats_4') return [4, 2, 1];
+    const roll = rng();
+    if (roll < 0.32) return [1, 2];
+    if (roll < 0.76) return [2, 1, 4];
+    return [4, 2, 1];
+  };
+
+  const placements: AutoBeatSlicePlacement[] = [];
+  let beatIdx = 0;
+  let lastBinItemId: string | null = null;
+  const maxPlacements = 400;
+
+  while (beatIdx < beatTimes.length - 1 && placements.length < maxPlacements) {
+    const startSec = beatTimes[beatIdx];
+    if (startSec >= targetLimit - 0.4) break;
+
+    const stepCandidates = pickDesiredBeatSteps();
+    let chosenResult: {
+      nextBeatIdx: number;
+      dur: number;
+      asset: PoolAsset;
+      sourceStartSec: number;
+      rate: number;
+    } | null = null;
+
+    for (const stepCount of stepCandidates) {
+      const nextIdx = Math.min(beatTimes.length - 1, beatIdx + stepCount);
+      if (nextIdx <= beatIdx) continue;
+      const rawEnd = Math.min(targetLimit, beatTimes[nextIdx]);
+      const dur = Number((rawEnd - startSec).toFixed(2));
+      if (dur < 0.4) continue;
+
+      const eligible: PoolAsset[] = [];
+      for (const entry of pool) {
+        if (entry.kind === 'image') {
+          if (!entry.used) eligible.push(entry);
+        } else {
+          const mediaNeed = dur * entry.rate;
+          const fits = entry.freeRanges.some(([rs, re]) => re - rs >= mediaNeed - 0.01);
+          if (fits) eligible.push(entry);
+        }
+      }
+
+      if (eligible.length === 0) continue;
+
+      const nonAdjacent: PoolAsset[] =
+        lastBinItemId && eligible.length > 1
+          ? eligible.filter((e) => e.binItem.id !== lastBinItemId)
+          : eligible;
+      const poolToPick: PoolAsset[] = nonAdjacent.length > 0 ? nonAdjacent : eligible;
+      const chosen: PoolAsset = poolToPick[Math.floor(rng() * poolToPick.length)];
+
+      if (chosen.kind === 'image') {
+        chosenResult = {
+          nextBeatIdx: nextIdx,
+          dur,
+          asset: chosen,
+          sourceStartSec: 0,
+          rate: 1.0,
+        };
+      } else {
+        const mediaNeed = dur * chosen.rate;
+        const fittingRanges: number[] = [];
+        for (let r = 0; r < chosen.freeRanges.length; r++) {
+          const [rs, re] = chosen.freeRanges[r];
+          if (re - rs >= mediaNeed - 0.01) fittingRanges.push(r);
+        }
+        const pickedRangeIdx = fittingRanges[Math.floor(rng() * fittingRanges.length)];
+        const [rs, re] = chosen.freeRanges[pickedRangeIdx];
+        const clampedNeed = Math.min(mediaNeed, re - rs);
+        const slack = Math.max(0, re - rs - clampedNeed);
+        const srcStart = Number((rs + rng() * slack).toFixed(2));
+        const srcEnd = Number((srcStart + clampedNeed).toFixed(2));
+
+        // Consume [srcStart .. srcEnd] from chosen range cleanly so segments never overlap
+        chosen.freeRanges.splice(pickedRangeIdx, 1);
+        if (srcStart - rs >= minSliceMediaSec) {
+          chosen.freeRanges.push([rs, srcStart]);
+        }
+        if (re - srcEnd >= minSliceMediaSec) {
+          chosen.freeRanges.push([srcEnd, re]);
+        }
+
+        const effectiveDur = Number(Math.min(dur, clampedNeed / chosen.rate).toFixed(2));
+        chosenResult = {
+          nextBeatIdx: nextIdx,
+          dur: Math.max(0.4, effectiveDur),
+          asset: chosen,
+          sourceStartSec: srcStart,
+          rate: chosen.rate,
+        };
+      }
+      break;
+    }
+
+    if (!chosenResult) {
+      break;
+    }
+
+    if (chosenResult.asset.kind === 'image') {
+      chosenResult.asset.used = true;
+    }
+
+    const idx = placements.length;
+    const trType =
+      rhythmicTransitions[Math.floor(rng() * rhythmicTransitions.length)];
+    const idealTrans =
+      trType === 'cut'
+        ? 0.1
+        : Number(
+            Math.max(0.14, Math.min(0.45, beatSec * 0.4, chosenResult.dur * 0.3)).toFixed(2)
+          );
+    const pushIn = idx % 2 === 0;
+
+    placements.push({
+      binItemId: chosenResult.asset.binItem.id,
+      startSec: Number(startSec.toFixed(2)),
+      durationSec: chosenResult.dur,
+      sourceStartSec: chosenResult.sourceStartSec,
+      playbackRate: chosenResult.rate,
+      transitionOut: chosenResult.asset.binItem.defaultTransitionOut ?? trType,
+      transitionDurationSec: idealTrans,
+      scaleStart: pushIn ? 1.0 : 1.08,
+      scaleEnd: pushIn ? 1.08 : 1.0,
+    });
+
+    lastBinItemId = chosenResult.asset.binItem.id;
+    beatIdx = chosenResult.nextBeatIdx;
+  }
+
+  return placements;
 }
 

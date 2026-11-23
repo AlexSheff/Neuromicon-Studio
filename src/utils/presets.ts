@@ -288,6 +288,121 @@ export const STUDIO_MOOD_PRESETS: StudioMoodPreset[] = [
   },
 ];
 
+export interface StudioCinemaPreset {
+  id: string;
+  nameRu: string;
+  nameEn: string;
+  descRu: string;
+  descEn: string;
+  swatch: [string, string];
+  patch: Partial<StudioConfig>;
+}
+
+export const STUDIO_CINEMA_PRESETS: StudioCinemaPreset[] = [
+  {
+    id: 'cinema_clean',
+    nameRu: 'Чистый оригинал',
+    nameEn: 'Clean Natural',
+    descRu: 'Естественная картинка без фильтров',
+    descEn: 'Natural footage without grading',
+    swatch: ['#94A3B8', '#E2E8F0'],
+    patch: {
+      lutPreset: 'none',
+      mediaFilter: 'none',
+      mediaBrightness: 1.0,
+      mediaBlur: 0,
+      vignetteAmount: 0.15,
+      scrimStrength: 0.2,
+      glitchStrength: 0,
+    },
+  },
+  {
+    id: 'kodak_35mm',
+    nameRu: 'Плёнка 35мм Тёплая',
+    nameEn: '35mm Warm Film',
+    descRu: 'Тёплое золотистое пленочное кино',
+    descEn: 'Warm golden analog film look',
+    swatch: ['#D97706', '#FDE68A'],
+    patch: {
+      lutPreset: 'vintage_gold',
+      mediaFilter: 'warm_film',
+      mediaBrightness: 1.02,
+      vignetteAmount: 0.44,
+      scrimStrength: 0.32,
+      glitchStrength: 0,
+      colorSchemeId: 'warm_copper',
+    },
+  },
+  {
+    id: 'blockbuster_teal_orange',
+    nameRu: 'Блокбастер T&O',
+    nameEn: 'Teal & Orange',
+    descRu: 'Голливудский контраст бирюзы и кожи',
+    descEn: 'Cinematic blockbuster contrast',
+    swatch: ['#0D9488', '#EA580C'],
+    patch: {
+      lutPreset: 'teal_orange',
+      mediaFilter: 'high_contrast',
+      mediaBrightness: 0.96,
+      vignetteAmount: 0.48,
+      scrimStrength: 0.36,
+      glitchStrength: 0,
+      colorSchemeId: 'obsidian_amber',
+    },
+  },
+  {
+    id: 'noir_silver',
+    nameRu: 'Нуар Ч/Б Кино',
+    nameEn: 'Silver Noir B&W',
+    descRu: 'Глубокий монохром с виньеткой',
+    descEn: 'High-contrast monochrome cinema',
+    swatch: ['#18181B', '#D4D4D8'],
+    patch: {
+      lutPreset: 'none',
+      mediaFilter: 'bw',
+      mediaBrightness: 0.96,
+      vignetteAmount: 0.58,
+      scrimStrength: 0.42,
+      glitchStrength: 0,
+      colorSchemeId: 'monochrome_silver',
+    },
+  },
+  {
+    id: 'anamorphic_night',
+    nameRu: 'Ночной Анаморф',
+    nameEn: 'Anamorphic Night',
+    descRu: 'Холодные сумерки и глубокие тени',
+    descEn: 'Moody midnight cool grading',
+    swatch: ['#0F4C81', '#38BDF8'],
+    patch: {
+      lutPreset: 'deep_ocean',
+      mediaFilter: 'cool_noir',
+      mediaBrightness: 0.94,
+      vignetteAmount: 0.5,
+      scrimStrength: 0.4,
+      glitchStrength: 0,
+      colorSchemeId: 'cobalt_ice',
+    },
+  },
+  {
+    id: 'blade_neon',
+    nameRu: 'Неон Кибер-Фильм',
+    nameEn: 'Neon Blade Film',
+    descRu: 'Ночной неон маджента + циан',
+    descEn: 'Vibrant magenta & cyan nightlife',
+    swatch: ['#C026D3', '#0EA5E9'],
+    patch: {
+      lutPreset: 'cyber_magenta',
+      mediaFilter: 'high_contrast',
+      mediaBrightness: 0.95,
+      vignetteAmount: 0.45,
+      scrimStrength: 0.38,
+      glitchStrength: 0.12,
+      colorSchemeId: 'cobalt_ice',
+    },
+  },
+];
+
 export function resolveColorScheme(
   id: ColorSchemeId,
   customTextColor: string,

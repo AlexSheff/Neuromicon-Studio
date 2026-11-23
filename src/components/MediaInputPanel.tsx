@@ -1,9 +1,8 @@
 import {
-  ArrowDown,
   ArrowLeftRight,
-  ArrowUp,
   Copy,
   Download,
+  Eye,
   Film,
   GripVertical,
   Image as ImageIcon,
@@ -13,13 +12,14 @@ import {
   Plus,
   RotateCcw,
   Scissors,
+  Shuffle,
   SlidersHorizontal,
   Sparkles,
   Subtitles,
   Trash2,
   Upload,
 } from 'lucide-react';
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
@@ -36,8 +36,9 @@ import {
   TrimPresetId,
   VisualMediaState,
 } from '../types/studio';
-import { getTimelineSpanSec } from '../utils/audioAnalyzer';
+import { AutoClipRhythm, getTimelineSpanSec } from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
+import { MediaPreviewModal } from './MediaPreviewModal';
 
 type MediaPanelTab = 'media' | 'layers' | 'timing';
 
@@ -57,6 +58,12 @@ interface MediaInputPanelProps {
     options?: { atTimeSec?: number; mode?: 'playhead' | 'end' | 'exact' }
   ) => void;
   onAddAllBinToTimeline: () => void;
+  onUpdateBinItem: (
+    binItemId: string,
+    patch: Partial<MediaBinItem>,
+    syncPlacedClips?: boolean
+  ) => void;
+  onCreateRandomBeatAutoClip: (rhythm: AutoClipRhythm) => void;
   onRemoveBinItem: (binItemId: string) => void;
   onClearBin: () => void;
   onAddGeneratorScene: (
@@ -65,8 +72,8 @@ interface MediaInputPanelProps {
   ) => void;
   onSelectClip: (id: string) => void;
   onInspectClip: (id: string) => void;
-  onDuplicateClip: (id: string) => void;
-  onMoveVisual: (index: number, direction: -1 | 1) => void;
+  onDuplicateClip?: (id: string) => void;
+  onMoveVisual?: (index: number, direction: -1 | 1) => void;
   onReverseClips: () => void;
   onRemoveVisual: (id: string) => void;
   onClearVisuals: () => void;
@@ -110,13 +117,13 @@ export function MediaInputPanel({
   onVisualFiles,
   onAddBinItemToTimeline,
   onAddAllBinToTimeline,
+  onUpdateBinItem,
+  onCreateRandomBeatAutoClip,
   onRemoveBinItem,
   onClearBin,
   onAddGeneratorScene,
   onSelectClip,
   onInspectClip,
-  onDuplicateClip,
-  onMoveVisual,
   onReverseClips,
   onRemoveVisual,
   onClearVisuals,
@@ -145,18 +152,40 @@ export function MediaInputPanel({
   const visualInputRef = useRef<HTMLInputElement>(null);
   const srtInputRef = useRef<HTMLInputElement>(null);
   const overlayImgInputRef = useRef<HTMLInputElement>(null);
+  const panelDragDepthRef = useRef(0);
 
   const [panelTab, setPanelTab] = useState<MediaPanelTab>('media');
   const [audioDragOver, setAudioDragOver] = useState(false);
   const [visualDragOver, setVisualDragOver] = useState(false);
+  const [panelFileDragOver, setPanelFileDragOver] = useState(false);
+  const [expandedBinId, setExpandedBinId] = useState<string | null>(null);
+  const [previewBinId, setPreviewBinId] = useState<string | null>(null);
+  const [autoRhythm, setAutoRhythm] = useState<AutoClipRhythm>('mixed');
   const [genToAdd, setGenToAdd] = useState<Exclude<GeneratorEffectId, 'none'>>('galaxy_spiral');
   const [syncWithMotion, setSyncWithMotion] = useState(true);
   const [srtDraft, setSrtDraft] = useState('');
 
   const selectedClip = mediaItems.find((c) => c.id === selectedClipId) || mediaItems[0] || null;
+  const previewAsset = previewBinId
+    ? mediaBin.find((b) => b.id === previewBinId) || null
+    : null;
+
+  const timelineClipsByUrl = useMemo(() => {
+    const map = new Map<string, VisualMediaState[]>();
+    for (const clip of mediaItems) {
+      if (!clip.url) continue;
+      const list = map.get(clip.url) || [];
+      list.push(clip);
+      map.set(clip.url, list);
+    }
+    return map;
+  }, [mediaItems]);
 
   const handleAudioDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    panelDragDepthRef.current = 0;
+    setPanelFileDragOver(false);
     setAudioDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) onAudioFile(file);
@@ -164,9 +193,69 @@ export function MediaInputPanel({
 
   const handleVisualDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    panelDragDepthRef.current = 0;
+    setPanelFileDragOver(false);
     setVisualDragOver(false);
     const files = Array.from(e.dataTransfer.files || []);
     if (files.length > 0) onVisualFiles(files);
+  };
+
+  const handlePanelDragEnter = (e: React.DragEvent) => {
+    if (
+      !e.dataTransfer.types.includes('Files') ||
+      e.dataTransfer.types.includes('application/x-neuromicon-bin-id')
+    ) {
+      return;
+    }
+    panelDragDepthRef.current += 1;
+    setPanelFileDragOver(true);
+  };
+
+  const handlePanelDragOver = (e: React.DragEvent) => {
+    if (
+      !e.dataTransfer.types.includes('Files') ||
+      e.dataTransfer.types.includes('application/x-neuromicon-bin-id')
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handlePanelDragLeave = (e: React.DragEvent) => {
+    if (
+      !e.dataTransfer.types.includes('Files') ||
+      e.dataTransfer.types.includes('application/x-neuromicon-bin-id')
+    ) {
+      return;
+    }
+    panelDragDepthRef.current = Math.max(0, panelDragDepthRef.current - 1);
+    if (panelDragDepthRef.current === 0 || !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      panelDragDepthRef.current = 0;
+      setPanelFileDragOver(false);
+    }
+  };
+
+  const handlePanelDrop = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes('application/x-neuromicon-bin-id')) return;
+    const files = Array.from(e.dataTransfer.files || []);
+    panelDragDepthRef.current = 0;
+    setPanelFileDragOver(false);
+    if (files.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const audioOnly = files.every(
+      (f) =>
+        f.type.startsWith('audio/') ||
+        /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(f.name)
+    );
+    if (audioOnly) {
+      onAudioFile(files[0]);
+    } else {
+      onVisualFiles(files);
+      setPanelTab('media');
+    }
   };
 
   const trimPresets: { id: TrimPresetId; label: string }[] = [
@@ -183,8 +272,20 @@ export function MediaInputPanel({
     <aside
       id="media-panel"
       style={widthPx ? { ['--panel-w' as string]: `${widthPx}px` } : undefined}
-      className="w-full lg:w-[var(--panel-w,310px)] shrink-0 border-b lg:border-b-0 lg:border-r border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
+      onDragEnter={handlePanelDragEnter}
+      onDragOver={handlePanelDragOver}
+      onDragLeave={handlePanelDragLeave}
+      onDrop={handlePanelDrop}
+      className="relative w-full lg:w-[var(--panel-w,310px)] shrink-0 border-b lg:border-b-0 lg:border-r border-[#262B38] bg-[#10131A] flex flex-col lg:overflow-hidden"
     >
+      {panelFileDragOver && (
+        <div className="absolute inset-1.5 z-30 rounded-lg border-2 border-dashed border-amber-400 bg-[#10131A]/90 backdrop-blur-sm flex flex-col items-center justify-center p-5 text-center pointer-events-none">
+          <Upload className="w-7 h-7 text-amber-400 mb-2 animate-bounce" aria-hidden="true" />
+          <p className="text-xs font-semibold text-amber-200 leading-snug">
+            {t.binDropZoneOverlay}
+          </p>
+        </div>
+      )}
       {/* Left Panel 3-Tab Header */}
       <div className="p-2 border-b border-[#262B38] bg-[#0E1016] grid grid-cols-3 gap-1 shrink-0">
         <button
@@ -402,100 +503,359 @@ export function MediaInputPanel({
               )}
 
               {mediaBin.length > 0 && (
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   <p className="text-[10px] text-gray-400 leading-tight">{t.binDragHint}</p>
-                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
-                    {mediaBin.map((asset) => (
-                      <div
-                        key={asset.id}
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData('application/x-neuromicon-bin-id', asset.id);
-                          e.dataTransfer.effectAllowed = 'copy';
-                        }}
-                        className="rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/55 p-1.5 flex items-center gap-1.5 cursor-grab active:cursor-grabbing transition-colors group"
-                      >
-                        <GripVertical
-                          className="w-3 h-3 text-gray-500 group-hover:text-amber-300 shrink-0"
-                          aria-hidden="true"
-                        />
-                        <div className="w-8 h-8 rounded bg-black/50 overflow-hidden shrink-0 border border-[#262B38] flex items-center justify-center">
-                          {asset.kind === 'image' ? (
-                            <img
-                              src={asset.url}
-                              alt={asset.fileName}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover pointer-events-none"
+                  <div className="space-y-1.5">
+                    {mediaBin.map((asset) => {
+                      const placedClips = timelineClipsByUrl.get(asset.url) || [];
+                      const isUsed = placedClips.length > 0;
+                      const isSelectedAsset = Boolean(selectedClip && selectedClip.url === asset.url);
+                      const isExpanded = expandedBinId === asset.id;
+                      const maxV = Math.max(0.5, asset.videoDuration || asset.defaultDurationSec || 10);
+                      return (
+                        <div
+                          key={asset.id}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData('application/x-neuromicon-bin-id', asset.id);
+                            e.dataTransfer.effectAllowed = 'copy';
+                          }}
+                          className={`rounded-md border transition-colors ${
+                            isSelectedAsset
+                              ? 'border-amber-400/80 bg-amber-500/10'
+                              : isUsed
+                                ? 'border-emerald-500/45 bg-emerald-950/15 hover:border-emerald-400/75'
+                                : 'border-[#262B38] bg-[#141821] hover:border-amber-500/55'
+                          }`}
+                        >
+                          <div className="p-1.5 flex items-center gap-1.5 cursor-grab active:cursor-grabbing group">
+                            <GripVertical
+                              className="w-3 h-3 text-gray-500 group-hover:text-amber-300 shrink-0"
+                              aria-hidden="true"
                             />
-                          ) : (
-                            <video
-                              src={asset.url}
-                              muted
-                              className="w-full h-full object-cover pointer-events-none"
-                            />
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPreviewBinId(asset.id);
+                              }}
+                              title={t.binPreviewBtn}
+                              className="w-9 h-9 rounded bg-black/50 overflow-hidden shrink-0 border border-[#262B38] hover:border-amber-400 flex items-center justify-center relative cursor-pointer"
+                            >
+                              {asset.kind === 'image' ? (
+                                <img
+                                  src={asset.url}
+                                  alt={asset.fileName}
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full object-cover pointer-events-none"
+                                />
+                              ) : (
+                                <video
+                                  src={asset.url}
+                                  muted
+                                  className="w-full h-full object-cover pointer-events-none"
+                                />
+                              )}
+                            </button>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1 min-w-0">
+                                <p
+                                  className="text-[11px] font-medium text-gray-100 truncate"
+                                  title={asset.fileName}
+                                >
+                                  {asset.fileName}
+                                </p>
+                              </div>
+                              <div className="text-[9.5px] text-gray-400 font-mono tabular-nums flex flex-wrap items-center gap-1 mt-0.5">
+                                {asset.kind === 'video' && (
+                                  <Film className="w-2.5 h-2.5 text-amber-400 shrink-0" aria-hidden="true" />
+                                )}
+                                <span className="text-amber-300">{asset.defaultDurationSec.toFixed(1)}s</span>
+                                {(asset.defaultSourceStartSec ?? 0) > 0.05 && (
+                                  <span className="text-cyan-300">in {asset.defaultSourceStartSec!.toFixed(1)}s</span>
+                                )}
+                                {isUsed && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onSelectClip(placedClips[0].id);
+                                      onInspectClip(placedClips[0].id);
+                                    }}
+                                    className="px-1 py-0.2 rounded bg-emerald-500/20 border border-emerald-500/45 text-[9px] font-sans font-semibold text-emerald-300 hover:bg-emerald-500/30 cursor-pointer"
+                                  >
+                                    {t.binUsedBadge}
+                                    {placedClips.length > 1 ? ` ×${placedClips.length}` : ''}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div
+                              className="flex items-center gap-0.5 shrink-0"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setPreviewBinId(asset.id)}
+                                title={t.binPreviewBtn}
+                                aria-label={t.binPreviewBtn}
+                                className="p-1 rounded text-gray-400 hover:text-cyan-300 cursor-pointer"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedBinId((prev) => (prev === asset.id ? null : asset.id))
+                                }
+                                title={t.binFileSettingsBtn}
+                                aria-label={t.binFileSettingsBtn}
+                                className={`p-1 rounded cursor-pointer ${
+                                  isExpanded
+                                    ? 'text-amber-300 bg-amber-500/15'
+                                    : 'text-gray-400 hover:text-amber-300'
+                                }`}
+                              >
+                                <SlidersHorizontal className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onAddBinItemToTimeline(asset.id, { mode: 'playhead' })}
+                                title={t.binPlaceAtPlayhead}
+                                className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#0E1016] hover:border-amber-500/70 text-[10px] font-medium text-amber-300 cursor-pointer whitespace-nowrap"
+                              >
+                                +
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onRemoveBinItem(asset.id)}
+                                aria-label={t.binRemoveAssetAria}
+                                title={t.binRemoveAssetAria}
+                                className="p-0.5 text-gray-500 hover:text-rose-400 cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Expandable Inline File Settings */}
+                          {isExpanded && (
+                            <div
+                              className="px-2 pb-2 pt-1.5 border-t border-[#262B38]/80 bg-[#0E1016]/70 space-y-2"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <label className="space-y-0.5 block">
+                                  <span className="text-[9.5px] text-gray-400 block">
+                                    {t.clipDurationLabel}
+                                  </span>
+                                  <input
+                                    type="number"
+                                    min={0.4}
+                                    max={600}
+                                    step={0.5}
+                                    value={Number(asset.defaultDurationSec.toFixed(1))}
+                                    onChange={(e) => {
+                                      const val = Math.max(
+                                        0.4,
+                                        Math.min(600, Number(e.target.value) || 0.5)
+                                      );
+                                      onUpdateBinItem(asset.id, { defaultDurationSec: val }, false);
+                                    }}
+                                    className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
+                                  />
+                                </label>
+
+                                {asset.kind === 'video' ? (
+                                  <label className="space-y-0.5 block">
+                                    <span className="text-[9.5px] text-gray-400 block">
+                                      {t.clipVideoStartLabel}
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={Math.max(0, maxV - 0.4)}
+                                      step={0.2}
+                                      value={Number((asset.defaultSourceStartSec ?? 0).toFixed(1))}
+                                      onChange={(e) => {
+                                        const val = Math.max(
+                                          0,
+                                          Math.min(maxV - 0.4, Number(e.target.value) || 0)
+                                        );
+                                        onUpdateBinItem(
+                                          asset.id,
+                                          { defaultSourceStartSec: val },
+                                          false
+                                        );
+                                      }}
+                                      className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-gray-100"
+                                    />
+                                  </label>
+                                ) : (
+                                  <label className="space-y-0.5 block">
+                                    <span className="text-[9.5px] text-gray-400 block">
+                                      {t.clipTransitionLabel}
+                                    </span>
+                                    <select
+                                      value={asset.defaultTransitionOut ?? 'crossfade'}
+                                      onChange={(e) =>
+                                        onUpdateBinItem(
+                                          asset.id,
+                                          {
+                                            defaultTransitionOut: e.target.value as SlideTransitionType,
+                                          },
+                                          false
+                                        )
+                                      }
+                                      className="w-full rounded bg-[#141821] border border-[#262B38] px-1 py-0.5 text-[10.5px] text-gray-100"
+                                    >
+                                      <option value="crossfade">{t.transitionCrossfade}</option>
+                                      <option value="zoom_cross">{t.transitionZoomCross}</option>
+                                      <option value="wipe_right">{t.transitionWipeRight}</option>
+                                      <option value="dip_black">{t.transitionDipBlack}</option>
+                                      <option value="slide">{t.transitionSlide}</option>
+                                      <option value="cut">{t.transitionCut}</option>
+                                    </select>
+                                  </label>
+                                )}
+                              </div>
+
+                              {asset.kind === 'video' && (
+                                <div className="grid grid-cols-2 gap-1.5 items-center">
+                                  <label className="space-y-0.5 block">
+                                    <span className="text-[9.5px] text-gray-400 block">
+                                      {t.clipSpeedLabel}
+                                    </span>
+                                    <select
+                                      value={asset.defaultPlaybackRate ?? 1.0}
+                                      onChange={(e) =>
+                                        onUpdateBinItem(
+                                          asset.id,
+                                          { defaultPlaybackRate: Number(e.target.value) },
+                                          false
+                                        )
+                                      }
+                                      className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-gray-100"
+                                    >
+                                      {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
+                                        <option key={spd} value={spd}>
+                                          {spd}×
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <label className="flex items-center gap-1.5 text-[10.5px] text-gray-300 cursor-pointer pt-3">
+                                    <input
+                                      type="checkbox"
+                                      checked={asset.defaultClipAudioMuted ?? Boolean(audio)}
+                                      onChange={(e) =>
+                                        onUpdateBinItem(
+                                          asset.id,
+                                          { defaultClipAudioMuted: e.target.checked },
+                                          false
+                                        )
+                                      }
+                                      className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                                    />
+                                    <span>{t.clipMuteLabel}</span>
+                                  </label>
+                                </div>
+                              )}
+
+                              <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => onAddBinItemToTimeline(asset.id, { mode: 'end' })}
+                                  className="px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-[10px] font-medium text-cyan-200 cursor-pointer"
+                                >
+                                  {t.binPlaceAtEnd}
+                                </button>
+                                {isUsed && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onUpdateBinItem(
+                                        asset.id,
+                                        {
+                                          defaultDurationSec: asset.defaultDurationSec,
+                                          defaultSourceStartSec: asset.defaultSourceStartSec,
+                                          defaultPlaybackRate: asset.defaultPlaybackRate,
+                                          defaultTransitionOut: asset.defaultTransitionOut,
+                                          defaultClipAudioMuted: asset.defaultClipAudioMuted,
+                                        },
+                                        true
+                                      )
+                                    }
+                                    className="px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 text-[10px] font-medium text-emerald-200 cursor-pointer"
+                                  >
+                                    {t.binApplyPlacedBtn}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
                           )}
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <p
-                            className="text-[11px] font-medium text-gray-100 truncate"
-                            title={asset.fileName}
-                          >
-                            {asset.fileName}
-                          </p>
-                          <p className="text-[9.5px] text-gray-400 font-mono tabular-nums flex items-center gap-1">
-                            {asset.kind === 'video' && (
-                              <Film className="w-2.5 h-2.5 text-amber-400" aria-hidden="true" />
-                            )}
-                            <span>{asset.defaultDurationSec.toFixed(1)}s</span>
-                            <span>·</span>
-                            <span>
-                              {asset.width}×{asset.height}
-                            </span>
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => onAddBinItemToTimeline(asset.id, { mode: 'playhead' })}
-                            title={t.binPlaceAtPlayhead}
-                            className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#0E1016] hover:border-amber-500/70 text-[10px] font-medium text-amber-300 cursor-pointer whitespace-nowrap"
-                          >
-                            +
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onAddBinItemToTimeline(asset.id, { mode: 'end' })}
-                            title={t.binPlaceAtEnd}
-                            className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[10px] font-medium text-gray-300 hover:text-cyan-200 cursor-pointer whitespace-nowrap"
-                          >
-                            {t.binPlaceAtEnd}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onRemoveBinItem(asset.id)}
-                            aria-label={t.binRemoveAssetAria}
-                            title={t.binRemoveAssetAria}
-                            className="p-0.5 text-gray-500 hover:text-rose-400 cursor-pointer"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Random Non-Repeating Beat Auto-Clip Generator */}
+                  <div className="rounded-lg border border-amber-500/35 bg-[#151A25] p-2.5 space-y-2 mt-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <h3 className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
+                          <Shuffle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                          <span className="truncate">{t.binAutoClipTitle}</span>
+                        </h3>
+                        <p className="text-[10px] text-gray-400 leading-snug mt-0.5">
+                          {t.binAutoClipDesc}
+                        </p>
                       </div>
-                    ))}
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1">
+                      {(
+                        [
+                          { id: 'beats_1', label: '1 beat' },
+                          { id: 'beats_2', label: '2 beats' },
+                          { id: 'beats_4', label: '4 beats' },
+                          { id: 'mixed', label: t.autoClipMixed },
+                        ] as { id: AutoClipRhythm; label: string }[]
+                      ).map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setAutoRhythm(r.id)}
+                          className={`py-1 px-1 rounded border text-[10px] font-medium cursor-pointer truncate ${
+                            autoRhythm === r.id
+                              ? 'border-amber-500/80 bg-amber-500/20 text-amber-200'
+                              : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
+                          }`}
+                        >
+                          {r.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => onCreateRandomBeatAutoClip(autoRhythm)}
+                      className="w-full py-1.5 px-3 rounded-md border border-amber-500/70 bg-amber-500/18 hover:bg-amber-500/28 text-xs font-semibold text-amber-200 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                      <span>{t.binAutoClipBtn}</span>
+                    </button>
                   </div>
                 </div>
               )}
             </section>
 
-            {/* Generative Scenes + Timeline Clips Overview */}
+            {/* Generative 3D/Shader Scenes Quick-Add */}
             <section className="p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold text-gray-100 flex items-center gap-1.5 min-w-0">
-                  <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
-                  <span className="truncate">
-                    {t.timelineClipsListTitle}
-                    {mediaItems.length > 0 ? ` (${mediaItems.length})` : ''}
-                  </span>
+                  <Orbit className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
+                  <span className="truncate">{t.binScenesTitle}</span>
                 </h2>
                 {mediaItems.length > 0 && (
                   <button
@@ -549,116 +909,6 @@ export function MediaInputPanel({
                   </button>
                 )}
               </div>
-
-              {mediaItems.length > 0 && (
-                <div className="space-y-1.5 pt-1">
-                  {mediaItems.map((item, idx) => {
-                    const isSelected = selectedClip?.id === item.id;
-                    const explicitStart = item.startSec;
-                    return (
-                      <div
-                        key={item.id}
-                        onClick={() => onSelectClip(item.id)}
-                        className={`rounded-md border p-2 flex items-center gap-2 cursor-pointer transition-colors ${
-                          isSelected
-                            ? 'border-amber-500/80 bg-amber-500/10'
-                            : 'border-[#262B38] bg-[#141821] hover:border-gray-500'
-                        }`}
-                      >
-                        <span className="text-[10px] font-mono tabular-nums text-gray-500 w-4 text-center shrink-0">
-                          {idx + 1}
-                        </span>
-                        <div className="w-9 h-9 rounded bg-black/50 overflow-hidden shrink-0 border border-[#262B38] flex items-center justify-center">
-                          {item.kind === 'image' ? (
-                            <img
-                              src={item.url}
-                              alt={item.fileName}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : item.kind === 'video' ? (
-                            <video src={item.url} muted className="w-full h-full object-cover" />
-                          ) : (
-                            <Orbit className="w-4 h-4 text-amber-400" aria-hidden="true" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-medium text-gray-100 truncate" title={item.fileName}>
-                            {item.fileName}
-                          </p>
-                          <p className="text-[10px] text-gray-400 font-mono tabular-nums flex items-center gap-1 mt-0.5">
-                            {item.kind === 'video' && <Film className="w-2.5 h-2.5 text-amber-400" />}
-                            {config.slideshowMode === 'manual' && explicitStart !== undefined && (
-                              <span className="text-gray-300">
-                                {explicitStart.toFixed(1)}–{(explicitStart + item.durationSec).toFixed(1)}s ·
-                              </span>
-                            )}
-                            <span className="text-amber-300">{item.durationSec.toFixed(1)}s</span>
-                            {item.overlayEffect && (
-                              <span className="px-1 rounded bg-cyan-500/20 border border-cyan-500/40 text-[9px] text-cyan-200">
-                                FX
-                              </span>
-                            )}
-                          </p>
-                        </div>
-                        <div
-                          className="flex items-center gap-0.5 shrink-0"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            onClick={() => onInspectClip(item.id)}
-                            title={t.inspectClipBtn}
-                            aria-label={t.inspectClipBtn}
-                            className="p-1 rounded text-gray-400 hover:text-amber-300 cursor-pointer"
-                          >
-                            <SlidersHorizontal className="w-3.5 h-3.5" />
-                          </button>
-                          {config.slideshowMode !== 'manual' && (
-                            <>
-                              <button
-                                type="button"
-                                disabled={idx === 0}
-                                onClick={() => onMoveVisual(idx, -1)}
-                                aria-label="Move up"
-                                className="p-1 rounded text-gray-400 hover:text-gray-100 disabled:opacity-25 cursor-pointer"
-                              >
-                                <ArrowUp className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                disabled={idx === mediaItems.length - 1}
-                                onClick={() => onMoveVisual(idx, 1)}
-                                aria-label="Move down"
-                                className="p-1 rounded text-gray-400 hover:text-gray-100 disabled:opacity-25 cursor-pointer"
-                              >
-                                <ArrowDown className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => onDuplicateClip(item.id)}
-                            aria-label={t.duplicateClipLabel}
-                            title={t.duplicateClipLabel}
-                            className="p-1 rounded text-gray-400 hover:text-amber-300 cursor-pointer"
-                          >
-                            <Copy className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onRemoveVisual(item.id)}
-                            aria-label="Remove clip"
-                            className="p-1 rounded text-gray-400 hover:text-rose-400 cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
             </section>
           </>
         )}
@@ -1429,6 +1679,18 @@ export function MediaInputPanel({
           </>
         )}
       </div>
+
+      {previewAsset && (
+        <MediaPreviewModal
+          lang={lang}
+          asset={previewAsset}
+          placedCount={(timelineClipsByUrl.get(previewAsset.url) || []).length}
+          hasMasterAudio={Boolean(audio)}
+          onClose={() => setPreviewBinId(null)}
+          onSaveDefaults={onUpdateBinItem}
+          onPlaceOnTimeline={(binId, mode) => onAddBinItemToTimeline(binId, { mode })}
+        />
+      )}
     </aside>
   );
 }

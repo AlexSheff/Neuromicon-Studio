@@ -200,6 +200,10 @@ export interface MediaBinItem {
   videoDuration?: number;
   decodedAudioBuffer?: AudioBuffer;
   defaultDurationSec: number;
+  defaultSourceStartSec?: number;
+  defaultPlaybackRate?: number;
+  defaultTransitionOut?: SlideTransitionType;
+  defaultClipAudioMuted?: boolean;
 }
 
 export interface VisualMediaState {

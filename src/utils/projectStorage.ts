@@ -23,6 +23,10 @@ export interface SerializedBinItem {
   height: number;
   videoDuration?: number;
   defaultDurationSec: number;
+  defaultSourceStartSec?: number;
+  defaultPlaybackRate?: number;
+  defaultTransitionOut?: SlideTransitionType;
+  defaultClipAudioMuted?: boolean;
   blobKey?: string;
 }
 
@@ -229,6 +233,10 @@ export function serializeStudioState(
       height: b.height,
       videoDuration: b.videoDuration,
       defaultDurationSec: b.defaultDurationSec,
+      defaultSourceStartSec: b.defaultSourceStartSec,
+      defaultPlaybackRate: b.defaultPlaybackRate,
+      defaultTransitionOut: b.defaultTransitionOut,
+      defaultClipAudioMuted: b.defaultClipAudioMuted,
       blobKey: b.url ? blobKeyMap.get(b.url) : undefined,
     })),
     clips: mediaItems.map((m) => ({

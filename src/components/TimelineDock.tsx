@@ -1563,6 +1563,69 @@ export function TimelineDock({
             >
               <div
                 ref={seqInnerRef}
+                onDragOver={(e) => {
+                  const hasBin = e.dataTransfer.types.includes('application/x-neuromicon-bin-id');
+                  const hasFiles = e.dataTransfer.types.includes('Files');
+                  if (!hasBin && !hasFiles) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  const rect = seqInnerRef.current?.getBoundingClientRect();
+                  if (!rect || rect.width <= 0) return;
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
+                  const overExisting =
+                    config.slideshowMode === 'manual' &&
+                    clipSegments.some(
+                      (s) => rawSec >= s.startSec - 0.08 && rawSec <= s.endSec + 0.08
+                    );
+                  if (overExisting) {
+                    setClipDropPreview({ pct: playheadPct, anchoredToPlayhead: true });
+                    return;
+                  }
+                  let snappedSec = rawSec;
+                  if (config.snapToBeats && relSnapPoints.length > 0) {
+                    snappedSec = snapTimeToBeat(rawSec, relSnapPoints, 0.22);
+                  }
+                  setClipDropPreview({
+                    pct: Math.max(0, Math.min(100, (snappedSec / clipDuration) * 100)),
+                    anchoredToPlayhead: false,
+                  });
+                }}
+                onDragLeave={(e) => {
+                  if (
+                    e.currentTarget === e.target ||
+                    !e.currentTarget.contains(e.relatedTarget as Node | null)
+                  ) {
+                    setClipDropPreview(null);
+                  }
+                }}
+                onDrop={(e) => {
+                  const binId = e.dataTransfer.getData('application/x-neuromicon-bin-id');
+                  const files = Array.from(e.dataTransfer.files || []);
+                  if (!binId && files.length === 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setClipDropPreview(null);
+                  const rect = seqInnerRef.current?.getBoundingClientRect();
+                  let finalSec = localTime;
+                  if (rect && rect.width > 0) {
+                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                    const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
+                    finalSec =
+                      config.snapToBeats && relSnapPoints.length > 0
+                        ? Math.max(0, Number(snapTimeToBeat(rawSec, relSnapPoints, 0.22).toFixed(2)))
+                        : rawSec;
+                  }
+                  if (binId && onDropBinItemToTimeline) {
+                    onDropBinItemToTimeline(binId, finalSec);
+                  } else if (files.length > 0) {
+                    if (onDropFilesToTimeline) {
+                      onDropFilesToTimeline(files, finalSec);
+                    } else {
+                      onVisualFiles(files);
+                    }
+                  }
+                }}
                 className="relative flex flex-col select-none"
                 style={{ width: `${timelineZoom * 100}%`, minWidth: '100%' }}
               >
@@ -1679,7 +1742,11 @@ export function TimelineDock({
                             handleSeqScrubPointerDown(e);
                           }
                         }}
-                        className="relative bg-[#0B0D11]"
+                        className={`relative transition-colors ${
+                          clipDropPreview !== null
+                            ? 'bg-amber-500/10 ring-1 ring-inset ring-amber-400/70'
+                            : 'bg-[#0B0D11]'
+                        }`}
                       >
                         {clipDropPreview !== null && (
                           <div

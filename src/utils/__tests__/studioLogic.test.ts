@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { StudioConfig, VisualMediaState } from '../../types/studio';
+import { MediaBinItem, StudioConfig, VisualMediaState } from '../../types/studio';
 import {
   clampManualClipMove,
   computeAutoBeatAlignedClips,
@@ -8,6 +8,7 @@ import {
   computeFadeEnvelope,
   detectTrackBpmAndBeats,
   findManualInsertionSlot,
+  generateRandomBeatAutoClips,
   getTimelineSpanSec,
   insertManualClipAtAnchor,
   packTimelineLanes,
@@ -17,7 +18,11 @@ import {
   snapTimeToBeat,
 } from '../audioAnalyzer';
 import { parseID3Tags } from '../id3Parser';
-import { DEFAULT_CLIP_TRANSFORM, DEFAULT_STUDIO_CONFIG } from '../presets';
+import {
+  DEFAULT_CLIP_TRANSFORM,
+  DEFAULT_STUDIO_CONFIG,
+  STUDIO_CINEMA_PRESETS,
+} from '../presets';
 import {
   hexToHueDeg,
   hsvToHex,
@@ -439,4 +444,115 @@ test('insertManualClipAtAnchor attaches overlapping clip right of playhead witho
   assert.equal(customSegs[0].endSec, 4);
   assert.equal(customSegs[0].isLoopRepeat, false);
 });
+
+test('generateRandomBeatAutoClips creates non-repeating, non-sequential beat slices without overlapping source ranges', () => {
+  const binItems: MediaBinItem[] = [
+    {
+      id: 'vid-1',
+      kind: 'video',
+      fileName: 'concert.mp4',
+      url: 'blob:vid-1',
+      width: 1920,
+      height: 1080,
+      videoDuration: 12.0,
+      defaultDurationSec: 12.0,
+    },
+    {
+      id: 'vid-2',
+      kind: 'video',
+      fileName: 'stage.mp4',
+      url: 'blob:vid-2',
+      width: 1920,
+      height: 1080,
+      videoDuration: 10.0,
+      defaultDurationSec: 10.0,
+    },
+    {
+      id: 'img-1',
+      kind: 'image',
+      fileName: 'cover.png',
+      url: 'blob:img-1',
+      width: 1080,
+      height: 1080,
+      defaultDurationSec: 4.0,
+    },
+    {
+      id: 'img-2',
+      kind: 'image',
+      fileName: 'poster.jpg',
+      url: 'blob:img-2',
+      width: 1080,
+      height: 1080,
+      defaultDurationSec: 4.0,
+    },
+  ];
+
+  // Deterministic LCG for repeatable verification
+  let seed = 42;
+  const rng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  const beats = Array.from({ length: 120 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats };
+
+  // Request up to 60s (far more than total footage) -> must stop once unique slices exhaust, never repeat!
+  const result = generateRandomBeatAutoClips(binItems, beatGrid, [], 0, 60, {
+    rhythm: 'beats_2',
+    hasAudio: true,
+    rng,
+  });
+
+  assert.ok(result.length >= 12);
+
+  // 1. Timeline placements must be strictly contiguous and non-overlapping along beats
+  for (let i = 1; i < result.length; i++) {
+    assert.ok(result[i].startSec >= result[i - 1].startSec + result[i - 1].durationSec - 0.02);
+  }
+
+  // 2. Each image appears at most once
+  const img1Count = result.filter((r) => r.binItemId === 'img-1').length;
+  const img2Count = result.filter((r) => r.binItemId === 'img-2').length;
+  assert.ok(img1Count <= 1);
+  assert.ok(img2Count <= 1);
+
+  // 3. No two slices from the same video ever overlap in source media timestamps
+  for (const vidId of ['vid-1', 'vid-2']) {
+    const slices = result
+      .filter((r) => r.binItemId === vidId)
+      .map((r) => ({
+        start: r.sourceStartSec,
+        end: r.sourceStartSec + r.durationSec * r.playbackRate,
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    for (let i = 1; i < slices.length; i++) {
+      assert.ok(
+        slices[i].start >= slices[i - 1].end - 0.02,
+        `Overlapping slices on ${vidId}: ${slices[i - 1].end} > ${slices[i].start}`
+      );
+    }
+  }
+
+  // 4. Slices must be non-sequential (not monotonically increasing timestamps in a single video)
+  const vid1RawOrder = result.filter((r) => r.binItemId === 'vid-1').map((r) => r.sourceStartSec);
+  if (vid1RawOrder.length >= 3) {
+    const isStrictlyAscending = vid1RawOrder.every(
+      (val, idx) => idx === 0 || val >= vid1RawOrder[idx - 1]
+    );
+    assert.equal(isStrictlyAscending, false);
+  }
+});
+
+test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
+  assert.ok(STUDIO_CINEMA_PRESETS.length >= 5);
+  for (const preset of STUDIO_CINEMA_PRESETS) {
+    assert.ok(preset.nameEn.length > 0 && preset.nameRu.length > 0);
+    assert.equal(preset.swatch.length, 2);
+    assert.ok(preset.patch.lutPreset !== undefined);
+    assert.ok(preset.patch.mediaFilter !== undefined);
+  }
+});
+
 
