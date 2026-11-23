@@ -465,6 +465,7 @@ export const TRANSLATIONS = {
     cinemaPresetsTitle: 'Кинопресеты и цветокор',
     cinemaPresetsHint: 'Готовые стили кинообработки — работают как с визуализатором, так и в чистом кино-режиме',
     cinemaOpenFullGradingBtn: 'Точная настройка цвета →',
+    errTimelineFullMusic: 'Таймлайн уже заполнен до конца музыки',
 
     presets: {
       spectrum_bars: { name: 'Спектр-бары', desc: 'Эквалайзер с реакцией на бас и верх' },
@@ -935,6 +936,7 @@ export const TRANSLATIONS = {
     cinemaPresetsTitle: 'Cinema & Film Presets',
     cinemaPresetsHint: 'One-click film grading looks — works with BeatFX or pure cinema mode',
     cinemaOpenFullGradingBtn: 'Fine-tune grading →',
+    errTimelineFullMusic: 'Timeline is already full to the end of the music',
 
     presets: {
       spectrum_bars: { name: 'Spectrum Bars', desc: 'Bass-and-treble reactive frequency bars' },

@@ -5,6 +5,7 @@ import {
   AUTO_CLIP_PRESETS,
   clampManualClipMove,
   computeAutoBeatAlignedClips,
+  computeBeatMusicalAccents,
   computeClipTimelineSegments,
   computeFadeEnvelope,
   computePhraseEnergyCurve,
@@ -745,6 +746,121 @@ test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
     assert.ok(preset.patch.lutPreset !== undefined);
     assert.ok(preset.patch.mediaFilter !== undefined);
   }
+});
+
+test('generateAutoClipPlan fills full long track when fillToTargetEnd=true and never exceeds music length', () => {
+  const shortAssets: MediaBinItem[] = [
+    {
+      id: 'v-short',
+      kind: 'video',
+      fileName: 'broll.mp4',
+      url: 'blob:v-short',
+      width: 1920,
+      height: 1080,
+      videoDuration: 12,
+      defaultDurationSec: 12,
+    },
+    {
+      id: 'i-1',
+      kind: 'image',
+      fileName: 'photo1.jpg',
+      url: 'blob:i-1',
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4,
+    },
+    {
+      id: 'i-2',
+      kind: 'image',
+      fileName: 'photo2.jpg',
+      url: 'blob:i-2',
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4,
+    },
+  ];
+
+  // 150s track at 120 BPM (0.5s beats -> >140 fast cuts if 1-2 beats per cut)
+  const musicLen = 150;
+  const beats = Array.from({ length: 300 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats };
+
+  const fullPlan = generateAutoClipPlan(shortAssets, beatGrid, [], 0, musicLen, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_2',
+    minClipSec: 0.75,
+    maxClipSec: 1.5,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+
+  assert.ok(fullPlan.length > 96, `Expected >96 clips on 150s fast track, got ${fullPlan.length}`);
+  const firstStart = fullPlan[0].startSec;
+  const last = fullPlan[fullPlan.length - 1];
+  const lastEnd = last.startSec + last.durationSec;
+  assert.equal(firstStart, 0);
+  assert.ok(
+    lastEnd >= musicLen - 0.1 && lastEnd <= musicLen + 0.02,
+    `Expected video to fill cleanly to ${musicLen}s without overflowing, got ${lastEnd}s`
+  );
+
+  // Appending near the end must stay strictly <= musicLen
+  const nearEnd = generateAutoClipPlan(shortAssets, beatGrid, [], 0, musicLen, {
+    mode: 'random',
+    startOffsetSec: 146.5,
+    targetDurationSec: 20,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+  assert.ok(nearEnd.length >= 1);
+  const appendedEnd = nearEnd[nearEnd.length - 1].startSec + nearEnd[nearEnd.length - 1].durationSec;
+  assert.ok(appendedEnd <= musicLen + 0.02, `Appended overflowed music end: ${appendedEnd}`);
+});
+
+test('computeBeatMusicalAccents detects melodic chord/pitch changes and guides auto_rhythm cuts', () => {
+  const sr = 8000;
+  const dur = 16;
+  const mono = new Float32Array(sr * dur);
+  // Constant amplitude sine/chord melody shifting pitch every 2s (every 4 beats at 120 BPM) + beat kicks
+  const freqs = [220, 293.66, 349.23, 440, 261.63, 392, 329.63, 523.25];
+  for (let i = 0; i < mono.length; i++) {
+    const t = i / sr;
+    const section = Math.min(freqs.length - 1, Math.floor(t / 2.0));
+    const beatMod = t % 0.5;
+    const kick = beatMod < 0.08 ? Math.sin(2 * Math.PI * 65 * beatMod) * Math.exp(-beatMod * 35) * 0.55 : 0;
+    const melody = Math.sin(2 * Math.PI * freqs[section] * t) * 0.35;
+    mono[i] = kick + melody;
+  }
+
+  const grid = detectTrackBpmAndBeats(mono, sr, 0, dur, 1.2);
+  assert.ok(grid.bpm >= 114 && grid.bpm <= 126, `Expected ~120 BPM, got ${grid.bpm}`);
+
+  const beats = Array.from({ length: 32 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const { melodicNovelty } = computeBeatMusicalAccents(beats, 0, mono, sr);
+  // Chord change beats (idx 4, 8, 12, 16) should show noticeably higher melodic novelty than steady hold beat idx 2/6
+  const changeAvg = (melodicNovelty[4] + melodicNovelty[8] + melodicNovelty[12]) / 3;
+  const holdAvg = (melodicNovelty[2] + melodicNovelty[6] + melodicNovelty[10]) / 3;
+  assert.ok(
+    changeAvg > holdAvg,
+    `Expected melodic novelty at chord shifts (${changeAvg.toFixed(3)}) > sustained notes (${holdAvg.toFixed(3)})`
+  );
+});
+
+test('manual NLE insert and resize enforce maxTimelineSec cap cleanly', () => {
+  const clips = [
+    { ...makeClip('a', 4), id: 'a', startSec: 0 },
+    { ...makeClip('b', 4), id: 'b', startSec: 5 },
+  ];
+  const resized = resizeManualClipDuration(clips, 'a', 8, 10);
+  const maxEndAfterResize = Math.max(...resized.map((c) => (c.startSec ?? 0) + c.durationSec));
+  assert.ok(maxEndAfterResize <= 10.02, `Resized timeline exceeded 10s cap: ${maxEndAfterResize}`);
+
+  const inserted = insertManualClipAtAnchor(clips, makeClip('c', 5), 4, 10);
+  const maxEndAfterInsert = Math.max(...inserted.map((c) => (c.startSec ?? 0) + c.durationSec));
+  assert.ok(maxEndAfterInsert <= 10.02, `Inserted timeline exceeded 10s cap: ${maxEndAfterInsert}`);
+
+  const slot = findManualInsertionSlot(clips, 9, 4, 10);
+  assert.ok(slot.startSec + slot.durationSec <= 10.02);
 });
 
 

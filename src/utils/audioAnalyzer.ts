@@ -411,18 +411,20 @@ export function findManualInsertionSlot(
     return { startSec: Number(anyFull.start.toFixed(2)), durationSec: Number(dur.toFixed(2)) };
   }
 
-  // 3. Fallback: pick largest available gap or append cleanly
+  // 3. Fallback: pick largest available gap or clamp cleanly inside maxTimelineSec
   const largestGap = [...gaps].sort((a, b) => b.end - b.start - (a.end - a.start))[0];
-  if (largestGap && largestGap.end - largestGap.start >= 0.5) {
+  if (largestGap && largestGap.end - largestGap.start >= 0.45) {
     return {
       startSec: Number(largestGap.start.toFixed(2)),
-      durationSec: Number(Math.min(dur, largestGap.end - largestGap.start).toFixed(2)),
+      durationSec: Number(Math.max(0.4, Math.min(dur, largestGap.end - largestGap.start)).toFixed(2)),
     };
   }
 
+  const clampedStart = Math.min(maxTimelineSec, cursor);
+  const room = Math.max(0, maxTimelineSec - clampedStart);
   return {
-    startSec: Number(cursor.toFixed(2)),
-    durationSec: Number(dur.toFixed(2)),
+    startSec: Number(clampedStart.toFixed(2)),
+    durationSec: Number(Math.min(dur, room).toFixed(2)),
   };
 }
 
@@ -508,41 +510,65 @@ export function resizeManualClipDuration(
 
   const target = intervals[idx];
   const maxAllowedDur = Math.max(0.4, Math.min(600, maxTimelineSec - target.startSec));
-  const nextDur = Number(Math.max(0.4, Math.min(maxAllowedDur, desiredDurationSec)).toFixed(2));
+  let nextDur = Number(Math.max(0.4, Math.min(maxAllowedDur, desiredDurationSec)).toFixed(2));
 
-  const nextStartById = new Map<string, number>();
-  let cursor = Number((target.startSec + nextDur).toFixed(2));
-  for (let i = idx + 1; i < intervals.length; i++) {
-    const item = intervals[i];
-    if (item.startSec < cursor - 0.001) {
-      nextStartById.set(item.id, cursor);
-      cursor = Number((cursor + item.durationSec).toFixed(2));
-    } else {
-      cursor = Number(Math.max(cursor, item.endSec).toFixed(2));
+  const simulatePush = (durCandidate: number) => {
+    const startMap = new Map<string, number>();
+    let cursor = Number((target.startSec + durCandidate).toFixed(2));
+    for (let i = idx + 1; i < intervals.length; i++) {
+      const item = intervals[i];
+      if (item.startSec < cursor - 0.001) {
+        startMap.set(item.id, cursor);
+        cursor = Number((cursor + item.durationSec).toFixed(2));
+      } else {
+        cursor = Number(Math.max(cursor, item.endSec).toFixed(2));
+      }
     }
+    return { startMap, finalEnd: cursor };
+  };
+
+  let sim = simulatePush(nextDur);
+  // If extending overlaps downstream clips past maxTimelineSec, shrink expansion to stay inside music track
+  if (sim.finalEnd > maxTimelineSec + 0.005) {
+    const excess = sim.finalEnd - maxTimelineSec;
+    nextDur = Number(Math.max(0.4, nextDur - excess).toFixed(2));
+    sim = simulatePush(nextDur);
   }
 
-  return mediaItems.map((m) => {
-    if (m.id === clipId) {
-      return {
-        ...m,
-        startSec: Number(target.startSec.toFixed(2)),
-        durationSec: nextDur,
-      };
-    }
-    const shiftedStart = nextStartById.get(m.id);
-    if (shiftedStart !== undefined) {
-      return { ...m, startSec: shiftedStart };
-    }
-    return m;
-  });
+  return mediaItems
+    .map((m) => {
+      if (m.id === clipId) {
+        const clampedDur = Number(
+          Math.max(0.4, Math.min(nextDur, Math.max(0.4, maxTimelineSec - target.startSec))).toFixed(2)
+        );
+        return {
+          ...m,
+          startSec: Number(target.startSec.toFixed(2)),
+          durationSec: clampedDur,
+        };
+      }
+      const shiftedStart = sim.startMap.get(m.id);
+      if (shiftedStart !== undefined) {
+        if (shiftedStart >= maxTimelineSec - 0.4) {
+          return null;
+        }
+        const avail = Math.max(0.4, maxTimelineSec - shiftedStart);
+        return {
+          ...m,
+          startSec: shiftedStart,
+          durationSec: Number(Math.min(m.durationSec || 4, avail).toFixed(2)),
+        };
+      }
+      return m;
+    })
+    .filter((m): m is VisualMediaState => m !== null);
 }
 
 /**
  * Inserts a new clip into a manual timeline anchored right after `anchorStartSec` (playhead).
  * If an existing clip spans `anchorStartSec` with >= 0.4s to the left, its right tail is trimmed
  * to `anchorStartSec` (no split/duplication) and the new clip starts cleanly at `anchorStartSec`.
- * Any existing clip starting near/after `anchorStartSec` shifts right to stay non-overlapping.
+ * Any existing clip starting near/after `anchorStartSec` shifts right without overflowing `maxTimelineSec`.
  */
 export function insertManualClipAtAnchor(
   mediaItems: VisualMediaState[],
@@ -550,18 +576,21 @@ export function insertManualClipAtAnchor(
   anchorStartSec: number,
   maxTimelineSec = 3600
 ): VisualMediaState[] {
-  const newDur = Math.max(0.4, Math.min(600, newClip.durationSec || 4));
   const clampedAnchor = Math.max(
     0,
-    Math.min(Math.max(0, maxTimelineSec - 0.5), anchorStartSec)
+    Math.min(Math.max(0, maxTimelineSec - 0.45), anchorStartSec)
   );
   const startSec = Number(clampedAnchor.toFixed(2));
+  const roomForNew = Math.max(0.4, maxTimelineSec - startSec);
+  const newDur = Number(
+    Math.max(0.4, Math.min(600, roomForNew, newClip.durationSec || 4)).toFixed(2)
+  );
   const insertedEnd = Number((startSec + newDur).toFixed(2));
 
   const placedNewClip: VisualMediaState = {
     ...newClip,
     startSec,
-    durationSec: Number(newDur.toFixed(2)),
+    durationSec: newDur,
   };
 
   if (mediaItems.length === 0) {
@@ -570,6 +599,7 @@ export function insertManualClipAtAnchor(
 
   const intervals = getNormalizedManualClipIntervals(mediaItems);
   const patchById = new Map<string, { startSec: number; durationSec?: number }>();
+  const dropIds = new Set<string>();
   let downstreamCursor = insertedEnd;
 
   for (const iv of intervals) {
@@ -585,18 +615,30 @@ export function insertManualClipAtAnchor(
       });
     } else {
       const nextStart = Number(Math.max(downstreamCursor, iv.startSec).toFixed(2));
-      patchById.set(iv.id, { startSec: nextStart });
-      downstreamCursor = Number((nextStart + iv.durationSec).toFixed(2));
+      if (nextStart >= maxTimelineSec - 0.4) {
+        dropIds.add(iv.id);
+      } else {
+        const clampedDur = Number(
+          Math.max(0.4, Math.min(iv.durationSec, maxTimelineSec - nextStart)).toFixed(2)
+        );
+        patchById.set(iv.id, {
+          startSec: nextStart,
+          ...(clampedDur < iv.durationSec - 0.01 ? { durationSec: clampedDur } : {}),
+        });
+        downstreamCursor = Number((nextStart + clampedDur).toFixed(2));
+      }
     }
   }
 
-  const updatedExisting = mediaItems.map((m) => {
-    const patch = patchById.get(m.id);
-    if (!patch) return m;
-    return patch.durationSec !== undefined
-      ? { ...m, startSec: patch.startSec, durationSec: patch.durationSec }
-      : { ...m, startSec: patch.startSec };
-  });
+  const updatedExisting = mediaItems
+    .filter((m) => !dropIds.has(m.id))
+    .map((m) => {
+      const patch = patchById.get(m.id);
+      if (!patch) return m;
+      return patch.durationSec !== undefined
+        ? { ...m, startSec: patch.startSec, durationSec: patch.durationSec }
+        : { ...m, startSec: patch.startSec };
+    });
 
   return [...updatedExisting, placedNewClip].sort(
     (a, b) => (a.startSec ?? 0) - (b.startSec ?? 0)
@@ -710,8 +752,8 @@ export interface TrackBeatGrid {
 }
 
 /**
- * Estimates track tempo (BPM) from low-frequency + RMS onset flux and constructs
- * a phase-aligned musical beat grid across [trimStart .. trimEnd].
+ * Estimates track tempo (BPM) from 3-band perceptual onset flux (sub-bass kick + mid melody/snare + high attack)
+ * with local adaptive baseline subtraction, harmonic comb autocorrelation, and transient-locked phase alignment.
  */
 export function detectTrackBpmAndBeats(
   mono: Float32Array,
@@ -721,70 +763,129 @@ export function detectTrackBpmAndBeats(
   sensitivity: number
 ): TrackBeatGrid {
   const clipDuration = Math.max(0.5, trimEnd - trimStart);
-  if (mono.length === 0) {
+  if (mono.length === 0 || sampleRate <= 0) {
     return { bpm: 0, beatSec: 0.5, beats: [] };
   }
 
-  const hopSec = 0.04; // 25 Hz analysis grid
-  const sampleWin = Math.max(256, Math.floor(sampleRate * hopSec));
+  const hopSec = 0.02; // 50 Hz (20ms precision)
+  const sampleWin = Math.max(128, Math.floor(sampleRate * hopSec));
   const startIdx = Math.max(0, Math.floor(trimStart * sampleRate));
-  const totalSteps = Math.max(4, Math.floor(clipDuration / hopSec));
-  const onsets = new Float32Array(totalSteps);
+  const totalSteps = Math.max(8, Math.floor(clipDuration / hopSec));
+  const rawOnsets = new Float32Array(totalSteps);
 
-  let prevLowEnergy = 0;
-  let maxOnset = 0;
+  // Two cascaded 1-pole crossover cutoffs for bass (<~180 Hz) & mid (~180..2200 Hz)
+  const alphaLow = 1 - Math.exp((-2 * Math.PI * 180) / sampleRate);
+  const alphaMid = 1 - Math.exp((-2 * Math.PI * 2200) / sampleRate);
+  let lpLow = 0;
+  let lpMid = 0;
+  let prevLowLog = 0;
+  let prevMidLog = 0;
+  let prevHighLog = 0;
+  let maxRawOnset = 0;
+
   for (let s = 0; s < totalSteps; s++) {
     const base = startIdx + s * sampleWin;
     if (base >= mono.length) break;
     const end = Math.min(mono.length, base + sampleWin);
-    let sq = 0;
-    let lowAcc = 0;
-    let lp = 0;
     const count = Math.max(1, end - base);
+
+    let lowSq = 0;
+    let midSq = 0;
+    let highSq = 0;
     for (let i = base; i < end; i++) {
       const v = mono[i];
-      sq += v * v;
-      lp = lp * 0.88 + v * 0.12;
-      lowAcc += lp * lp;
+      lpLow += (v - lpLow) * alphaLow;
+      lpMid += (v - lpMid) * alphaMid;
+      const midBand = lpMid - lpLow;
+      const highBand = v - lpMid;
+      lowSq += lpLow * lpLow;
+      midSq += midBand * midBand;
+      highSq += highBand * highBand;
     }
-    const energy = (Math.sqrt(lowAcc / count) * 0.72 + Math.sqrt(sq / count) * 0.28) * sensitivity;
-    const flux = Math.max(0, energy - prevLowEnergy * 0.92);
-    prevLowEnergy = energy;
-    onsets[s] = flux;
-    if (flux > maxOnset) maxOnset = flux;
+
+    const lowLog = Math.log1p(14 * Math.sqrt(lowSq / count));
+    const midLog = Math.log1p(16 * Math.sqrt(midSq / count));
+    const highLog = Math.log1p(18 * Math.sqrt(highSq / count));
+
+    const lowFlux = Math.max(0, lowLog - prevLowLog * 0.94);
+    const midFlux = Math.max(0, midLog - prevMidLog * 0.92);
+    const highFlux = Math.max(0, highLog - prevHighLog * 0.9);
+    prevLowLog = lowLog;
+    prevMidLog = midLog;
+    prevHighLog = highLog;
+
+    const flux = (lowFlux * 0.48 + midFlux * 0.36 + highFlux * 0.16) * sensitivity;
+    rawOnsets[s] = flux;
+    if (flux > maxRawOnset) maxRawOnset = flux;
   }
 
-  if (maxOnset < 0.002) {
+  if (maxRawOnset < 0.002) {
     return { bpm: 0, beatSec: 0.5, beats: [] };
   }
 
-  // Autocorrelation over musical BPM range (68 .. 176 BPM)
-  const minLag = Math.max(4, Math.round(60 / 176 / hopSec));
-  const maxLag = Math.min(Math.floor(totalSteps / 2), Math.round(60 / 68 / hopSec));
-  let bestLag = Math.round(0.5 / hopSec); // 120 BPM default if short
-  let bestScore = -1;
+  // Adaptive local baseline subtraction (±0.24s) sharpens real musical hits over sustained chords/drones
+  const onsets = new Float32Array(totalSteps);
+  const halfWin = Math.max(4, Math.round(0.24 / hopSec));
+  for (let s = 0; s < totalSteps; s++) {
+    const w0 = Math.max(0, s - halfWin);
+    const w1 = Math.min(totalSteps - 1, s + halfWin);
+    let sum = 0;
+    for (let k = w0; k <= w1; k++) sum += rawOnsets[k];
+    const localMean = sum / Math.max(1, w1 - w0 + 1);
+    onsets[s] = Math.max(0, rawOnsets[s] - localMean * 0.72);
+  }
 
+  // Autocorrelation across 66..184 BPM with octave comb scoring to eliminate half/double-time drift
+  const minLag = Math.max(8, Math.round(60 / 184 / hopSec));
+  const maxLag = Math.min(Math.floor(totalSteps / 2), Math.round(60 / 66 / hopSec));
+  const acf = new Float32Array(maxLag + 1);
   for (let lag = minLag; lag <= maxLag; lag++) {
     let sum = 0;
-    for (let i = 0; i < totalSteps - lag; i++) {
+    const len = totalSteps - lag;
+    for (let i = 0; i < len; i++) {
       sum += onsets[i] * onsets[i + lag];
     }
-    // Slight preference toward standard 95-138 BPM window to avoid half/double-time drift
+    acf[lag] = len > 0 ? sum / len : 0;
+  }
+
+  let bestLag = Math.round(0.5 / hopSec);
+  let bestScore = -1;
+  for (let lag = minLag; lag <= maxLag; lag++) {
     const candBpm = 60 / (lag * hopSec);
-    const weight = candBpm >= 92 && candBpm <= 142 ? 1.12 : 1.0;
-    const score = (sum / Math.max(1, totalSteps - lag)) * weight;
+    const halfLag = Math.round(lag / 2);
+    const doubleLag = lag * 2;
+    const harmonicSupport =
+      acf[lag] +
+      (doubleLag <= maxLag ? acf[doubleLag] * 0.35 : 0) +
+      (halfLag >= minLag ? acf[halfLag] * 0.18 : 0);
+    // Gentle Gaussian prior around common musical groove 88..142 BPM
+    const tempoPrior = candBpm >= 88 && candBpm <= 142 ? 1.15 : candBpm >= 72 && candBpm <= 165 ? 1.03 : 0.94;
+    const score = harmonicSupport * tempoPrior;
     if (score > bestScore) {
       bestScore = score;
       bestLag = lag;
     }
   }
 
-  const rawBpm = 60 / (bestLag * hopSec);
-  const bpm = Math.max(60, Math.min(185, Math.round(rawBpm)));
+  // Parabolic interpolation around bestLag for clean sub-frame BPM estimate
+  let refinedLag = bestLag;
+  if (bestLag > minLag && bestLag < maxLag) {
+    const y0 = acf[bestLag - 1];
+    const y1 = acf[bestLag];
+    const y2 = acf[bestLag + 1];
+    const denom = 2 * (y0 - 2 * y1 + y2);
+    if (Math.abs(denom) > 1e-9) {
+      const shift = Math.max(-0.5, Math.min(0.5, (y0 - y2) / denom));
+      refinedLag = bestLag + shift;
+    }
+  }
+
+  const rawBpm = 60 / (refinedLag * hopSec);
+  const bpm = Math.max(60, Math.min(188, Math.round(rawBpm)));
   const beatSec = 60 / bpm;
 
-  // Find strongest initial phase offset within the first 2 beats
-  const phaseSteps = Math.max(1, Math.min(totalSteps, Math.round((beatSec * 1.5) / hopSec)));
+  // Phase alignment within first beat cycle + bar-1 preference across first 4 beats
+  const phaseSteps = Math.max(1, Math.min(totalSteps, Math.round((beatSec * 1.25) / hopSec)));
   let bestPhase = 0;
   let bestPhaseScore = -1;
   for (let ph = 0; ph < phaseSteps; ph++) {
@@ -808,14 +909,14 @@ export function detectTrackBpmAndBeats(
   }
 
   const beats: number[] = [];
-  // Refine each steady beat slightly toward local onset peak within ±60ms
+  // Snap each beat within ±40ms (±2 hops) to the exact transient attack
   for (let t = bestPhase; t < clipDuration - 0.05; t += beatSec) {
     const centerIdx = Math.round(t / hopSec);
     let peakIdx = centerIdx;
     let peakVal = onsets[Math.max(0, Math.min(totalSteps - 1, centerIdx))] || 0;
-    for (let d = -1; d <= 1; d++) {
+    for (let d = -2; d <= 2; d++) {
       const idx = Math.max(0, Math.min(totalSteps - 1, centerIdx + d));
-      if (onsets[idx] > peakVal * 1.15) {
+      if (onsets[idx] > peakVal * 1.12) {
         peakVal = onsets[idx];
         peakIdx = idx;
       }
@@ -1503,6 +1604,118 @@ export function computePhraseEnergyCurve(
   });
 }
 
+function normalizeScores01(arr: number[]): number[] {
+  if (arr.length === 0) return [];
+  const sorted = [...arr].sort((a, b) => a - b);
+  const low = sorted[Math.floor(sorted.length * 0.1)] ?? 0;
+  const high = sorted[Math.floor(sorted.length * 0.94)] ?? low + 0.01;
+  const span = Math.max(0.005, high - low);
+  return arr.map((v) => Math.max(0, Math.min(1, (v - low) / span)));
+}
+
+/**
+ * Computes per-beat onset transient accent [0..1] and FFT-based melodic/harmonic novelty [0..1]
+ * across beats so cut points lock onto both rhythmic kicks/snares and pitch/chord shifts.
+ */
+export function computeBeatMusicalAccents(
+  beatTimes: number[],
+  trimStart: number,
+  monoData?: Float32Array,
+  sampleRate?: number
+): { onsetAccent: number[]; melodicNovelty: number[] } {
+  const count = beatTimes.length;
+  if (count === 0) return { onsetAccent: [], melodicNovelty: [] };
+
+  if (!monoData || monoData.length === 0 || !sampleRate || sampleRate <= 0) {
+    return {
+      onsetAccent: beatTimes.map((_, i) => (i % 4 === 0 ? 0.95 : i % 2 === 0 ? 0.65 : 0.35)),
+      melodicNovelty: beatTimes.map((_, i) => (i % 8 === 0 ? 0.9 : i % 4 === 0 ? 0.6 : 0.25)),
+    };
+  }
+
+  const fft = new Radix2FFT(FFT_SIZE);
+  const slice = new Float32Array(FFT_SIZE);
+  const mags = new Float32Array(FFT_SIZE >> 1);
+  const hann = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (FFT_SIZE - 1)));
+  }
+
+  const BANDS = 24;
+  const minFreq = 55;
+  const maxFreq = Math.min(8000, sampleRate * 0.45);
+  const logMin = Math.log(minFreq);
+  const logMax = Math.log(Math.max(minFreq * 2, maxFreq));
+  const binHz = sampleRate / FFT_SIZE;
+
+  const beatSpectra: Float32Array[] = new Array(count);
+  const rawOnset = new Array<number>(count).fill(0);
+  const rawMelody = new Array<number>(count).fill(0);
+  const totalSamples = monoData.length;
+
+  for (let i = 0; i < count; i++) {
+    const bt = beatTimes[i];
+    const centerSample = Math.max(0, Math.min(totalSamples - 1, Math.floor((trimStart + bt) * sampleRate)));
+
+    // 1. Transient jump across beat onset (±30ms pre vs post RMS delta)
+    const winSamp = Math.max(64, Math.floor(sampleRate * 0.03));
+    const pre0 = Math.max(0, centerSample - winSamp);
+    const post1 = Math.min(totalSamples, centerSample + winSamp);
+    let preSq = 0;
+    for (let s = pre0; s < centerSample; s++) preSq += monoData[s] * monoData[s];
+    let postSq = 0;
+    for (let s = centerSample; s < post1; s++) postSq += monoData[s] * monoData[s];
+    const preRms = Math.sqrt(preSq / Math.max(1, centerSample - pre0));
+    const postRms = Math.sqrt(postSq / Math.max(1, post1 - centerSample));
+    rawOnset[i] = Math.max(0, postRms - preRms * 0.8) + postRms * 0.35;
+
+    // 2. Melodic spectrum inside the beat body (+40ms after transient)
+    const segNext = i + 1 < count ? beatTimes[i + 1] : bt + 0.5;
+    const bodyCenterTime = trimStart + bt + Math.min(0.12, Math.max(0.02, (segNext - bt) * 0.35));
+    const sStart = Math.max(0, Math.floor(bodyCenterTime * sampleRate) - (FFT_SIZE >> 1));
+    for (let k = 0; k < FFT_SIZE; k++) {
+      const idx = sStart + k;
+      slice[k] = (idx < totalSamples ? monoData[idx] : 0) * hann[k];
+    }
+    fft.computeMagnitudes(slice, mags);
+
+    const bands = new Float32Array(BANDS);
+    let norm = 1e-6;
+    for (let b = 0; b < BANDS; b++) {
+      const f0 = Math.exp(logMin + ((logMax - logMin) * b) / BANDS);
+      const f1 = Math.exp(logMin + ((logMax - logMin) * (b + 1)) / BANDS);
+      const k0 = Math.max(1, Math.floor(f0 / binHz));
+      const k1 = Math.min(mags.length - 1, Math.max(k0, Math.ceil(f1 / binHz)));
+      let sum = 0;
+      for (let k = k0; k <= k1; k++) sum += mags[k];
+      const val = Math.log1p(12 * (sum / Math.max(1, k1 - k0 + 1)));
+      bands[b] = val;
+      norm += val * val;
+    }
+    const invNorm = 1 / Math.sqrt(norm);
+    for (let b = 0; b < BANDS; b++) bands[b] *= invNorm;
+    beatSpectra[i] = bands;
+
+    if (i > 0) {
+      const prev = beatSpectra[i - 1];
+      let cos = 0;
+      let melodicShift = 0;
+      for (let b = 0; b < BANDS; b++) {
+        cos += bands[b] * prev[b];
+        // Emphasize harmonic/melodic pitch bins (bins 4..20 ~ 120Hz..3.8kHz)
+        const w = b >= 4 && b <= 20 ? 1.4 : 0.6;
+        melodicShift += Math.abs(bands[b] - prev[b]) * w;
+      }
+      rawMelody[i] = Math.max(0, 1 - cos) * 0.6 + melodicShift * 0.4;
+    }
+  }
+
+  return {
+    onsetAccent: normalizeScores01(rawOnset),
+    melodicNovelty: normalizeScores01(rawMelody),
+  };
+}
+
 function subtractUsedIntervals(
   baseRange: [number, number],
   used: Array<[number, number]>,
@@ -1525,17 +1738,15 @@ function subtractUsedIntervals(
 }
 
 /**
- * Generates an editorial beat-aligned montage in one of 3 user-selectable modes:
- * - `auto_rhythm`: analyzes musical phrase energy so calm intros/bridges play as smooth
- *   4-8 beat dissolves while drops/choruses shift into snappier rhythmic cuts.
- * - `sequential`: follows the exact order of files in Media Library and slices videos
- *   chronologically forward without jumps or repeats.
+ * Generates an editorial beat- and melody-aligned montage in one of 3 user-selectable modes:
+ * - `auto_rhythm`: analyzes phrase energy, beat transients, and harmonic/melodic shifts so
+ *   calm passages dissolve smoothly and rhythmic/melodic turns cut cleanly on real beats.
+ * - `sequential`: follows Media Library order chronologically without jumps.
  * - `random`: non-repeating random selection across unused images and non-overlapping
  *   video intervals without back-to-back source repeats.
  *
- * Supports `startOffsetSec` for appending a 2nd auto-clip after existing clips without
- * compressing prior timeline items, plus customizable transition style, motion level,
- * min/max slice durations, and optional target span cap.
+ * Strictly enforces `<= maxTimelineSec` when `hasAudio` is true, and when `fillToTargetEnd`
+ * is enabled extends cleanly all the way to `targetLimit` without leaving bare trailing music.
  */
 export function generateAutoClipPlan(
   binItems: MediaBinItem[],
@@ -1555,6 +1766,7 @@ export function generateAutoClipPlan(
     avoidAdjacentRepeat?: boolean;
     excludeUsedUrls?: Set<string>;
     excludeVideoRangesByUrl?: Map<string, Array<[number, number]>>;
+    fillToTargetEnd?: boolean;
     hasAudio?: boolean;
     monoData?: Float32Array;
     sampleRate?: number;
@@ -1568,6 +1780,7 @@ export function generateAutoClipPlan(
   const transitionStyle: AutoClipTransitionStyle = options.transitionStyle ?? 'musical';
   const motionLevel: AutoClipMotionLevel = options.motionLevel ?? 'gentle';
   const avoidAdjacentRepeat = options.avoidAdjacentRepeat ?? true;
+  const fillToTargetEnd = options.fillToTargetEnd ?? false;
   const hasAudio = options.hasAudio ?? true;
   const rng = options.rng ?? Math.random;
   const beatSec =
@@ -1613,7 +1826,7 @@ export function generateAutoClipPlan(
     beatTimes.unshift(startOffsetSec);
   }
   let lastBeat = beatTimes[beatTimes.length - 1];
-  while (lastBeat + beatSec < targetLimit + beatSec * 6 && beatTimes.length < 1500) {
+  while (lastBeat + beatSec < targetLimit + beatSec * 6 && beatTimes.length < 2400) {
     lastBeat = Number((lastBeat + beatSec).toFixed(3));
     beatTimes.push(lastBeat);
   }
@@ -1622,6 +1835,12 @@ export function generateAutoClipPlan(
     beatTimes,
     trimStart,
     targetLimit,
+    options.monoData,
+    options.sampleRate
+  );
+  const { onsetAccent, melodicNovelty } = computeBeatMusicalAccents(
+    beatTimes,
+    trimStart,
     options.monoData,
     options.sampleRate
   );
@@ -1636,7 +1855,8 @@ export function generateAutoClipPlan(
     binItem: MediaBinItem;
     rate: number;
     seqCursor: number;
-    maxEnd: number;
+    initStart: number;
+    vDur: number;
     freeRanges: Array<[number, number]>;
   }
   type PoolAsset = PoolImage | PoolVideo;
@@ -1676,7 +1896,8 @@ export function generateAutoClipPlan(
               binItem: b,
               rate,
               seqCursor: freeRanges[0][0],
-              maxEnd: freeRanges[freeRanges.length - 1][1],
+              initStart: Number(initStart.toFixed(2)),
+              vDur: Number(vDur.toFixed(2)),
               freeRanges,
             });
           }
@@ -1688,10 +1909,16 @@ export function generateAutoClipPlan(
 
   let pool = buildPool(true);
   if (pool.length === 0 && (options.excludeUsedUrls || options.excludeVideoRangesByUrl)) {
-    // Fallback cleanly if appending after all source footage was already used once
     pool = buildPool(false);
   }
   if (pool.length === 0) return [];
+
+  const refillExhaustedPool = () => {
+    const fresh = buildPool(false);
+    if (fresh.length === 0) return false;
+    pool = fresh;
+    return true;
+  };
 
   const canAssetFitDur = (entry: PoolAsset, dur: number): boolean => {
     if (entry.kind === 'image') return !entry.used;
@@ -1702,150 +1929,186 @@ export function generateAutoClipPlan(
     return entry.freeRanges.some(([rs, re]) => re - rs >= mediaNeed - 0.02);
   };
 
-  const getBeatStepsForIndex = (bIdx: number): { steps: number[]; energy: number } => {
+  const getBeatStepsForIndex = (bIdx: number): { steps: number[]; energy: number; hitStrength: number } => {
     const energy = phraseEnergy[bIdx] ?? 0.5;
-    let rawSteps: number[];
+    const curOnset = onsetAccent[bIdx] ?? 0.5;
+    const curMelody = melodicNovelty[bIdx] ?? 0.4;
+    const hitStrength = curOnset * 0.55 + curMelody * 0.45;
+
+    let preferredOrder: number[];
     if (rhythm === 'beats_1') {
-      rawSteps = beatSec < 0.44 ? [2, 1] : [1, 2];
+      preferredOrder = beatSec < 0.44 ? [2, 1] : [1, 2];
     } else if (rhythm === 'beats_2') {
-      rawSteps = beatSec < 0.48 ? [3, 2, 4] : [2, 4, 1];
+      preferredOrder = beatSec < 0.48 ? [2, 4, 3, 1] : [2, 4, 1];
     } else if (rhythm === 'beats_4') {
-      rawSteps = [4, 2, 1];
+      preferredOrder = [4, 2, 8, 1];
     } else if (rhythm === 'smooth') {
-      rawSteps = energy > 0.72 ? [4, 6, 2] : [6, 8, 4, 2];
+      preferredOrder = energy > 0.72 ? [4, 6, 8, 2] : [8, 6, 4, 2];
     } else if (mode === 'auto_rhythm') {
       if (energy < 0.36) {
-        rawSteps = [6, 4, 8, 2];
+        preferredOrder = [8, 6, 4, 2];
       } else if (energy < 0.68) {
-        rawSteps = bIdx % 8 === 0 ? [4, 2] : [3, 4, 2];
+        preferredOrder = [4, 2, 6, 3, 1];
       } else {
-        rawSteps = beatSec >= 0.62 && rng() < 0.25 ? [1, 2] : [2, 4, 1];
+        preferredOrder = beatSec >= 0.55 ? [2, 1, 4] : [2, 4, 1];
       }
     } else if (mode === 'sequential') {
-      rawSteps = [4, 2, 6, 1];
+      preferredOrder = [4, 2, 6, 8, 1];
     } else {
-      const roll = rng();
-      rawSteps = roll < 0.45 ? [4, 2] : roll < 0.85 ? [2, 4] : [6, 4, 2];
+      preferredOrder = [4, 2, 6, 1, 3];
     }
 
-    // Clamp candidate beat counts to respect user's minClipBound .. maxClipBound cleanly
     const minSteps = Math.max(1, Math.ceil(minClipBound / beatSec - 0.05));
     const maxSteps = Math.max(minSteps, Math.floor(maxClipBound / beatSec + 0.05));
-    const clampedSet = new Set<number>();
-    for (const s of rawSteps) {
-      clampedSet.add(Math.max(minSteps, Math.min(maxSteps, s)));
+    const clampedPreferred = Array.from(
+      new Set(preferredOrder.map((s) => Math.max(minSteps, Math.min(maxSteps, s))))
+    );
+    const candSet = new Set<number>(clampedPreferred);
+    candSet.add(minSteps);
+    if (maxSteps > minSteps && candSet.size < 2) {
+      candSet.add(Math.round((minSteps + maxSteps) / 2));
     }
-    clampedSet.add(minSteps);
-    if (maxSteps > minSteps) {
-      clampedSet.add(Math.round((minSteps + maxSteps) / 2));
-    }
-    return { steps: Array.from(clampedSet), energy };
+
+    // Score each candidate step by energy pacing rank + real musical cues (onset transient + melodic shift)
+    const candidates = Array.from(candSet);
+    const hasCustomBarMode = rhythm !== 'auto' && rhythm !== 'smooth';
+    candidates.sort((a, b) => {
+      const idxA = Math.min(beatTimes.length - 1, bIdx + a);
+      const idxB = Math.min(beatTimes.length - 1, bIdx + b);
+      const musicalA = (onsetAccent[idxA] ?? 0.4) * 0.48 + (melodicNovelty[idxA] ?? 0.35) * 0.52;
+      const musicalB = (onsetAccent[idxB] ?? 0.4) * 0.48 + (melodicNovelty[idxB] ?? 0.35) * 0.52;
+
+      const rankA = clampedPreferred.indexOf(a);
+      const rankB = clampedPreferred.indexOf(b);
+      const prefA = rankA >= 0 ? Math.max(0.1, 1 - rankA * 0.22) : 0.05;
+      const prefB = rankB >= 0 ? Math.max(0.1, 1 - rankB * 0.22) : 0.05;
+      const barA = idxA % 4 === 0 ? 0.12 : idxA % 2 === 0 ? 0.05 : 0;
+      const barB = idxB % 4 === 0 ? 0.12 : idxB % 2 === 0 ? 0.05 : 0;
+
+      // In explicit fixed-beat modes (beats_1/beats_2/beats_4), respect beat multiplier primarily
+      const weightMusical = hasCustomBarMode ? 0.24 : 0.42;
+      const weightPref = hasCustomBarMode ? 0.76 : 0.58;
+      const scoreA = musicalA * weightMusical + (prefA + barA) * weightPref;
+      const scoreB = musicalB * weightMusical + (prefB + barB) * weightPref;
+      return scoreB - scoreA;
+    });
+
+    return { steps: candidates, energy, hitStrength };
   };
 
   const placements: AutoBeatSlicePlacement[] = [];
   let beatIdx = 0;
   let lastBinItemId: string | null = null;
   let seqPoolPointer = 0;
-  // Cap generated segment count so browser decoders and editability stay fast & uncluttered
-  const maxPlacements = 96;
+  const maxPlacements = 480;
 
   while (beatIdx < beatTimes.length - 1 && placements.length < maxPlacements) {
     const startSec = beatTimes[beatIdx];
     if (startSec >= targetLimit - 0.45) break;
 
-    const { steps: stepCandidates, energy } = getBeatStepsForIndex(beatIdx);
+    const { steps: stepCandidates, energy, hitStrength } = getBeatStepsForIndex(beatIdx);
     let chosenResult: {
       nextBeatIdx: number;
       dur: number;
       asset: PoolAsset;
       sourceStartSec: number;
       rate: number;
+      cutImpact: number;
     } | null = null;
 
-    for (const stepCount of stepCandidates) {
-      const nextIdx = Math.min(beatTimes.length - 1, beatIdx + stepCount);
-      if (nextIdx <= beatIdx) continue;
-      const rawEnd = Math.min(targetLimit, beatTimes[nextIdx]);
-      const dur = Number((rawEnd - startSec).toFixed(2));
-      const minAllow = Math.max(0.45, Math.min(minClipBound * 0.85, targetLimit - startSec));
-      if (dur < minAllow) continue;
+    const trySelect = () => {
+      for (const stepCount of stepCandidates) {
+        const nextIdx = Math.min(beatTimes.length - 1, beatIdx + stepCount);
+        if (nextIdx <= beatIdx) continue;
+        const rawEnd = Math.min(targetLimit, beatTimes[nextIdx]);
+        const dur = Number((rawEnd - startSec).toFixed(2));
+        const minAllow = Math.max(0.45, Math.min(minClipBound * 0.85, targetLimit - startSec));
+        if (dur < minAllow) continue;
 
-      const eligible: PoolAsset[] = pool.filter((entry) => canAssetFitDur(entry, dur));
-      if (eligible.length === 0) continue;
+        const eligible: PoolAsset[] = pool.filter((entry) => canAssetFitDur(entry, dur));
+        if (eligible.length === 0) continue;
 
-      let chosen: PoolAsset;
-      if (mode === 'sequential') {
-        let found: PoolAsset | null = null;
-        for (let offset = 0; offset < pool.length; offset++) {
-          const idx = (seqPoolPointer + offset) % pool.length;
-          if (canAssetFitDur(pool[idx], dur)) {
-            found = pool[idx];
-            seqPoolPointer = (idx + 1) % pool.length;
-            break;
+        let chosen: PoolAsset;
+        if (mode === 'sequential') {
+          let found: PoolAsset | null = null;
+          for (let offset = 0; offset < pool.length; offset++) {
+            const idx = (seqPoolPointer + offset) % pool.length;
+            if (canAssetFitDur(pool[idx], dur)) {
+              found = pool[idx];
+              seqPoolPointer = (idx + 1) % pool.length;
+              break;
+            }
           }
-        }
-        chosen = found || eligible[0];
-      } else {
-        const nonAdjacent: PoolAsset[] =
-          avoidAdjacentRepeat && lastBinItemId && eligible.length > 1
-            ? eligible.filter((e) => e.binItem.id !== lastBinItemId)
-            : eligible;
-        const poolToPick: PoolAsset[] = nonAdjacent.length > 0 ? nonAdjacent : eligible;
-
-        if (mode === 'auto_rhythm' && energy < 0.4 && poolToPick.length > 1) {
-          const calmSorted: PoolAsset[] = [...poolToPick].sort((a, b) => {
-            const aSpan =
-              a.kind === 'image'
-                ? 6
-                : Math.max(...a.freeRanges.map(([rs, re]) => re - rs), 0);
-            const bSpan =
-              b.kind === 'image'
-                ? 6
-                : Math.max(...b.freeRanges.map(([rs, re]) => re - rs), 0);
-            return bSpan - aSpan;
-          });
-          const topHalf: PoolAsset[] = calmSorted.slice(
-            0,
-            Math.max(1, Math.ceil(calmSorted.length * 0.6))
-          );
-          chosen = topHalf[Math.floor(rng() * topHalf.length)];
+          chosen = found || eligible[0];
         } else {
-          chosen = poolToPick[Math.floor(rng() * poolToPick.length)];
-        }
-      }
+          const nonAdjacent: PoolAsset[] =
+            avoidAdjacentRepeat && lastBinItemId && eligible.length > 1
+              ? eligible.filter((e) => e.binItem.id !== lastBinItemId)
+              : eligible;
+          const poolToPick: PoolAsset[] = nonAdjacent.length > 0 ? nonAdjacent : eligible;
 
-      if (chosen.kind === 'image') {
-        chosenResult = {
-          nextBeatIdx: nextIdx,
-          dur,
-          asset: chosen,
-          sourceStartSec: 0,
-          rate: 1.0,
-        };
-      } else if (mode === 'sequential') {
-        const mediaNeed = dur * chosen.rate;
-        let rangePicked: [number, number] | null = null;
-        for (const [rs, re] of chosen.freeRanges) {
-          const startAt = Math.max(rs, chosen.seqCursor);
-          if (re - startAt >= mediaNeed - 0.02) {
-            rangePicked = [startAt, re];
-            break;
+          if (mode === 'auto_rhythm' && energy < 0.4 && poolToPick.length > 1) {
+            const calmSorted: PoolAsset[] = [...poolToPick].sort((a, b) => {
+              const aSpan =
+                a.kind === 'image'
+                  ? 6
+                  : Math.max(...a.freeRanges.map(([rs, re]) => re - rs), 0);
+              const bSpan =
+                b.kind === 'image'
+                  ? 6
+                  : Math.max(...b.freeRanges.map(([rs, re]) => re - rs), 0);
+              return bSpan - aSpan;
+            });
+            const topHalf: PoolAsset[] = calmSorted.slice(
+              0,
+              Math.max(1, Math.ceil(calmSorted.length * 0.6))
+            );
+            chosen = topHalf[Math.floor(rng() * topHalf.length)];
+          } else {
+            chosen = poolToPick[Math.floor(rng() * poolToPick.length)];
           }
         }
-        const [rs, re] = rangePicked || chosen.freeRanges[0];
-        const avail = Math.max(0, re - rs);
-        const clampedNeed = Math.min(mediaNeed, avail);
-        const srcStart = Number(rs.toFixed(2));
-        chosen.seqCursor = Number((srcStart + clampedNeed).toFixed(2));
-        const effectiveDur = Number(Math.min(dur, clampedNeed / chosen.rate).toFixed(2));
-        chosenResult = {
-          nextBeatIdx: nextIdx,
-          dur: Math.max(0.45, effectiveDur),
-          asset: chosen,
-          sourceStartSec: srcStart,
-          rate: chosen.rate,
-        };
-      } else {
+
+        const cutImpact =
+          ((onsetAccent[nextIdx] ?? hitStrength) * 0.55 + (melodicNovelty[nextIdx] ?? 0.4) * 0.45);
+
+        if (chosen.kind === 'image') {
+          return {
+            nextBeatIdx: nextIdx,
+            dur,
+            asset: chosen,
+            sourceStartSec: 0,
+            rate: 1.0,
+            cutImpact,
+          };
+        }
+
+        if (mode === 'sequential') {
+          const mediaNeed = dur * chosen.rate;
+          let rangePicked: [number, number] | null = null;
+          for (const [rs, re] of chosen.freeRanges) {
+            const startAt = Math.max(rs, chosen.seqCursor);
+            if (re - startAt >= mediaNeed - 0.02) {
+              rangePicked = [startAt, re];
+              break;
+            }
+          }
+          const [rs, re] = rangePicked || chosen.freeRanges[0];
+          const avail = Math.max(0, re - rs);
+          const clampedNeed = Math.min(mediaNeed, avail);
+          const srcStart = Number(rs.toFixed(2));
+          chosen.seqCursor = Number((srcStart + clampedNeed).toFixed(2));
+          const effectiveDur = Number(Math.min(dur, clampedNeed / chosen.rate).toFixed(2));
+          return {
+            nextBeatIdx: nextIdx,
+            dur: Math.max(0.45, effectiveDur),
+            asset: chosen,
+            sourceStartSec: srcStart,
+            rate: chosen.rate,
+            cutImpact,
+          };
+        }
+
         const mediaNeed = dur * chosen.rate;
         const fittingRanges: number[] = [];
         for (let r = 0; r < chosen.freeRanges.length; r++) {
@@ -1868,15 +2131,23 @@ export function generateAutoClipPlan(
         }
 
         const effectiveDur = Number(Math.min(dur, clampedNeed / chosen.rate).toFixed(2));
-        chosenResult = {
+        return {
           nextBeatIdx: nextIdx,
           dur: Math.max(0.45, effectiveDur),
           asset: chosen,
           sourceStartSec: srcStart,
           rate: chosen.rate,
+          cutImpact,
         };
       }
-      break;
+      return null;
+    };
+
+    chosenResult = trySelect();
+    if (!chosenResult && fillToTargetEnd) {
+      if (refillExhaustedPool()) {
+        chosenResult = trySelect();
+      }
     }
 
     if (!chosenResult) {
@@ -1895,12 +2166,12 @@ export function generateAutoClipPlan(
     } else if (transitionStyle === 'cuts_only') {
       trType = 'cut';
     } else if (transitionStyle === 'punchy') {
-      trType = placements.length % 3 === 2 ? 'zoom_cross' : 'cut';
+      trType = chosenResult.cutImpact > 0.65 || placements.length % 3 === 2 ? 'zoom_cross' : 'cut';
     } else if (mode === 'auto_rhythm') {
       if (energy < 0.42 || rhythm === 'smooth') {
         trType = 'crossfade';
-      } else if (energy >= 0.75) {
-        trType = placements.length % 4 === 3 ? 'zoom_cross' : 'cut';
+      } else if (energy >= 0.72 || chosenResult.cutImpact >= 0.68) {
+        trType = chosenResult.cutImpact >= 0.8 && placements.length % 3 === 2 ? 'zoom_cross' : 'cut';
       } else {
         trType = placements.length % 2 === 0 ? 'crossfade' : 'cut';
       }
@@ -1912,7 +2183,7 @@ export function generateAutoClipPlan(
       trType = 'cut';
     } else {
       const roll = rng();
-      trType = roll < 0.58 ? 'crossfade' : roll < 0.88 ? 'cut' : 'zoom_cross';
+      trType = chosenResult.cutImpact >= 0.72 ? 'cut' : roll < 0.58 ? 'crossfade' : roll < 0.88 ? 'cut' : 'zoom_cross';
     }
 
     const idealTrans =
@@ -1942,10 +2213,13 @@ export function generateAutoClipPlan(
       scaleEnd = isImage ? (chosenResult.dur >= 2.2 ? 1.06 : 1.035) : 1.02;
     }
 
+    const clampedDur = Number(
+      Math.max(0.4, Math.min(chosenResult.dur, targetLimit - startSec)).toFixed(2)
+    );
     placements.push({
       binItemId: chosenResult.asset.binItem.id,
       startSec: Number(startSec.toFixed(2)),
-      durationSec: chosenResult.dur,
+      durationSec: clampedDur,
       sourceStartSec: chosenResult.sourceStartSec,
       playbackRate: chosenResult.rate,
       transitionOut: trType,
@@ -1956,6 +2230,37 @@ export function generateAutoClipPlan(
 
     lastBinItemId = chosenResult.asset.binItem.id;
     beatIdx = chosenResult.nextBeatIdx;
+  }
+
+  // Ensure full coverage up to targetLimit when requested without ever overshooting targetLimit
+  if (placements.length > 0 && hasAudio) {
+    const last = placements[placements.length - 1];
+    const lastEnd = Number((last.startSec + last.durationSec).toFixed(2));
+    if (lastEnd > targetLimit) {
+      last.durationSec = Number(Math.max(0.4, targetLimit - last.startSec).toFixed(2));
+    } else if (fillToTargetEnd && lastEnd < targetLimit - 0.02) {
+      const rem = targetLimit - lastEnd;
+      if (rem <= Math.max(beatSec * 3, 4.0) || placements.length >= maxPlacements) {
+        last.durationSec = Number(Math.max(0.4, targetLimit - last.startSec).toFixed(2));
+      } else {
+        // Fill remaining span cleanly if maxPlacements wasn't reached
+        const fallbackAsset =
+          pool.find((p) => p.binItem.id !== lastBinItemId) || pool[0];
+        if (fallbackAsset) {
+          placements.push({
+            binItemId: fallbackAsset.binItem.id,
+            startSec: lastEnd,
+            durationSec: Number(rem.toFixed(2)),
+            sourceStartSec: fallbackAsset.kind === 'video' ? fallbackAsset.initStart : 0,
+            playbackRate: fallbackAsset.kind === 'video' ? fallbackAsset.rate : 1.0,
+            transitionOut: transitionStyle === 'cuts_only' ? 'cut' : 'crossfade',
+            transitionDurationSec: transitionStyle === 'cuts_only' ? 0.08 : 0.45,
+            scaleStart: 1.0,
+            scaleEnd: motionLevel === 'off' ? 1.0 : 1.03,
+          });
+        }
+      }
+    }
   }
 
   return placements;
@@ -1984,7 +2289,7 @@ export function generateRandomBeatAutoClips(
     manualMarkersAbs,
     trimStart,
     maxTimelineSec,
-    { ...options, mode: 'random' }
+    { ...options, mode: 'random', fillToTargetEnd: false }
   );
 }
 

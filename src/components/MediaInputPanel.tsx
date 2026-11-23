@@ -1661,7 +1661,15 @@ export function MediaInputPanel({
                 </h3>
                 {mediaItems.length > 0 && (
                   <span className="text-[11px] font-mono tabular-nums text-gray-400">
-                    {t.seqDurationBadge}: {getTimelineSpanSec(mediaItems, config).toFixed(1)}s
+                    {t.seqDurationBadge}:{' '}
+                    {(audio
+                      ? Math.min(
+                          Math.max(0.5, config.trimEnd - config.trimStart),
+                          getTimelineSpanSec(mediaItems, config)
+                        )
+                      : getTimelineSpanSec(mediaItems, config)
+                    ).toFixed(1)}
+                    s
                   </span>
                 )}
               </div>

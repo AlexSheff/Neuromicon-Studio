@@ -196,35 +196,39 @@ function drawWaveformCanvas(
   const w = Math.max(10, Math.floor(rect.width));
   const h = Math.max(8, Math.floor(rect.height));
   const dpr = Math.min(2, window.devicePixelRatio || 1);
+  // Cap backing-store width to stay safely under GPU/Canvas2D 16384px limits at 16x zoom
+  const maxBufW = 4096;
+  const scaleX = w * dpr > maxBufW ? maxBufW / w : dpr;
+  const targetW = Math.max(1, Math.floor(w * scaleX));
+  const targetH = Math.max(1, Math.floor(h * dpr));
 
-  if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
-    canvas.width = Math.floor(w * dpr);
-    canvas.height = Math.floor(h * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
   }
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
   ctx.save();
-  ctx.scale(dpr, dpr);
+  ctx.scale(scaleX, dpr);
   ctx.clearRect(0, 0, w, h);
 
   if (peaks.length === 0 || options.duration <= 0) {
-    // Subtle baseline dots when no audio loaded
-    const count = Math.max(24, Math.floor(w / 10));
-    const barW = Math.max(2, w / count - 2);
-    ctx.fillStyle = '#1D2230';
-    for (let i = 0; i < count; i++) {
-      const x = (i / count) * w + 1;
-      ctx.fillRect(x, h / 2 - 1, barW, 2);
-    }
+    // Clean unbroken center baseline when no audio is loaded
+    ctx.fillStyle = '#1E2432';
+    ctx.fillRect(0, Math.floor(h / 2), w, 1);
     ctx.restore();
     return;
   }
 
-  const maxBars = Math.min(peaks.length, Math.max(24, Math.floor(w / 3)));
+  // Subtle continuous center line behind waveform bars
+  ctx.fillStyle = '#181D29';
+  ctx.fillRect(0, Math.floor(h / 2), w, 1);
+
+  const maxBars = Math.min(peaks.length, Math.max(24, Math.floor(w / 2.5)));
   const stride = peaks.length / maxBars;
   const slotW = w / maxBars;
-  const barW = Math.max(1.2, slotW - 1);
+  const barW = Math.max(1.2, slotW - 0.8);
 
   for (let i = 0; i < maxBars; i++) {
     const startSample = Math.floor(i * stride);
@@ -249,7 +253,7 @@ function drawWaveformCanvas(
         : '#262B38';
 
     const barH = Math.max(2, maxPeak * (h * 0.84));
-    const x = i * slotW + 0.5;
+    const x = i * slotW;
     const y = (h - barH) * 0.5;
     ctx.fillRect(x, y, barW, barH);
   }
@@ -635,12 +639,13 @@ export function TimelineDock({
     });
   }, [clipDuration, collapsed, localTime, timelineZoom, trimmedWaveformSlice]);
 
-  // Repaint canvases on container resize
+  // Repaint canvases on container or zoomed inner track resize
   useEffect(() => {
     if (collapsed) return;
     const observers: ResizeObserver[] = [];
     const masterEl = masterTimelineRef.current;
     const seqEl = seqScrollRef.current;
+    const innerEl = seqInnerRef.current;
 
     if (masterEl && typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(() => {
@@ -658,7 +663,7 @@ export function TimelineDock({
       observers.push(ro);
     }
 
-    if (seqEl && typeof ResizeObserver !== 'undefined') {
+    if ((seqEl || innerEl) && typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(() => {
         drawWaveformCanvas(seqAudioCanvasRef.current, trimmedWaveformSlice, {
           duration: clipDuration,
@@ -666,7 +671,8 @@ export function TimelineDock({
           showTrimHighlight: false,
         });
       });
-      ro.observe(seqEl);
+      if (seqEl) ro.observe(seqEl);
+      if (innerEl) ro.observe(innerEl);
       observers.push(ro);
     }
 
@@ -1466,7 +1472,7 @@ export function TimelineDock({
 
                 {/* Master Playhead */}
                 <div
-                  className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none z-10"
+                  className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none z-30"
                   style={{
                     left: `${Math.max(0, Math.min(100, (currentTime / audio.duration) * 100))}%`,
                   }}
@@ -1485,7 +1491,7 @@ export function TimelineDock({
                     <div
                       key={tr.id}
                       style={{ height: `${tr.heightPx}px` }}
-                      className="flex items-center text-[9px] font-mono text-gray-500 border-b border-transparent"
+                      className="flex items-center text-[9px] font-mono text-gray-500 border-b border-[#1E2330]"
                     >
                       0:00
                     </div>
@@ -1761,7 +1767,7 @@ export function TimelineDock({
                             handleSeqScrubPointerDown(e);
                           }
                         }}
-                        className={`relative transition-colors ${
+                        className={`relative overflow-hidden transition-colors ${
                           clipDropPreview !== null
                             ? 'bg-amber-500/10 ring-1 ring-inset ring-amber-400/70'
                             : 'bg-[#0B0D11]'
@@ -1784,8 +1790,8 @@ export function TimelineDock({
                             const clip = mediaItems[seg.clipIndex];
                             if (!clip) return null;
                             const segDur = seg.endSec - seg.startSec;
-                            const leftPct = (seg.startSec / clipDuration) * 100;
-                            const widthPct = (segDur / clipDuration) * 100;
+                            const leftPct = Math.max(0, Math.min(100, (seg.startSec / clipDuration) * 100));
+                            const widthPct = Math.max(0, Math.min(100 - leftPct, (segDur / clipDuration) * 100));
                             const isSelected = !selectedFx && selectedClip?.id === clip.id;
                             const isPlayheadInside =
                               localTime >= seg.startSec && localTime < seg.endSec + 0.001;
@@ -1907,7 +1913,7 @@ export function TimelineDock({
                                   style={{
                                     left: `${leftPct}%`,
                                     width: `${widthPct}%`,
-                                    minWidth: '3px',
+                                    minWidth: widthPct > 0.05 && leftPct < 99.6 ? '3px' : undefined,
                                   }}
                                   title={`${clip.fileName} · ${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s (${segDur.toFixed(1)}s)`}
                                   className={`absolute top-0 bottom-0 border-x border-[#262B38] px-1.5 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
@@ -2221,7 +2227,7 @@ export function TimelineDock({
                       <div
                         key={tr.id}
                         style={{ height: `${tr.heightPx}px` }}
-                        className="relative bg-[#090B10] border-t border-[#1E2330]"
+                        className="relative overflow-hidden bg-[#090B10] border-t border-[#1E2330]"
                       >
                         {fxOverlays.length === 0 ? (
                           <button
@@ -2429,7 +2435,7 @@ export function TimelineDock({
                       <div
                         key={tr.id}
                         style={{ height: `${tr.heightPx}px` }}
-                        className="relative bg-[#090C11] border-t border-[#1E2330]"
+                        className="relative overflow-hidden bg-[#090C11] border-t border-[#1E2330]"
                       >
                         {overlaySpans.map((item, ovIdx) => {
                           const { ov, startSec, durationSec } = item;
@@ -2601,7 +2607,7 @@ export function TimelineDock({
                           onToggleBeatMarkerAt(trimBase + ratio * clipDuration);
                         }}
                         title={t.audioTrackDoubleClickHint}
-                        className="relative bg-[#0B0D11] border-t border-[#1E2330] cursor-ew-resize"
+                        className="relative overflow-hidden bg-[#0B0D11] border-t border-[#1E2330] cursor-ew-resize"
                       >
                         {audio && config.fadeOutSec > 0.1 && (
                           <div
@@ -2666,7 +2672,7 @@ export function TimelineDock({
                     <div
                       key={tr.id}
                       style={{ height: `${tr.heightPx}px` }}
-                      className="relative bg-[#0A0C10] border-t border-[#1E2330]"
+                      className="relative overflow-hidden bg-[#0A0C10] border-t border-[#1E2330]"
                     >
                       {config.subtitles.map((cue) => {
                         const relStart = cue.startSec - trimBase;
@@ -2706,10 +2712,10 @@ export function TimelineDock({
 
                 {/* Unified Continuous Vertical Playhead */}
                 <div
-                  className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none z-20"
+                  className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none z-40"
                   style={{ left: `${playheadPct}%` }}
                 >
-                  <div className="w-2 h-2 -ml-[3px] bg-amber-400 rotate-45 -mt-0.5" />
+                  <div className="w-2 h-2 -ml-[3px] bg-amber-400 rotate-45 mt-0" />
                 </div>
               </div>
             </div>
