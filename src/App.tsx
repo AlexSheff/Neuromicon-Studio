@@ -612,6 +612,9 @@ export default function App() {
     );
   }, [audio, config.beatSensitivity, config.trimEnd, config.trimStart]);
 
+  const trackBeatGridRef = useRef(trackBeatGrid);
+  trackBeatGridRef.current = trackBeatGrid;
+
   const stopPlayback = useCallback(() => {
     playSessionRef.current++;
     if (sourceNodeRef.current) {
@@ -917,17 +920,18 @@ export default function App() {
         const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
         let desiredStart = Math.max(0, currentTimeRef.current - bounds.trimBase);
 
+        const beatPoints = trackBeatGridRef.current.beats;
         if (options?.atTimeSec !== undefined) {
           desiredStart = Math.max(0, options.atTimeSec);
-          if (cfg.snapToBeats && trackBeatGrid.beats.length > 1) {
-            desiredStart = snapTimeToBeat(desiredStart, [0, ...trackBeatGrid.beats], 0.25);
+          if (cfg.snapToBeats && beatPoints.length > 1) {
+            desiredStart = snapTimeToBeat(desiredStart, [0, ...beatPoints], 0.25);
           }
         } else if (options?.mode === 'end') {
           const intervals = getNormalizedManualClipIntervals(items);
           desiredStart =
             intervals.length > 0 ? intervals[intervals.length - 1].endSec : 0;
-        } else if (cfg.snapToBeats && trackBeatGrid.beats.length > 1) {
-          desiredStart = snapTimeToBeat(desiredStart, [0, ...trackBeatGrid.beats], 0.25);
+        } else if (cfg.snapToBeats && beatPoints.length > 1) {
+          desiredStart = snapTimeToBeat(desiredStart, [0, ...beatPoints], 0.25);
         }
 
         const slot = findManualInsertionSlot(items, desiredStart, defaultDur, maxTimeline);
@@ -957,7 +961,6 @@ export default function App() {
       buildClipFromBinItem,
       getEffectiveTimelineBounds,
       pushImmediateHistory,
-      trackBeatGrid.beats,
     ]
   );
 
@@ -1141,14 +1144,16 @@ export default function App() {
     [ingestVisualAssetFromUrl, stopPlayback]
   );
 
-  // Restore autosaved project from IndexedDB on initial mount
+  const applyAudioBufferRef = useRef(applyAudioBuffer);
+  applyAudioBufferRef.current = applyAudioBuffer;
+
+  // Restore autosaved project from IndexedDB strictly once on initial mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const saved = await loadProjectFromIDB();
         if (!saved || cancelled) {
-          hydratedRef.current = true;
           return;
         }
 
@@ -1193,7 +1198,7 @@ export default function App() {
             const demoBuf = await generateDemoAudioBuffer();
             if (!cancelled) {
               audioBlobKeyRef.current = undefined;
-              applyAudioBuffer(
+              applyAudioBufferRef.current(
                 demoBuf,
                 saved.audioMeta.fileName,
                 saved.audioMeta.fileSize,
@@ -1216,7 +1221,7 @@ export default function App() {
               const ctx = getAudioContext();
               const decoded = await ctx.decodeAudioData(arr.slice(0));
               if (!cancelled) {
-                applyAudioBuffer(
+                applyAudioBufferRef.current(
                   decoded,
                   saved.audioMeta.fileName,
                   saved.audioMeta.fileSize,
@@ -1458,14 +1463,16 @@ export default function App() {
       } catch {
         // Ignore IDB hydration errors cleanly
       } finally {
-        hydratedRef.current = true;
+        if (!cancelled) {
+          hydratedRef.current = true;
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [applyAudioBuffer, getAudioContext]);
+  }, [getAudioContext]);
 
   // Debounced IndexedDB autosave + orphan blob pruning
   useEffect(() => {
@@ -1475,39 +1482,52 @@ export default function App() {
     }
     setSaveStatus('saving');
     autosaveTimerRef.current = window.setTimeout(async () => {
-      const serialized = serializeStudioState(
-        config,
-        mediaItems,
-        blobKeyMapRef.current,
-        audio?.fileName,
-        audio?.fileSize,
-        audio?.isSyntheticDemo,
-        audioBlobKeyRef.current,
-        mediaBin
-      );
-      const res = await saveProjectToIDB(serialized);
-      if (!res.ok) {
+      try {
+        const serialized = serializeStudioState(
+          config,
+          mediaItems,
+          blobKeyMapRef.current,
+          audio?.fileName,
+          audio?.fileSize,
+          audio?.isSyntheticDemo,
+          audioBlobKeyRef.current,
+          mediaBin
+        );
+        const res = await saveProjectToIDB(serialized);
+        if (!res.ok) {
+          setSaveStatus('error');
+          showError(res.error || tFor(langRef.current).saveStatusError);
+        } else {
+          const activeKeys = new Set<string>();
+          if (audioBlobKeyRef.current) activeKeys.add(audioBlobKeyRef.current);
+          for (const b of mediaBin) {
+            const key = b.url ? blobKeyMapRef.current.get(b.url) : undefined;
+            if (key) activeKeys.add(key);
+          }
+          for (const item of mediaItems) {
+            const key = item.url ? blobKeyMapRef.current.get(item.url) : undefined;
+            if (key) activeKeys.add(key);
+          }
+          for (const ov of config.overlays) {
+            if (ov.kind === 'image') activeKeys.add(`overlay-${ov.id}`);
+          }
+          await pruneOrphanedBlobs(activeKeys);
+          setSaveStatus('saved');
+        }
+      } catch (err) {
         setSaveStatus('error');
-        showError(res.error || tFor(langRef.current).saveStatusError);
-      } else {
-        const activeKeys = new Set<string>();
-        if (audioBlobKeyRef.current) activeKeys.add(audioBlobKeyRef.current);
-        for (const b of mediaBin) {
-          const key = b.url ? blobKeyMapRef.current.get(b.url) : undefined;
-          if (key) activeKeys.add(key);
-        }
-        for (const item of mediaItems) {
-          const key = item.url ? blobKeyMapRef.current.get(item.url) : undefined;
-          if (key) activeKeys.add(key);
-        }
-        for (const ov of config.overlays) {
-          if (ov.kind === 'image') activeKeys.add(`overlay-${ov.id}`);
-        }
-        await pruneOrphanedBlobs(activeKeys);
-        setSaveStatus('saved');
+        showError(err instanceof Error ? err.message : tFor(langRef.current).saveStatusError);
+      } finally {
+        autosaveTimerRef.current = null;
       }
-      autosaveTimerRef.current = null;
     }, 900);
+
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
   }, [audio, config, mediaBin, mediaItems, showError]);
 
   const handleAudioFile = useCallback(
