@@ -538,6 +538,71 @@ export function resizeManualClipDuration(
 }
 
 /**
+ * Inserts a new clip into a manual timeline anchored right after `anchorStartSec` (playhead).
+ * If an existing clip spans `anchorStartSec` with >= 0.4s to the left, its right tail is trimmed
+ * to `anchorStartSec` (no split/duplication) and the new clip starts cleanly at `anchorStartSec`.
+ * Any existing clip starting near/after `anchorStartSec` shifts right to stay non-overlapping.
+ */
+export function insertManualClipAtAnchor(
+  mediaItems: VisualMediaState[],
+  newClip: VisualMediaState,
+  anchorStartSec: number,
+  maxTimelineSec = 3600
+): VisualMediaState[] {
+  const newDur = Math.max(0.4, Math.min(600, newClip.durationSec || 4));
+  const clampedAnchor = Math.max(
+    0,
+    Math.min(Math.max(0, maxTimelineSec - 0.5), anchorStartSec)
+  );
+  const startSec = Number(clampedAnchor.toFixed(2));
+  const insertedEnd = Number((startSec + newDur).toFixed(2));
+
+  const placedNewClip: VisualMediaState = {
+    ...newClip,
+    startSec,
+    durationSec: Number(newDur.toFixed(2)),
+  };
+
+  if (mediaItems.length === 0) {
+    return [placedNewClip];
+  }
+
+  const intervals = getNormalizedManualClipIntervals(mediaItems);
+  const patchById = new Map<string, { startSec: number; durationSec?: number }>();
+  let downstreamCursor = insertedEnd;
+
+  for (const iv of intervals) {
+    if (iv.endSec <= startSec + 0.01) {
+      continue;
+    }
+
+    if (iv.startSec <= startSec - 0.4) {
+      const trimmedDur = Number(Math.max(0.4, startSec - iv.startSec).toFixed(2));
+      patchById.set(iv.id, {
+        startSec: Number(iv.startSec.toFixed(2)),
+        durationSec: trimmedDur,
+      });
+    } else {
+      const nextStart = Number(Math.max(downstreamCursor, iv.startSec).toFixed(2));
+      patchById.set(iv.id, { startSec: nextStart });
+      downstreamCursor = Number((nextStart + iv.durationSec).toFixed(2));
+    }
+  }
+
+  const updatedExisting = mediaItems.map((m) => {
+    const patch = patchById.get(m.id);
+    if (!patch) return m;
+    return patch.durationSec !== undefined
+      ? { ...m, startSec: patch.startSec, durationSec: patch.durationSec }
+      : { ...m, startSec: patch.startSec };
+  });
+
+  return [...updatedExisting, placedNewClip].sort(
+    (a, b) => (a.startSec ?? 0) - (b.startSec ?? 0)
+  );
+}
+
+/**
  * Computes exact non-overlapping timeline segments for all clips across [0 .. clipDuration].
  */
 export function computeClipTimelineSegments(
@@ -569,7 +634,7 @@ export function computeClipTimelineSegments(
     return segments;
   }
 
-  if (count === 1) {
+  if (count === 1 && config.slideshowMode !== 'custom_durations') {
     return [{ clipIndex: 0, startSec: 0, endSec: clipDuration, isLoopRepeat: false }];
   }
 

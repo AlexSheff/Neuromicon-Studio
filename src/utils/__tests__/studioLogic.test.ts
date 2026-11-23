@@ -9,6 +9,7 @@ import {
   detectTrackBpmAndBeats,
   findManualInsertionSlot,
   getTimelineSpanSec,
+  insertManualClipAtAnchor,
   packTimelineLanes,
   resizeManualClipDuration,
   resolveActiveSlideshowSlice,
@@ -398,3 +399,44 @@ test('resizeManualClipDuration grows into gaps first, pushes overlapping neighbo
   assert.equal(shrunk[1].startSec, 6);
   assert.equal(shrunk[2].startSec, 11);
 });
+
+test('insertManualClipAtAnchor attaches overlapping clip right of playhead without split/alternation', () => {
+  // Clip A occupies full 24s track [0..24], clip B sits downstream? Test 1: single full-track clip A [0..24]
+  const fullA = [{ ...makeClip('a', 24), id: 'a', startSec: 0 }];
+  const newClipB = makeClip('b', 6);
+  // Playhead at t=5s -> A trims cleanly to [0..5], B attaches right of playhead [5..11] (never alternating A->B->A)
+  const insertedMid = insertManualClipAtAnchor(fullA, newClipB, 5, 24);
+  assert.equal(insertedMid.length, 2);
+  assert.equal(insertedMid[0].id, 'a');
+  assert.equal(insertedMid[0].startSec, 0);
+  assert.equal(insertedMid[0].durationSec, 5);
+  assert.equal(insertedMid[1].id, 'b');
+  assert.equal(insertedMid[1].startSec, 5);
+  assert.equal(insertedMid[1].durationSec, 6);
+
+  // Test 2: playhead at start (t=0s) shifts A and downstream C right cleanly instead of deleting A
+  const twoClips = [
+    { ...makeClip('a', 4), id: 'a', startSec: 0 },
+    { ...makeClip('c', 3), id: 'c', startSec: 5 },
+  ];
+  const atZero = insertManualClipAtAnchor(twoClips, makeClip('b', 3), 0, 24);
+  assert.equal(atZero.length, 3);
+  assert.equal(atZero[0].id, 'b');
+  assert.equal(atZero[0].startSec, 0);
+  assert.equal(atZero[0].durationSec, 3);
+  assert.equal(atZero[1].id, 'a');
+  assert.equal(atZero[1].startSec, 3);
+  assert.equal(atZero[2].id, 'c');
+  assert.equal(atZero[2].startSec, 7);
+
+  // Test 3: single clip in custom_durations preserves its real duration on initial segment
+  const singleCustomCfg: StudioConfig = {
+    ...DEFAULT_STUDIO_CONFIG,
+    slideshowMode: 'custom_durations',
+  };
+  const customSegs = computeClipTimelineSegments([makeClip('solo', 4)], 10, singleCustomCfg, [0]);
+  assert.equal(customSegs[0].startSec, 0);
+  assert.equal(customSegs[0].endSec, 4);
+  assert.equal(customSegs[0].isLoopRepeat, false);
+});
+

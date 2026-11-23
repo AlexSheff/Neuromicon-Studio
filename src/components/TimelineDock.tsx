@@ -63,7 +63,12 @@ interface TimelineDockProps {
   onInspectFx: (id: string) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
   onMoveClipPosition?: (clipId: string, rawStartSec: number) => void;
-  onTrimClipLeftEdge?: (clipId: string, nextStartSec: number, nextDurSec: number) => void;
+  onTrimClipLeftEdge?: (
+    clipId: string,
+    nextStartSec: number,
+    nextDurSec: number,
+    nextSourceStartSec?: number
+  ) => void;
   onDropBinItemToTimeline?: (binItemId: string, atTimeSec: number) => void;
   onDropFilesToTimeline?: (files: File[], atTimeSec: number) => void;
   onApplyClipOverlay: (
@@ -323,7 +328,17 @@ export function TimelineDock({
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-  const [clipTrackDropPct, setClipTrackDropPct] = useState<number | null>(null);
+  const [clipDropPreview, setClipDropPreview] = useState<{
+    pct: number;
+    anchoredToPlayhead: boolean;
+  } | null>(null);
+  const [clipDragHud, setClipDragHud] = useState<{
+    clipId: string;
+    mode: 'move' | 'left' | 'right';
+    startSec: number;
+    endSec: number;
+    durSec: number;
+  } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const masterTimelineRef = useRef<HTMLDivElement>(null);
@@ -346,7 +361,10 @@ export function TimelineDock({
   const clipResizeRef = useRef<{
     clipId: string;
     mode: 'move' | 'left' | 'right';
+    kind: VisualMediaState['kind'];
     segStartSec: number;
+    origSourceStartSec: number;
+    playbackRate: number;
     startX: number;
     startDur: number;
     prevLimitSec: number;
@@ -464,10 +482,10 @@ export function TimelineDock({
 
   const clipDuration = audio
     ? contentSpanSec
-    : Math.max(20, Math.ceil((contentSpanSec + 6) / 4) * 4);
+    : Math.max(24, Math.ceil((contentSpanSec + Math.max(12, contentSpanSec * 0.35)) / 4) * 4);
 
   const trimBase = audio ? config.trimStart : 0;
-  const localTime = Math.max(0, Math.min(contentSpanSec, currentTime - trimBase));
+  const localTime = Math.max(0, Math.min(clipDuration, currentTime - trimBase));
 
   const clipSegments = computeClipTimelineSegments(
     mediaItems,
@@ -1579,15 +1597,39 @@ export function TimelineDock({
 
                   if (tr.id === 'clips') {
                     const isManualMode = config.slideshowMode === 'manual';
-                    const resolveDropTime = (clientX: number) => {
+                    const resolveDropInfo = (clientX: number) => {
                       const rect = seqInnerRef.current?.getBoundingClientRect();
-                      if (!rect || rect.width <= 0) return localTime;
-                      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-                      let rawSec = ratio * clipDuration;
-                      if (config.snapToBeats && relSnapPoints.length > 0) {
-                        rawSec = snapTimeToBeat(rawSec, relSnapPoints, 0.22);
+                      if (!rect || rect.width <= 0) {
+                        return {
+                          dropSec: localTime,
+                          previewPct: playheadPct,
+                          anchoredToPlayhead: false,
+                        };
                       }
-                      return Math.max(0, Number(rawSec.toFixed(2)));
+                      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+                      const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
+                      const overExisting =
+                        isManualMode &&
+                        clipSegments.some(
+                          (s) => rawSec >= s.startSec - 0.08 && rawSec <= s.endSec + 0.08
+                        );
+                      if (overExisting) {
+                        return {
+                          dropSec: rawSec,
+                          previewPct: playheadPct,
+                          anchoredToPlayhead: true,
+                        };
+                      }
+                      let snappedSec = rawSec;
+                      if (config.snapToBeats && relSnapPoints.length > 0) {
+                        snappedSec = snapTimeToBeat(rawSec, relSnapPoints, 0.22);
+                      }
+                      const finalSec = Math.max(0, Number(snappedSec.toFixed(2)));
+                      return {
+                        dropSec: finalSec,
+                        previewPct: Math.max(0, Math.min(100, (finalSec / clipDuration) * 100)),
+                        anchoredToPlayhead: false,
+                      };
                     };
 
                     return (
@@ -1600,15 +1642,18 @@ export function TimelineDock({
                           if (!hasBin && !hasFiles) return;
                           e.preventDefault();
                           e.dataTransfer.dropEffect = 'copy';
-                          const sec = resolveDropTime(e.clientX);
-                          setClipTrackDropPct(Math.max(0, Math.min(100, (sec / clipDuration) * 100)));
+                          const info = resolveDropInfo(e.clientX);
+                          setClipDropPreview({
+                            pct: info.previewPct,
+                            anchoredToPlayhead: info.anchoredToPlayhead,
+                          });
                         }}
                         onDragLeave={(e) => {
                           if (
                             e.currentTarget === e.target ||
                             !e.currentTarget.contains(e.relatedTarget as Node | null)
                           ) {
-                            setClipTrackDropPct(null);
+                            setClipDropPreview(null);
                           }
                         }}
                         onDrop={(e) => {
@@ -1617,13 +1662,13 @@ export function TimelineDock({
                           if (!binId && files.length === 0) return;
                           e.preventDefault();
                           e.stopPropagation();
-                          const dropSec = resolveDropTime(e.clientX);
-                          setClipTrackDropPct(null);
+                          const info = resolveDropInfo(e.clientX);
+                          setClipDropPreview(null);
                           if (binId && onDropBinItemToTimeline) {
-                            onDropBinItemToTimeline(binId, dropSec);
+                            onDropBinItemToTimeline(binId, info.dropSec);
                           } else if (files.length > 0) {
                             if (onDropFilesToTimeline) {
-                              onDropFilesToTimeline(files, dropSec);
+                              onDropFilesToTimeline(files, info.dropSec);
                             } else {
                               onVisualFiles(files);
                             }
@@ -1636,11 +1681,17 @@ export function TimelineDock({
                         }}
                         className="relative bg-[#0B0D11]"
                       >
-                        {clipTrackDropPct !== null && (
+                        {clipDropPreview !== null && (
                           <div
-                            className="absolute top-0 bottom-0 w-0.5 bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.9)] z-30 pointer-events-none"
-                            style={{ left: `${clipTrackDropPct}%` }}
-                          />
+                            className="absolute top-0 bottom-0 w-0.5 bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.95)] z-30 pointer-events-none"
+                            style={{ left: `${clipDropPreview.pct}%` }}
+                          >
+                            {clipDropPreview.anchoredToPlayhead && (
+                              <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-amber-500 text-zinc-950 text-[8px] font-mono font-bold shadow whitespace-nowrap">
+                                ▶+
+                              </span>
+                            )}
+                          </div>
                         )}
                         {clipSegments.length > 0 ? (
                           clipSegments.map((seg, idx) => {
@@ -1666,6 +1717,8 @@ export function TimelineDock({
                                 ? clipDuration
                                 : 3600;
                             const segLeftPct = (seg.endSec / clipDuration) * 100;
+                            const activeHud =
+                              clipDragHud && clipDragHud.clipId === clip.id ? clipDragHud : null;
 
                             return (
                               <React.Fragment key={`${clip.id}-${idx}`}>
@@ -1703,7 +1756,10 @@ export function TimelineDock({
                                       clipResizeRef.current = {
                                         clipId: clip.id,
                                         mode: 'move',
+                                        kind: clip.kind,
                                         segStartSec: seg.startSec,
+                                        origSourceStartSec: clip.sourceStartSec || 0,
+                                        playbackRate: clip.playbackRate || 1,
                                         startX: e.clientX,
                                         startDur: segDur,
                                         prevLimitSec,
@@ -1727,18 +1783,28 @@ export function TimelineDock({
                                         seqInnerRef.current?.getBoundingClientRect().width || 600;
                                       const deltaSec =
                                         ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
-                                      onMoveClipPosition(clip.id, drag.segStartSec + deltaSec);
+                                      const proposed = Math.max(0, drag.segStartSec + deltaSec);
+                                      onMoveClipPosition(clip.id, proposed);
+                                      setClipDragHud({
+                                        clipId: clip.id,
+                                        mode: 'move',
+                                        startSec: Number(proposed.toFixed(1)),
+                                        endSec: Number((proposed + drag.startDur).toFixed(1)),
+                                        durSec: Number(drag.startDur.toFixed(1)),
+                                      });
                                     }
                                   }}
                                   onPointerUp={(e) => {
                                     if (clipResizeRef.current?.clipId === clip.id) {
                                       e.stopPropagation();
                                       clipResizeRef.current = null;
+                                      setClipDragHud(null);
                                     }
                                   }}
                                   onPointerCancel={() => {
                                     if (clipResizeRef.current?.clipId === clip.id) {
                                       clipResizeRef.current = null;
+                                      setClipDragHud(null);
                                     }
                                   }}
                                   onClick={(e) => {
@@ -1757,7 +1823,7 @@ export function TimelineDock({
                                     width: `${Math.max(1.2, widthPct)}%`,
                                   }}
                                   title={`${clip.fileName} · ${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s (${segDur.toFixed(1)}s)`}
-                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-2 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
+                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-2.5 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
                                     isManualMode
                                       ? 'cursor-grab active:cursor-grabbing'
                                       : 'cursor-pointer'
@@ -1808,11 +1874,22 @@ export function TimelineDock({
                                   {clip.kind === 'video' && !clip.clipAudioMuted && (
                                     <Volume2 className="w-2.5 h-2.5 text-amber-300 shrink-0 pointer-events-none" />
                                   )}
-                                  <span className="ml-auto mr-1 px-1 py-0.5 rounded bg-[#0B0D11]/80 border border-[#262B38] text-[9px] font-mono tabular-nums text-amber-300 shrink-0 pointer-events-none">
+                                  <span className="ml-auto mr-1.5 px-1 py-0.5 rounded bg-[#0B0D11]/80 border border-[#262B38] text-[9px] font-mono tabular-nums text-amber-300 shrink-0 pointer-events-none">
                                     {segDur.toFixed(1)}s
                                   </span>
 
-                                  {/* Left-Edge Trim Handle (Manual Mode) */}
+                                  {/* Live Edge Trim / Move Readout */}
+                                  {activeHud && (
+                                    <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 z-30 px-1.5 py-0 rounded bg-[#0B0D11]/95 border border-amber-400/80 text-[8.5px] font-mono tabular-nums text-amber-200 shadow pointer-events-none whitespace-nowrap">
+                                      {activeHud.mode === 'left'
+                                        ? `In ${activeHud.startSec.toFixed(1)}s · ${activeHud.durSec.toFixed(1)}s`
+                                        : activeHud.mode === 'right'
+                                          ? `Out ${activeHud.endSec.toFixed(1)}s · ${activeHud.durSec.toFixed(1)}s`
+                                          : `${activeHud.startSec.toFixed(1)}–${activeHud.endSec.toFixed(1)}s`}
+                                    </span>
+                                  )}
+
+                                  {/* Left-Edge Trim Handle (Hover edge to trim start & video in-point) */}
                                   {isManualMode && !seg.isLoopRepeat && (
                                     <div
                                       onPointerDown={(e) => {
@@ -1820,13 +1897,16 @@ export function TimelineDock({
                                         clipResizeRef.current = {
                                           clipId: clip.id,
                                           mode: 'left',
+                                          kind: clip.kind,
                                           segStartSec: seg.startSec,
+                                          origSourceStartSec: clip.sourceStartSec || 0,
+                                          playbackRate: clip.playbackRate || 1,
                                           startX: e.clientX,
                                           startDur: segDur,
                                           prevLimitSec,
                                           nextLimitSec,
                                           trackScaleSec: clipDuration,
-                                          hasMoved: false,
+                                          hasMoved: true,
                                         };
                                         e.currentTarget.setPointerCapture(e.pointerId);
                                         onSelectClip(clip.id);
@@ -1860,37 +1940,67 @@ export function TimelineDock({
                                         const nextDur = Number(
                                           Math.max(0.5, fixedEnd - roundedStart).toFixed(2)
                                         );
+                                        const nextSourceStart =
+                                          drag.kind === 'video'
+                                            ? Math.max(
+                                                0,
+                                                Number(
+                                                  (
+                                                    drag.origSourceStartSec +
+                                                    (roundedStart - drag.segStartSec) *
+                                                      drag.playbackRate
+                                                  ).toFixed(2)
+                                                )
+                                              )
+                                            : undefined;
+                                        setClipDragHud({
+                                          clipId: clip.id,
+                                          mode: 'left',
+                                          startSec: roundedStart,
+                                          endSec: fixedEnd,
+                                          durSec: nextDur,
+                                        });
                                         if (onTrimClipLeftEdge) {
-                                          onTrimClipLeftEdge(clip.id, roundedStart, nextDur);
+                                          onTrimClipLeftEdge(
+                                            clip.id,
+                                            roundedStart,
+                                            nextDur,
+                                            nextSourceStart
+                                          );
                                         } else {
                                           onUpdateClip(clip.id, {
                                             startSec: roundedStart,
                                             durationSec: nextDur,
+                                            ...(nextSourceStart !== undefined
+                                              ? { sourceStartSec: nextSourceStart }
+                                              : {}),
                                           });
                                         }
                                       }}
                                       onPointerUp={(e) => {
                                         e.stopPropagation();
                                         clipResizeRef.current = null;
+                                        setClipDragHud(null);
                                       }}
                                       onPointerCancel={() => {
                                         clipResizeRef.current = null;
+                                        setClipDragHud(null);
                                       }}
                                       onClick={(e) => e.stopPropagation()}
                                       title={t.trimStartHandleAria}
-                                      className="group/trim-l absolute top-0 left-0 bottom-0 w-2.5 z-10 cursor-ew-resize flex items-center justify-start pl-0.5 hover:bg-amber-400/35 transition-colors"
+                                      className="group/trim-l absolute top-0 left-0 bottom-0 w-3 max-w-[28%] z-20 cursor-ew-resize flex items-center justify-start pl-0.5 hover:bg-amber-400/35 transition-colors"
                                     >
                                       <span
-                                        className={`w-0.5 h-4 rounded-full transition-colors ${
+                                        className={`w-0.5 h-5 rounded-full transition-all ${
                                           isSelected
-                                            ? 'bg-amber-300/90 group-hover/trim-l:bg-amber-200'
-                                            : 'bg-gray-500/45 group-hover:bg-amber-400/80'
+                                            ? 'bg-amber-300/90 group-hover/trim-l:w-1 group-hover/trim-l:bg-amber-200 group-hover/trim-l:shadow-[0_0_6px_rgba(245,158,11,0.9)]'
+                                            : 'bg-gray-500/45 group-hover:bg-amber-400/80 group-hover/trim-l:w-1 group-hover/trim-l:bg-amber-300'
                                         }`}
                                       />
                                     </div>
                                   )}
 
-                                  {/* Right-Edge Duration Resize Handle (with Beat & Neighbor Snapping) */}
+                                  {/* Right-Edge Duration Resize Handle (Hover edge to trim end) */}
                                   {!seg.isLoopRepeat && (
                                     <div
                                       onPointerDown={(e) => {
@@ -1898,13 +2008,16 @@ export function TimelineDock({
                                         clipResizeRef.current = {
                                           clipId: clip.id,
                                           mode: 'right',
+                                          kind: clip.kind,
                                           segStartSec: seg.startSec,
+                                          origSourceStartSec: clip.sourceStartSec || 0,
+                                          playbackRate: clip.playbackRate || 1,
                                           startX: e.clientX,
                                           startDur: segDur,
                                           prevLimitSec,
                                           nextLimitSec,
                                           trackScaleSec: clipDuration,
-                                          hasMoved: false,
+                                          hasMoved: true,
                                         };
                                         e.currentTarget.setPointerCapture(e.pointerId);
                                         onSelectClip(clip.id);
@@ -1918,7 +2031,7 @@ export function TimelineDock({
                                           seqInnerRef.current?.getBoundingClientRect().width || 600;
                                         const deltaSec =
                                           ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
-                                        const maxDur = 120;
+                                        const maxDur = Math.max(600, drag.trackScaleSec);
                                         let nextDur = Math.max(
                                           0.5,
                                           Math.min(maxDur, drag.startDur + deltaSec)
@@ -1937,33 +2050,43 @@ export function TimelineDock({
                                             Math.min(maxDur, snappedEnd - drag.segStartSec)
                                           );
                                         }
+                                        const roundedDur = Number(nextDur.toFixed(2));
+                                        setClipDragHud({
+                                          clipId: clip.id,
+                                          mode: 'right',
+                                          startSec: drag.segStartSec,
+                                          endSec: drag.segStartSec + roundedDur,
+                                          durSec: roundedDur,
+                                        });
                                         onUpdateClip(clip.id, {
-                                          durationSec: Number(nextDur.toFixed(2)),
+                                          durationSec: roundedDur,
                                         });
                                       }}
                                       onPointerUp={(e) => {
                                         e.stopPropagation();
                                         clipResizeRef.current = null;
+                                        setClipDragHud(null);
                                       }}
                                       onPointerCancel={() => {
                                         clipResizeRef.current = null;
+                                        setClipDragHud(null);
                                       }}
                                       onClick={(e) => e.stopPropagation()}
-                                      title={t.clipDurationLabel}
-                                      className="group/trim-r absolute top-0 right-0 bottom-0 w-2.5 z-10 cursor-ew-resize flex items-center justify-end pr-0.5 hover:bg-amber-400/35 transition-colors"
+                                      title={t.trimEndHandleAria}
+                                      className="group/trim-r absolute top-0 right-0 bottom-0 w-3 max-w-[28%] z-20 cursor-ew-resize flex items-center justify-end pr-0.5 hover:bg-amber-400/35 transition-colors"
                                     >
                                       <span
-                                        className={`w-0.5 h-4 rounded-full transition-colors ${
+                                        className={`w-0.5 h-5 rounded-full transition-all ${
                                           isSelected
-                                            ? 'bg-amber-300/90 group-hover/trim-r:bg-amber-200'
-                                            : 'bg-gray-500/45 group-hover:bg-amber-400/80'
+                                            ? 'bg-amber-300/90 group-hover/trim-r:w-1 group-hover/trim-r:bg-amber-200 group-hover/trim-r:shadow-[0_0_6px_rgba(245,158,11,0.9)]'
+                                            : 'bg-gray-500/45 group-hover:bg-amber-400/80 group-hover/trim-r:w-1 group-hover/trim-r:bg-amber-300'
                                         }`}
                                       />
                                     </div>
                                   )}
                                 </div>
 
-                                {/* Boundary Transition Pill (only when touching adjacent clip) */}
+                                {/* Boundary Transition Pill positioned cleanly on top seam so trim edges remain unobstructed */}
                                 {isTouchingNext && mediaItems.length > 1 && (
                                   <button
                                     type="button"
@@ -1980,10 +2103,10 @@ export function TimelineDock({
                                     }}
                                     style={{ left: `${segLeftPct}%` }}
                                     title={`${t.clipTransitionLabel}: ${clip.transitionOut}`}
-                                    className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 z-10 px-1 py-0.5 rounded border text-[8px] font-mono cursor-pointer shadow ${
+                                    className={`absolute top-0.5 -translate-x-1/2 z-30 px-1 py-0 rounded border text-[7.5px] leading-[13px] font-mono cursor-pointer shadow ${
                                       transMenu?.clipId === clip.id
                                         ? 'bg-amber-500 text-zinc-950 border-amber-300 font-bold'
-                                        : 'bg-[#0E1016] border-[#323849] hover:border-amber-400 text-amber-300'
+                                        : 'bg-[#0E1016]/95 border-[#323849] hover:border-amber-400 text-amber-300'
                                     }`}
                                   >
                                     {transitionShortTag(

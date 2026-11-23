@@ -399,35 +399,49 @@ export function InspectorPanel({
 
                 {/* Clip Duration */}
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-gray-200 font-medium">{t.clipDurationLabel}</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min={0.5}
-                        max={120}
-                        step={0.5}
-                        value={Number(selectedClip.durationSec.toFixed(1))}
-                        onChange={(e) => {
-                          const v = Math.max(0.5, Math.min(120, Number(e.target.value) || 0.5));
-                          onUpdateClip(selectedClip.id, { durationSec: Number(v.toFixed(1)) });
-                        }}
-                        className="w-14 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
-                      />
-                      <span className="text-[11px] font-mono text-gray-500">s</span>
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={60}
-                    step={0.5}
-                    value={Math.min(60, selectedClip.durationSec)}
-                    onChange={(e) =>
-                      onUpdateClip(selectedClip.id, { durationSec: Number(e.target.value) })
-                    }
-                    className="w-full studio-slider"
-                  />
+                  {(() => {
+                    const sliderMax = Math.max(
+                      60,
+                      Math.ceil(Math.max(selectedClip.durationSec, selectedClip.videoDuration || 0) / 10) * 10
+                    );
+                    const inputMax = Math.max(600, sliderMax);
+                    return (
+                      <>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-gray-200 font-medium">{t.clipDurationLabel}</span>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min={0.5}
+                              max={inputMax}
+                              step={0.5}
+                              value={Number(selectedClip.durationSec.toFixed(1))}
+                              onChange={(e) => {
+                                const v = Math.max(
+                                  0.5,
+                                  Math.min(inputMax, Number(e.target.value) || 0.5)
+                                );
+                                onUpdateClip(selectedClip.id, { durationSec: Number(v.toFixed(1)) });
+                              }}
+                              className="w-14 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
+                            />
+                            <span className="text-[11px] font-mono text-gray-500">s</span>
+                          </div>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.5}
+                          max={sliderMax}
+                          step={0.5}
+                          value={Math.min(sliderMax, selectedClip.durationSec)}
+                          onChange={(e) =>
+                            onUpdateClip(selectedClip.id, { durationSec: Number(e.target.value) })
+                          }
+                          className="w-full studio-slider"
+                        />
+                      </>
+                    );
+                  })()}
                   <div className="grid grid-cols-5 gap-1">
                     {[2, 4, 5, 8, 12].map((sec) => (
                       <button
