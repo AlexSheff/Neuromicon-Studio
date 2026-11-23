@@ -34,6 +34,7 @@ import {
   OverlayBlendMode,
   OverlayLayer,
   SlideTransitionType,
+  SlideshowMode,
   StudioConfig,
   TimelineGeneratorOverlay,
   VisualMediaState,
@@ -105,6 +106,7 @@ interface TimelineDockProps {
   beatGridPoints: number[];
   onSetTrimStart: (sec: number) => void;
   onSetTrimEnd: (sec: number) => void;
+  onChangeSlideshowMode?: (mode: SlideshowMode) => void;
 }
 
 type GenAddTarget = 'fx_track' | 'clip_overlay' | 'clip_scene';
@@ -293,6 +295,7 @@ export function TimelineDock({
   beatGridPoints,
   onSetTrimStart,
   onSetTrimEnd,
+  onChangeSlideshowMode,
 }: TimelineDockProps) {
   const t = tFor(lang);
 
@@ -348,6 +351,7 @@ export function TimelineDock({
     startDur: number;
     prevLimitSec: number;
     nextLimitSec: number;
+    trackScaleSec: number;
     hasMoved: boolean;
   } | null>(null);
   const fxDragRef = useRef<{
@@ -356,6 +360,7 @@ export function TimelineDock({
     startX: number;
     origStart: number;
     origDur: number;
+    trackScaleSec: number;
   } | null>(null);
   const ovDragRef = useRef<{
     ovId: string;
@@ -363,6 +368,7 @@ export function TimelineDock({
     startX: number;
     origStart: number;
     origDur: number;
+    trackScaleSec: number;
   } | null>(null);
 
   const closeAllPopovers = useCallback(() => {
@@ -452,16 +458,20 @@ export function TimelineDock({
     };
   }, []);
 
-  const clipDuration = audio
+  const contentSpanSec = audio
     ? Math.max(0.5, config.trimEnd - config.trimStart)
     : getTimelineSpanSec(mediaItems, config);
 
+  const clipDuration = audio
+    ? contentSpanSec
+    : Math.max(20, Math.ceil((contentSpanSec + 6) / 4) * 4);
+
   const trimBase = audio ? config.trimStart : 0;
-  const localTime = Math.max(0, Math.min(clipDuration, currentTime - trimBase));
+  const localTime = Math.max(0, Math.min(contentSpanSec, currentTime - trimBase));
 
   const clipSegments = computeClipTimelineSegments(
     mediaItems,
-    clipDuration,
+    contentSpanSec,
     config,
     beatCutTimestamps
   );
@@ -498,14 +508,14 @@ export function TimelineDock({
         const rawDur =
           ov.durationSec && ov.durationSec > 0
             ? ov.durationSec
-            : Math.max(0.4, clipDuration - startSec);
+            : Math.max(0.4, contentSpanSec - startSec);
         return {
           ov,
           startSec,
           durationSec: Math.max(0.4, Math.min(clipDuration - startSec, rawDur)),
         };
       }),
-    [clipDuration, config.overlays]
+    [clipDuration, config.overlays, contentSpanSec]
   );
 
   const packedOverlays = useMemo(() => packTimelineLanes(overlaySpans), [overlaySpans]);
@@ -1165,8 +1175,38 @@ export function TimelineDock({
           </button>
         </div>
 
-        {/* Right Side Controls: Auto Beat Sync + Snap + Zoom + Auto-Follow + More */}
+        {/* Right Side Controls: Timing Mode + Auto Beat Sync + Snap + Zoom + Auto-Follow + More */}
         <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+          {onChangeSlideshowMode && (
+            <select
+              value={config.slideshowMode}
+              onChange={(e) => onChangeSlideshowMode(e.target.value as SlideshowMode)}
+              title={t.slideshowModeLabel}
+              aria-label={t.slideshowModeLabel}
+              className={`rounded border px-1.5 py-1 text-[11px] font-medium cursor-pointer focus:outline-none ${
+                config.slideshowMode === 'manual'
+                  ? 'border-cyan-500/45 bg-cyan-500/10 text-cyan-200'
+                  : 'border-amber-500/60 bg-amber-500/15 text-amber-300'
+              }`}
+            >
+              <option value="manual" className="bg-[#141821] text-gray-100">
+                {t.slideshowManual}
+              </option>
+              <option value="custom_durations" className="bg-[#141821] text-gray-100">
+                {t.slideshowCustom}
+              </option>
+              <option value="even" className="bg-[#141821] text-gray-100">
+                {t.slideshowEven}
+              </option>
+              <option value="fixed" className="bg-[#141821] text-gray-100">
+                {t.slideshowFixed}
+              </option>
+              <option value="beat_cut" className="bg-[#141821] text-gray-100">
+                {t.slideshowBeatCut}
+              </option>
+            </select>
+          )}
+
           {audio && (
             <div ref={beatSyncBtnRef} className="inline-flex rounded border border-amber-500/55 bg-amber-500/15 overflow-hidden">
               <button
@@ -1668,6 +1708,7 @@ export function TimelineDock({
                                         startDur: segDur,
                                         prevLimitSec,
                                         nextLimitSec,
+                                        trackScaleSec: clipDuration,
                                         hasMoved: false,
                                       };
                                       e.currentTarget.setPointerCapture(e.pointerId);
@@ -1684,7 +1725,8 @@ export function TimelineDock({
                                       drag.hasMoved = true;
                                       const seqW =
                                         seqInnerRef.current?.getBoundingClientRect().width || 600;
-                                      const deltaSec = ((e.clientX - drag.startX) / seqW) * clipDuration;
+                                      const deltaSec =
+                                        ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
                                       onMoveClipPosition(clip.id, drag.segStartSec + deltaSec);
                                     }
                                   }}
@@ -1715,7 +1757,7 @@ export function TimelineDock({
                                     width: `${Math.max(1.2, widthPct)}%`,
                                   }}
                                   title={`${clip.fileName} · ${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s (${segDur.toFixed(1)}s)`}
-                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-1.5 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
+                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-2 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
                                     isManualMode
                                       ? 'cursor-grab active:cursor-grabbing'
                                       : 'cursor-pointer'
@@ -1783,6 +1825,7 @@ export function TimelineDock({
                                           startDur: segDur,
                                           prevLimitSec,
                                           nextLimitSec,
+                                          trackScaleSec: clipDuration,
                                           hasMoved: false,
                                         };
                                         e.currentTarget.setPointerCapture(e.pointerId);
@@ -1796,7 +1839,7 @@ export function TimelineDock({
                                         const seqW =
                                           seqInnerRef.current?.getBoundingClientRect().width || 600;
                                         const deltaSec =
-                                          ((e.clientX - drag.startX) / seqW) * clipDuration;
+                                          ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
                                         const fixedEnd = drag.segStartSec + drag.startDur;
                                         let nextStart = Math.max(
                                           drag.prevLimitSec,
@@ -1835,8 +1878,16 @@ export function TimelineDock({
                                       }}
                                       onClick={(e) => e.stopPropagation()}
                                       title={t.trimStartHandleAria}
-                                      className="absolute top-0 left-0 bottom-0 w-2 cursor-ew-resize bg-transparent hover:bg-amber-400/80 transition-colors"
-                                    />
+                                      className="group/trim-l absolute top-0 left-0 bottom-0 w-2.5 z-10 cursor-ew-resize flex items-center justify-start pl-0.5 hover:bg-amber-400/35 transition-colors"
+                                    >
+                                      <span
+                                        className={`w-0.5 h-4 rounded-full transition-colors ${
+                                          isSelected
+                                            ? 'bg-amber-300/90 group-hover/trim-l:bg-amber-200'
+                                            : 'bg-gray-500/45 group-hover:bg-amber-400/80'
+                                        }`}
+                                      />
+                                    </div>
                                   )}
 
                                   {/* Right-Edge Duration Resize Handle (with Beat & Neighbor Snapping) */}
@@ -1852,6 +1903,7 @@ export function TimelineDock({
                                           startDur: segDur,
                                           prevLimitSec,
                                           nextLimitSec,
+                                          trackScaleSec: clipDuration,
                                           hasMoved: false,
                                         };
                                         e.currentTarget.setPointerCapture(e.pointerId);
@@ -1865,10 +1917,8 @@ export function TimelineDock({
                                         const seqW =
                                           seqInnerRef.current?.getBoundingClientRect().width || 600;
                                         const deltaSec =
-                                          ((e.clientX - drag.startX) / seqW) * clipDuration;
-                                        const maxDur = isManualMode
-                                          ? Math.max(0.5, Math.min(120, drag.nextLimitSec - drag.segStartSec))
-                                          : 120;
+                                          ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
+                                        const maxDur = 120;
                                         let nextDur = Math.max(
                                           0.5,
                                           Math.min(maxDur, drag.startDur + deltaSec)
@@ -1900,8 +1950,16 @@ export function TimelineDock({
                                       }}
                                       onClick={(e) => e.stopPropagation()}
                                       title={t.clipDurationLabel}
-                                      className="absolute top-0 right-0 bottom-0 w-2.5 cursor-ew-resize bg-transparent hover:bg-amber-400/80 transition-colors"
-                                    />
+                                      className="group/trim-r absolute top-0 right-0 bottom-0 w-2.5 z-10 cursor-ew-resize flex items-center justify-end pr-0.5 hover:bg-amber-400/35 transition-colors"
+                                    >
+                                      <span
+                                        className={`w-0.5 h-4 rounded-full transition-colors ${
+                                          isSelected
+                                            ? 'bg-amber-300/90 group-hover/trim-r:bg-amber-200'
+                                            : 'bg-gray-500/45 group-hover:bg-amber-400/80'
+                                        }`}
+                                      />
+                                    </div>
                                   )}
                                 </div>
 
@@ -1997,6 +2055,7 @@ export function TimelineDock({
                                     startX: e.clientX,
                                     origStart: fx.startSec,
                                     origDur: fx.durationSec,
+                                    trackScaleSec: clipDuration,
                                   };
                                   e.currentTarget.setPointerCapture(e.pointerId);
                                 }}
@@ -2007,7 +2066,8 @@ export function TimelineDock({
                                   const seqW =
                                     seqInnerRef.current?.getBoundingClientRect().width || 600;
                                   const deltaSec =
-                                    ((e.clientX - fxDragRef.current.startX) / seqW) * clipDuration;
+                                    ((e.clientX - fxDragRef.current.startX) / seqW) *
+                                    fxDragRef.current.trackScaleSec;
                                   const mode = fxDragRef.current.mode;
 
                                   if (mode === 'move') {
@@ -2122,6 +2182,7 @@ export function TimelineDock({
                                       startX: e.clientX,
                                       origStart: fx.startSec,
                                       origDur: fx.durationSec,
+                                      trackScaleSec: clipDuration,
                                     };
                                     e.currentTarget.setPointerCapture(e.pointerId);
                                   }}
@@ -2139,6 +2200,7 @@ export function TimelineDock({
                                       startX: e.clientX,
                                       origStart: fx.startSec,
                                       origDur: fx.durationSec,
+                                      trackScaleSec: clipDuration,
                                     };
                                     e.currentTarget.setPointerCapture(e.pointerId);
                                   }}
@@ -2179,6 +2241,7 @@ export function TimelineDock({
                                   startX: e.clientX,
                                   origStart: startSec,
                                   origDur: durationSec,
+                                  trackScaleSec: clipDuration,
                                 };
                                 e.currentTarget.setPointerCapture(e.pointerId);
                               }}
@@ -2188,7 +2251,8 @@ export function TimelineDock({
                                 if ((e.buttons & 1) === 0) return;
                                 const seqW = seqInnerRef.current?.getBoundingClientRect().width || 600;
                                 const deltaSec =
-                                  ((e.clientX - ovDragRef.current.startX) / seqW) * clipDuration;
+                                  ((e.clientX - ovDragRef.current.startX) / seqW) *
+                                  ovDragRef.current.trackScaleSec;
                                 if (ovDragRef.current.mode === 'move') {
                                   let nextStart = Math.max(
                                     0,
@@ -2281,6 +2345,7 @@ export function TimelineDock({
                                     startX: e.clientX,
                                     origStart: startSec,
                                     origDur: durationSec,
+                                    trackScaleSec: clipDuration,
                                   };
                                   e.currentTarget.setPointerCapture(e.pointerId);
                                 }}
@@ -2299,6 +2364,7 @@ export function TimelineDock({
                                     startX: e.clientX,
                                     origStart: startSec,
                                     origDur: durationSec,
+                                    trackScaleSec: clipDuration,
                                   };
                                   e.currentTarget.setPointerCapture(e.pointerId);
                                 }}
@@ -2419,6 +2485,14 @@ export function TimelineDock({
                     </div>
                   );
                 })}
+
+                {/* End-of-Project Boundary Marker (when no audio gives free workspace headroom) */}
+                {!audio && mediaItems.length > 0 && contentSpanSec < clipDuration - 0.05 && (
+                  <div
+                    className="absolute top-0 bottom-0 border-l border-dashed border-amber-500/45 pointer-events-none z-10"
+                    style={{ left: `${(contentSpanSec / clipDuration) * 100}%` }}
+                  />
+                )}
 
                 {/* Unified Continuous Vertical Playhead */}
                 <div

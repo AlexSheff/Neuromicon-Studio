@@ -10,6 +10,7 @@ import {
   findManualInsertionSlot,
   getTimelineSpanSec,
   packTimelineLanes,
+  resizeManualClipDuration,
   resolveActiveSlideshowSlice,
   resolveOverlayWindow,
   snapTimeToBeat,
@@ -370,4 +371,30 @@ test('findManualInsertionSlot and clampManualClipMove never shift or overlap nei
   // Moving clip a (duration 3s) cannot push past b.startSec (8s) -> clamped at 5s
   const movedA = clampManualClipMove(existing, 'a', 7.5, 60, [], false);
   assert.equal(movedA, 5);
+});
+
+test('resizeManualClipDuration grows into gaps first, pushes overlapping neighbors, and shrinks without pulling', () => {
+  const clips = [
+    { ...makeClip('a', 4), id: 'a', startSec: 0 },
+    { ...makeClip('b', 4), id: 'b', startSec: 6 },
+    { ...makeClip('c', 3), id: 'c', startSec: 11 },
+  ];
+
+  // Extending a from 4s to 6s fills the [4..6] gap without moving b or c
+  const filledGap = resizeManualClipDuration(clips, 'a', 6, 120);
+  assert.equal(filledGap[0].durationSec, 6);
+  assert.equal(filledGap[1].startSec, 6);
+  assert.equal(filledGap[2].startSec, 11);
+
+  // Extending a from 4s to 8s pushes b to [8..12] and c to [12..15] without overlap
+  const pushed = resizeManualClipDuration(clips, 'a', 8, 120);
+  assert.equal(pushed[0].durationSec, 8);
+  assert.equal(pushed[1].startSec, 8);
+  assert.equal(pushed[2].startSec, 12);
+
+  // Shrinking b from 4s to 2s leaves c untouched at 11s
+  const shrunk = resizeManualClipDuration(clips, 'b', 2, 120);
+  assert.equal(shrunk[1].durationSec, 2);
+  assert.equal(shrunk[1].startSec, 6);
+  assert.equal(shrunk[2].startSec, 11);
 });

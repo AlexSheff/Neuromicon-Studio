@@ -43,6 +43,7 @@ import {
   getTimelineSpanSec,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
+  resizeManualClipDuration,
   snapFxOverlayToBeats,
   snapTimeToBeat,
 } from './utils/audioAnalyzer';
@@ -1157,9 +1158,13 @@ export default function App() {
           return;
         }
 
+        const isLegacySchema = !saved.version || saved.version < 5;
         const mergedConfig: StudioConfig = {
           ...DEFAULT_STUDIO_CONFIG,
           ...saved.config,
+          slideshowMode: isLegacySchema
+            ? 'manual'
+            : saved.config.slideshowMode || DEFAULT_STUDIO_CONFIG.slideshowMode,
           overlays: [],
           fxOverlays: (saved.config.fxOverlays || []).map((fx) => ({
             ...fx,
@@ -1456,8 +1461,17 @@ export default function App() {
             setMediaBin(restoredBin);
           }
           if (restoredClips.length > 0) {
-            setMediaItems(restoredClips);
-            setSelectedClipId(restoredClips[0].id);
+            let finalClips = restoredClips;
+            if (mergedConfig.slideshowMode === 'manual') {
+              const intervals = getNormalizedManualClipIntervals(restoredClips);
+              const startMap = new Map(intervals.map((iv) => [iv.id, iv.startSec]));
+              finalClips = restoredClips.map((c) => ({
+                ...c,
+                startSec: Number((startMap.get(c.id) ?? 0).toFixed(2)),
+              }));
+            }
+            setMediaItems(finalClips);
+            setSelectedClipId(finalClips[0].id);
           }
         }
       } catch {
@@ -1849,21 +1863,15 @@ export default function App() {
             ? snapshotSegmentDurations(prev, bounds.clipDuration, cfg, beatCutTimestamps)
             : prev;
 
-        let safePatch = patch;
         if (cfg.slideshowMode === 'manual' && patch.durationSec !== undefined) {
-          const intervals = getNormalizedManualClipIntervals(base);
-          const idx = intervals.findIndex((iv) => iv.id === id);
-          if (idx !== -1) {
-            const cur = intervals[idx];
-            const next = intervals[idx + 1];
-            const maxDur = next ? Math.max(0.4, next.startSec - cur.startSec) : 600;
-            safePatch = {
-              ...patch,
-              durationSec: Number(Math.max(0.4, Math.min(maxDur, patch.durationSec)).toFixed(2)),
-            };
-          }
+          const { durationSec, ...restPatch } = patch;
+          const withExtra =
+            Object.keys(restPatch).length > 0
+              ? base.map((item) => (item.id === id ? { ...item, ...restPatch } : item))
+              : base;
+          return resizeManualClipDuration(withExtra, id, durationSec, 3600);
         }
-        return base.map((item) => (item.id === id ? { ...item, ...safePatch } : item));
+        return base.map((item) => (item.id === id ? { ...item, ...patch } : item));
       });
       if (needsModeSwitch) {
         setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
@@ -2996,9 +3004,13 @@ export default function App() {
           }
         }
 
+        const isLegacySchema = !parsed.version || parsed.version < 5;
         const mergedConfig: StudioConfig = {
           ...DEFAULT_STUDIO_CONFIG,
           ...parsed.config,
+          slideshowMode: isLegacySchema
+            ? 'manual'
+            : parsed.config.slideshowMode || DEFAULT_STUDIO_CONFIG.slideshowMode,
           overlays: restoredOverlays,
           fxOverlays: (parsed.config.fxOverlays || []).map((fx) => ({
             ...fx,
@@ -3291,8 +3303,17 @@ export default function App() {
         }
         setMediaBin(nextBin);
         if (nextClips.length > 0) {
-          setMediaItems(nextClips);
-          setSelectedClipId(nextClips[0].id);
+          let finalClips = nextClips;
+          if (mergedConfig.slideshowMode === 'manual') {
+            const intervals = getNormalizedManualClipIntervals(nextClips);
+            const startMap = new Map(intervals.map((iv) => [iv.id, iv.startSec]));
+            finalClips = nextClips.map((c) => ({
+              ...c,
+              startSec: Number((startMap.get(c.id) ?? 0).toFixed(2)),
+            }));
+          }
+          setMediaItems(finalClips);
+          setSelectedClipId(finalClips[0].id);
         } else {
           setMediaItems([]);
           setSelectedClipId(null);
@@ -4361,6 +4382,7 @@ export default function App() {
         beatGridPoints={trackBeatGrid.beats}
         onSetTrimStart={handleSetTrimStart}
         onSetTrimEnd={handleSetTrimEnd}
+        onChangeSlideshowMode={(mode) => handleUpdateConfig({ slideshowMode: mode })}
       />
 
       {exportState.phase !== 'idle' && (

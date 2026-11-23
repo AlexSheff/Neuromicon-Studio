@@ -491,6 +491,53 @@ export function clampManualClipMove(
 }
 
 /**
+ * Updates a clip's duration in manual NLE mode. Shrinking leaves downstream clips in place;
+ * extending fills free gaps first and smoothly pushes overlapping downstream clips right
+ * so duration edits never overlap or get silently blocked.
+ */
+export function resizeManualClipDuration(
+  mediaItems: VisualMediaState[],
+  clipId: string,
+  desiredDurationSec: number,
+  maxTimelineSec = 3600
+): VisualMediaState[] {
+  const intervals = getNormalizedManualClipIntervals(mediaItems);
+  const idx = intervals.findIndex((iv) => iv.id === clipId);
+  if (idx === -1) return mediaItems;
+
+  const target = intervals[idx];
+  const maxAllowedDur = Math.max(0.4, Math.min(600, maxTimelineSec - target.startSec));
+  const nextDur = Number(Math.max(0.4, Math.min(maxAllowedDur, desiredDurationSec)).toFixed(2));
+
+  const nextStartById = new Map<string, number>();
+  let cursor = Number((target.startSec + nextDur).toFixed(2));
+  for (let i = idx + 1; i < intervals.length; i++) {
+    const item = intervals[i];
+    if (item.startSec < cursor - 0.001) {
+      nextStartById.set(item.id, cursor);
+      cursor = Number((cursor + item.durationSec).toFixed(2));
+    } else {
+      cursor = Number(Math.max(cursor, item.endSec).toFixed(2));
+    }
+  }
+
+  return mediaItems.map((m) => {
+    if (m.id === clipId) {
+      return {
+        ...m,
+        startSec: Number(target.startSec.toFixed(2)),
+        durationSec: nextDur,
+      };
+    }
+    const shiftedStart = nextStartById.get(m.id);
+    if (shiftedStart !== undefined) {
+      return { ...m, startSec: shiftedStart };
+    }
+    return m;
+  });
+}
+
+/**
  * Computes exact non-overlapping timeline segments for all clips across [0 .. clipDuration].
  */
 export function computeClipTimelineSegments(

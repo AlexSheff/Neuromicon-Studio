@@ -49,7 +49,7 @@ export interface SerializedClip {
 }
 
 export interface SerializedProject {
-  version: 2 | 3 | 4;
+  version: 2 | 3 | 4 | 5;
   savedAt: string;
   config: StudioConfig;
   mediaBin?: SerializedBinItem[];
@@ -215,7 +215,7 @@ export function serializeStudioState(
   }));
 
   return {
-    version: 4,
+    version: 5,
     savedAt: new Date().toISOString(),
     config: {
       ...config,
