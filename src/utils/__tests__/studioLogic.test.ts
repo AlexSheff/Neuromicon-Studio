@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { StudioConfig, VisualMediaState } from '../../types/studio';
 import {
+  clampManualClipMove,
   computeAutoBeatAlignedClips,
   computeClipTimelineSegments,
   computeFadeEnvelope,
   detectTrackBpmAndBeats,
+  findManualInsertionSlot,
+  getTimelineSpanSec,
   packTimelineLanes,
   resolveActiveSlideshowSlice,
   resolveOverlayWindow,
@@ -309,4 +312,62 @@ test('HSV hue utilities cover full 0-360 spectrum cleanly without saturation col
   assert.equal(shiftHexHue('#f59e0b', 360), '#f59e0b');
   assert.notEqual(shifted, '#f59e0b');
   assert.ok(roundRgb[2] > roundRgb[0]);
+});
+
+test('manual timeline preserves explicit positions, allows gaps, and never loops or stretches single clips', () => {
+  const single = [{ ...makeClip('solo', 4), startSec: 2 }];
+  const manualCfg: StudioConfig = { ...DEFAULT_STUDIO_CONFIG, slideshowMode: 'manual' };
+
+  const singleSegs = computeClipTimelineSegments(single, 15, manualCfg, [0]);
+  assert.equal(singleSegs.length, 1);
+  assert.deepEqual(singleSegs[0], { clipIndex: 0, startSec: 2, endSec: 6, isLoopRepeat: false });
+  assert.equal(getTimelineSpanSec(single, manualCfg), 6);
+
+  // Gap before first clip and gap between clips return activeIndex: null with no transition
+  const twoClips = [
+    { ...makeClip('c1', 3), startSec: 2 },
+    { ...makeClip('c2', 4), startSec: 7 },
+  ];
+  const gapBefore = resolveActiveSlideshowSlice(twoClips, 1.0, 15, manualCfg, [0]);
+  assert.equal(gapBefore.activeIndex, null);
+  assert.equal(gapBefore.prevIndex, null);
+
+  const gapBetween = resolveActiveSlideshowSlice(twoClips, 5.5, 15, manualCfg, [0]);
+  assert.equal(gapBetween.activeIndex, null);
+  assert.equal(gapBetween.prevIndex, null);
+
+  // Transition triggers ONLY when clips actually touch (<= 0.08s gap)
+  const midC2 = resolveActiveSlideshowSlice(twoClips, 7.2, 15, manualCfg, [0]);
+  assert.equal(midC2.activeIndex, 1);
+  assert.equal(midC2.prevIndex, null);
+  assert.equal(midC2.transitionProgress, 1);
+
+  const touching = [
+    { ...makeClip('t1', 3), startSec: 2, transitionDurationSec: 0.6 },
+    { ...makeClip('t2', 4), startSec: 5 },
+  ];
+  const touchTrans = resolveActiveSlideshowSlice(touching, 5.2, 15, manualCfg, [0]);
+  assert.equal(touchTrans.activeIndex, 1);
+  assert.equal(touchTrans.prevIndex, 0);
+  assert.ok(touchTrans.transitionProgress < 1);
+});
+
+test('findManualInsertionSlot and clampManualClipMove never shift or overlap neighbor clips', () => {
+  const existing = [
+    { ...makeClip('a', 3), id: 'a', startSec: 0 },
+    { ...makeClip('b', 4), id: 'b', startSec: 8 },
+  ];
+
+  // Placing at open gap [3..8] with 4s clip fits cleanly inside the gap at 3s without moving b
+  const gapSlot = findManualInsertionSlot(existing, 3, 4, 60);
+  assert.equal(gapSlot.startSec, 3);
+  assert.equal(gapSlot.durationSec, 4);
+
+  // Placing directly on top of existing clip b (t=9) skips forward to b's end (12s)
+  const blockedSlot = findManualInsertionSlot(existing, 9, 4, 60);
+  assert.equal(blockedSlot.startSec, 12);
+
+  // Moving clip a (duration 3s) cannot push past b.startSec (8s) -> clamped at 5s
+  const movedA = clampManualClipMove(existing, 'a', 7.5, 60, [], false);
+  assert.equal(movedA, 5);
 });

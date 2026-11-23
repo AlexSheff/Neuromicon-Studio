@@ -65,7 +65,7 @@ export type ExportAspectMode =
 
 export type MediaFramingMode = 'cover' | 'fit_blur';
 
-export type SlideshowMode = 'custom_durations' | 'even' | 'fixed' | 'beat_cut';
+export type SlideshowMode = 'manual' | 'custom_durations' | 'even' | 'fixed' | 'beat_cut';
 
 export type SlideTransitionType =
   | 'crossfade'
@@ -189,6 +189,19 @@ export interface AudioTrackState {
   };
 }
 
+export interface MediaBinItem {
+  id: string;
+  kind: 'image' | 'video';
+  fileName: string;
+  url: string;
+  width: number;
+  height: number;
+  imageElement?: HTMLImageElement;
+  videoDuration?: number;
+  decodedAudioBuffer?: AudioBuffer;
+  defaultDurationSec: number;
+}
+
 export interface VisualMediaState {
   id: string;
   kind: 'image' | 'video' | 'generator';
@@ -201,6 +214,7 @@ export interface VisualMediaState {
   videoDuration?: number;
   decodedAudioBuffer?: AudioBuffer;
   // Video Editor clip-level timeline properties
+  startSec?: number; // Explicit timeline start timestamp relative to trimStart (manual NLE mode)
   durationSec: number;
   sourceStartSec: number;
   playbackRate: number;

@@ -2,6 +2,7 @@ import {
   ClipGeneratorParams,
   ClipOverlayGenerator,
   ClipTransform,
+  MediaBinItem,
   SlideTransitionType,
   StudioConfig,
   VisualMediaState,
@@ -14,6 +15,17 @@ const STORE_PROJECT = 'project';
 const STORE_BLOBS = 'blobs';
 const PROJECT_KEY = 'autosave_v1';
 
+export interface SerializedBinItem {
+  id: string;
+  kind: 'image' | 'video';
+  fileName: string;
+  width: number;
+  height: number;
+  videoDuration?: number;
+  defaultDurationSec: number;
+  blobKey?: string;
+}
+
 export interface SerializedClip {
   id: string;
   kind: 'image' | 'video' | 'generator';
@@ -21,6 +33,7 @@ export interface SerializedClip {
   width: number;
   height: number;
   videoDuration?: number;
+  startSec?: number;
   durationSec: number;
   sourceStartSec: number;
   playbackRate: number;
@@ -36,9 +49,10 @@ export interface SerializedClip {
 }
 
 export interface SerializedProject {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   savedAt: string;
   config: StudioConfig;
+  mediaBin?: SerializedBinItem[];
   clips: SerializedClip[];
   audioMeta?: {
     fileName: string;
@@ -192,7 +206,8 @@ export function serializeStudioState(
   audioFileName?: string,
   audioFileSize?: number,
   isSyntheticDemo?: boolean,
-  audioBlobKey?: string
+  audioBlobKey?: string,
+  mediaBin: MediaBinItem[] = []
 ): SerializedProject {
   const cleanOverlays = config.overlays.map((ov) => ({
     ...ov,
@@ -200,12 +215,22 @@ export function serializeStudioState(
   }));
 
   return {
-    version: 3,
+    version: 4,
     savedAt: new Date().toISOString(),
     config: {
       ...config,
       overlays: cleanOverlays,
     },
+    mediaBin: mediaBin.map((b) => ({
+      id: b.id,
+      kind: b.kind,
+      fileName: b.fileName,
+      width: b.width,
+      height: b.height,
+      videoDuration: b.videoDuration,
+      defaultDurationSec: b.defaultDurationSec,
+      blobKey: b.url ? blobKeyMap.get(b.url) : undefined,
+    })),
     clips: mediaItems.map((m) => ({
       id: m.id,
       kind: m.kind,
@@ -213,6 +238,7 @@ export function serializeStudioState(
       width: m.width,
       height: m.height,
       videoDuration: m.videoDuration,
+      startSec: m.startSec,
       durationSec: m.durationSec,
       sourceStartSec: m.sourceStartSec,
       playbackRate: m.playbackRate,
@@ -229,7 +255,7 @@ export function serializeStudioState(
       transform: m.transform || { ...DEFAULT_CLIP_TRANSFORM },
       clipAudioVolume: m.clipAudioVolume ?? 0,
       clipAudioMuted: m.clipAudioMuted ?? true,
-      blobKey: blobKeyMap.get(m.url),
+      blobKey: m.url ? blobKeyMap.get(m.url) : undefined,
     })),
     audioMeta: audioFileName
       ? {

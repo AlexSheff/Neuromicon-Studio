@@ -16,6 +16,7 @@ import {
   GeneratorEffectId,
   InspectorTab,
   Language,
+  MediaBinItem,
   OverlayBlendMode,
   OverlayLayer,
   SlideTransitionType,
@@ -28,6 +29,7 @@ import {
 import {
   analyzeAudioAtTime,
   buildMonoAudioData,
+  clampManualClipMove,
   computeAutoBeatAlignedClips,
   computeBeatCutTimestamps,
   computeClipTimelineSegments,
@@ -35,7 +37,10 @@ import {
   computeWaveformPeaks,
   createSmoothState,
   detectTrackBpmAndBeats,
+  findManualInsertionSlot,
   generateDemoAudioBuffer,
+  getNormalizedManualClipIntervals,
+  getTimelineSpanSec,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
   snapFxOverlayToBeats,
@@ -95,6 +100,7 @@ function getCachedClipMono(buffer: AudioBuffer): Float32Array {
 
 interface HistorySnapshot {
   config: StudioConfig;
+  mediaBin: MediaBinItem[];
   mediaItems: VisualMediaState[];
   selectedClipId: string | null;
   selectedFxId: string | null;
@@ -106,6 +112,7 @@ function createItemId(): string {
 
 function cloneSnapshot(
   config: StudioConfig,
+  mediaBin: MediaBinItem[],
   mediaItems: VisualMediaState[],
   selectedClipId: string | null,
   selectedFxId: string | null
@@ -121,6 +128,7 @@ function cloneSnapshot(
         params: fx.params ? { ...fx.params } : undefined,
       })),
     },
+    mediaBin: mediaBin.map((b) => ({ ...b })),
     mediaItems: mediaItems.map((m) => ({
       ...m,
       transform: { ...(m.transform || DEFAULT_CLIP_TRANSFORM) },
@@ -175,15 +183,26 @@ function snapshotSegmentDurations(
   items: VisualMediaState[],
   clipDuration: number,
   cfg: StudioConfig,
-  beatCuts: number[]
+  beatCuts: number[],
+  preserveStartSec = false
 ): VisualMediaState[] {
-  if (cfg.slideshowMode === 'custom_durations' || items.length === 0) return items;
+  if (items.length === 0) return items;
+  if (cfg.slideshowMode === 'manual') {
+    const intervals = getNormalizedManualClipIntervals(items);
+    const startMap = new Map(intervals.map((iv) => [iv.id, iv.startSec]));
+    return items.map((item) => ({
+      ...item,
+      startSec: Number((startMap.get(item.id) ?? 0).toFixed(2)),
+    }));
+  }
+  if (cfg.slideshowMode === 'custom_durations' && !preserveStartSec) return items;
   const segs = computeClipTimelineSegments(items, clipDuration, cfg, beatCuts);
   return items.map((item, idx) => {
     const seg = segs.find((s) => s.clipIndex === idx && !s.isLoopRepeat);
     if (!seg) return item;
     return {
       ...item,
+      startSec: Number(seg.startSec.toFixed(2)),
       durationSec: Math.max(0.5, Number((seg.endSec - seg.startSec).toFixed(2))),
       transitionOut: cfg.transitionType,
     };
@@ -196,6 +215,7 @@ export default function App() {
   const [config, setConfig] = useState<StudioConfig>(DEFAULT_STUDIO_CONFIG);
 
   const [audio, setAudio] = useState<AudioTrackState | null>(null);
+  const [mediaBin, setMediaBin] = useState<MediaBinItem[]>([]);
   const [mediaItems, setMediaItems] = useState<VisualMediaState[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedFxId, setSelectedFxId] = useState<string | null>(null);
@@ -240,6 +260,7 @@ export default function App() {
   const reducedMotionRef = useRef(false);
 
   const configRef = useRef<StudioConfig>(config);
+  const mediaBinRef = useRef<MediaBinItem[]>(mediaBin);
   const mediaItemsRef = useRef<VisualMediaState[]>(mediaItems);
   const selectedClipIdRef = useRef<string | null>(selectedClipId);
   const selectedFxIdRef = useRef<string | null>(selectedFxId);
@@ -264,6 +285,7 @@ export default function App() {
   const autosaveTimerRef = useRef<number | null>(null);
 
   configRef.current = config;
+  mediaBinRef.current = mediaBin;
   mediaItemsRef.current = mediaItems;
   selectedClipIdRef.current = selectedClipId;
   selectedFxIdRef.current = selectedFxId;
@@ -314,6 +336,7 @@ export default function App() {
     pastRef.current.push(
       cloneSnapshot(
         configRef.current,
+        mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
         selectedFxIdRef.current
@@ -330,6 +353,7 @@ export default function App() {
     if (!pendingBaseSnapshotRef.current) {
       pendingBaseSnapshotRef.current = cloneSnapshot(
         configRef.current,
+        mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
         selectedFxIdRef.current
@@ -366,12 +390,14 @@ export default function App() {
     futureRef.current.push(
       cloneSnapshot(
         configRef.current,
+        mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
         selectedFxIdRef.current
       )
     );
     setConfig(prev.config);
+    setMediaBin(prev.mediaBin);
     setMediaItems(prev.mediaItems);
     setSelectedClipId(prev.selectedClipId);
     setSelectedFxId(prev.selectedFxId);
@@ -384,12 +410,14 @@ export default function App() {
     pastRef.current.push(
       cloneSnapshot(
         configRef.current,
+        mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
         selectedFxIdRef.current
       )
     );
     setConfig(next.config);
+    setMediaBin(next.mediaBin);
     setMediaItems(next.mediaItems);
     setSelectedClipId(next.selectedClipId);
     setSelectedFxId(next.selectedFxId);
@@ -481,6 +509,12 @@ export default function App() {
         audioCtxRef.current.close().catch(() => {});
       }
       const seen = new Set<string>();
+      for (const b of mediaBinRef.current) {
+        if (b.url.startsWith('blob:') && !seen.has(b.url)) {
+          seen.add(b.url);
+          URL.revokeObjectURL(b.url);
+        }
+      }
       for (const item of mediaItemsRef.current) {
         if (item.kind === 'video' && item.videoElement) item.videoElement.pause();
         if (item.url.startsWith('blob:') && !seen.has(item.url)) {
@@ -513,21 +547,6 @@ export default function App() {
     return audioCtxRef.current;
   }, []);
 
-  const decodeVideoClipAudio = useCallback(
-    async (clipId: string, sourceBlob: Blob) => {
-      try {
-        const arr = await sourceBlob.arrayBuffer();
-        const ctx = getAudioContext();
-        const decoded = await ctx.decodeAudioData(arr);
-        setMediaItems((prev) =>
-          prev.map((m) => (m.id === clipId ? { ...m, decodedAudioBuffer: decoded } : m))
-        );
-      } catch {
-        // Silent video or unsupported audio track; skip cleanly
-      }
-    },
-    [getAudioContext]
-  );
 
   const getEffectiveTimelineBounds = useCallback(
     (cfg: StudioConfig, items: VisualMediaState[], aud: AudioTrackState | null) => {
@@ -541,8 +560,7 @@ export default function App() {
           maxSeek: aud.duration,
         };
       }
-      const rawClipsTotal = items.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
-      const clipDuration = items.length > 0 ? Math.max(0.5, rawClipsTotal) : 12;
+      const clipDuration = getTimelineSpanSec(items, cfg);
       return {
         trimBase: 0,
         trimEnd: clipDuration,
@@ -634,7 +652,7 @@ export default function App() {
         beatCutTimestamps
       );
       const activeIds = new Set<string>();
-      const activeItem = items[slice.activeIndex];
+      const activeItem = slice.activeIndex !== null ? items[slice.activeIndex] : undefined;
       if (activeItem) activeIds.add(activeItem.id);
       if (slice.prevIndex !== null && items[slice.prevIndex]) {
         activeIds.add(items[slice.prevIndex].id);
@@ -643,12 +661,10 @@ export default function App() {
       // Pre-warm the next upcoming video clip up to 0.85s before its boundary so it never flashes black on cut
       let prewarmClipId: string | null = null;
       let prewarmTargetSec = 0;
-      const currentSegIdx = segments.findIndex((s) => localTime < s.endSec);
-      const nextSeg =
-        currentSegIdx >= 0 && currentSegIdx + 1 < segments.length
-          ? segments[currentSegIdx + 1]
-          : null;
-      if (nextSeg && nextSeg.startSec - localTime <= 0.85 && nextSeg.startSec - localTime > 0) {
+      const nextSeg = segments.find(
+        (s) => s.startSec - localTime > 0 && s.startSec - localTime <= 0.85
+      );
+      if (nextSeg) {
         const upcoming = items[nextSeg.clipIndex];
         if (upcoming && upcoming.kind === 'video' && !activeIds.has(upcoming.id)) {
           prewarmClipId = upcoming.id;
@@ -821,43 +837,164 @@ export default function App() {
 
   startPlaybackAtRef.current = startPlaybackAt;
 
-  const appendVisualFromUrl = useCallback(
+  const buildClipFromBinItem = useCallback(
+    (
+      binItem: MediaBinItem,
+      placement: { startSec?: number; durationSec?: number }
+    ): VisualMediaState => {
+      const id = createItemId();
+      if (binItem.kind === 'image') {
+        const img = binItem.imageElement || (() => {
+          const el = new Image();
+          el.src = binItem.url;
+          return el;
+        })();
+        return {
+          id,
+          kind: 'image',
+          fileName: binItem.fileName,
+          url: binItem.url,
+          width: binItem.width,
+          height: binItem.height,
+          imageElement: img,
+          startSec: placement.startSec,
+          durationSec: placement.durationSec ?? 4.0,
+          sourceStartSec: 0,
+          playbackRate: 1.0,
+          transitionOut: 'crossfade',
+          transitionDurationSec: 0.65,
+          transform: { ...DEFAULT_CLIP_TRANSFORM },
+          clipAudioVolume: 0,
+          clipAudioMuted: true,
+        };
+      }
+      const video = document.createElement('video');
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      video.src = binItem.url;
+      const vDur = binItem.videoDuration || 10;
+      return {
+        id,
+        kind: 'video',
+        fileName: binItem.fileName,
+        url: binItem.url,
+        width: binItem.width || 1080,
+        height: binItem.height || 1920,
+        videoElement: video,
+        videoDuration: vDur,
+        decodedAudioBuffer: binItem.decodedAudioBuffer,
+        startSec: placement.startSec,
+        durationSec:
+          placement.durationSec ?? Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
+        sourceStartSec: 0,
+        playbackRate: 1.0,
+        transitionOut: 'crossfade',
+        transitionDurationSec: 0.65,
+        transform: { ...DEFAULT_CLIP_TRANSFORM },
+        clipAudioVolume: 0.8,
+        clipAudioMuted: Boolean(audioRef.current),
+      };
+    },
+    []
+  );
+
+  const placeBinItemOnTimeline = useCallback(
+    (
+      binItem: MediaBinItem,
+      options?: { atTimeSec?: number; mode?: 'playhead' | 'end' | 'exact' }
+    ) => {
+      const cfg = configRef.current;
+      const items = mediaItemsRef.current;
+      const defaultDur =
+        binItem.kind === 'video'
+          ? Number(Math.min(60, Math.max(1, binItem.videoDuration || 10)).toFixed(1))
+          : 4.0;
+
+      if (cfg.slideshowMode === 'manual') {
+        const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+        const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+        let desiredStart = Math.max(0, currentTimeRef.current - bounds.trimBase);
+
+        if (options?.atTimeSec !== undefined) {
+          desiredStart = Math.max(0, options.atTimeSec);
+          if (cfg.snapToBeats && trackBeatGrid.beats.length > 1) {
+            desiredStart = snapTimeToBeat(desiredStart, [0, ...trackBeatGrid.beats], 0.25);
+          }
+        } else if (options?.mode === 'end') {
+          const intervals = getNormalizedManualClipIntervals(items);
+          desiredStart =
+            intervals.length > 0 ? intervals[intervals.length - 1].endSec : 0;
+        } else if (cfg.snapToBeats && trackBeatGrid.beats.length > 1) {
+          desiredStart = snapTimeToBeat(desiredStart, [0, ...trackBeatGrid.beats], 0.25);
+        }
+
+        const slot = findManualInsertionSlot(items, desiredStart, defaultDur, maxTimeline);
+        const newClip = buildClipFromBinItem(binItem, {
+          startSec: slot.startSec,
+          durationSec: slot.durationSec,
+        });
+        pushImmediateHistory();
+        setMediaItems((prev) => [...prev, newClip]);
+        setSelectedClipId(newClip.id);
+        setSelectedFxId(null);
+        return newClip.id;
+      }
+
+      const newClip = buildClipFromBinItem(binItem, { durationSec: defaultDur });
+      pushImmediateHistory();
+      setMediaItems((prev) =>
+        options?.mode === 'end'
+          ? [...prev, newClip]
+          : insertClipAfterSelection(prev, newClip, selectedClipIdRef.current)
+      );
+      setSelectedClipId(newClip.id);
+      setSelectedFxId(null);
+      return newClip.id;
+    },
+    [
+      buildClipFromBinItem,
+      getEffectiveTimelineBounds,
+      pushImmediateHistory,
+      trackBeatGrid.beats,
+    ]
+  );
+
+  const ingestVisualAssetFromUrl = useCallback(
     (
       url: string,
       fileName: string,
       kind: 'image' | 'video',
+      blobKey?: string,
       isSharedUrl = false,
-      sourceBlob?: Blob
+      sourceBlob?: Blob,
+      autoPlaceAtSec?: number
     ) => {
-      const id = createItemId();
+      if (blobKey) {
+        blobKeyMapRef.current.set(url, blobKey);
+      }
+      const binId = `bin-${createItemId()}`;
       if (kind === 'image') {
         const img = new Image();
         img.onload = () => {
+          const newBinItem: MediaBinItem = {
+            id: binId,
+            kind: 'image',
+            fileName,
+            url,
+            width: img.naturalWidth,
+            height: img.naturalHeight,
+            imageElement: img,
+            defaultDurationSec: 4.0,
+          };
           pushImmediateHistory();
-          setMediaItems((prev) =>
-            insertClipAfterSelection(
-              prev,
-              {
-                id,
-                kind: 'image',
-                fileName,
-                url,
-                width: img.naturalWidth,
-                height: img.naturalHeight,
-                imageElement: img,
-                durationSec: 4.0,
-                sourceStartSec: 0,
-                playbackRate: 1.0,
-                transitionOut: 'crossfade',
-                transitionDurationSec: 0.65,
-                transform: { ...DEFAULT_CLIP_TRANSFORM },
-                clipAudioVolume: 0,
-                clipAudioMuted: true,
-              },
-              selectedClipIdRef.current
-            )
-          );
-          setSelectedClipId(id);
+          setMediaBin((prev) => [...prev, newBinItem]);
+          if (autoPlaceAtSec !== undefined) {
+            setTimeout(() => {
+              placeBinItemOnTimeline(newBinItem, { atTimeSec: autoPlaceAtSec, mode: 'exact' });
+            }, 0);
+          }
         };
         img.onerror = () => {
           if (!isSharedUrl && url.startsWith('blob:')) {
@@ -871,37 +1008,47 @@ export default function App() {
         video.muted = true;
         video.loop = true;
         video.playsInline = true;
-        video.preload = 'auto';
+        video.preload = 'metadata';
         video.onloadedmetadata = () => {
           const vDur = video.duration || 10;
+          const newBinItem: MediaBinItem = {
+            id: binId,
+            kind: 'video',
+            fileName,
+            url,
+            width: video.videoWidth || 1080,
+            height: video.videoHeight || 1920,
+            videoDuration: vDur,
+            defaultDurationSec: Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
+          };
           pushImmediateHistory();
-          setMediaItems((prev) =>
-            insertClipAfterSelection(
-              prev,
-              {
-                id,
-                kind: 'video',
-                fileName,
-                url,
-                width: video.videoWidth || 1080,
-                height: video.videoHeight || 1920,
-                videoElement: video,
-                videoDuration: vDur,
-                durationSec: Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
-                sourceStartSec: 0,
-                playbackRate: 1.0,
-                transitionOut: 'crossfade',
-                transitionDurationSec: 0.65,
-                transform: { ...DEFAULT_CLIP_TRANSFORM },
-                clipAudioVolume: 0.8,
-                clipAudioMuted: Boolean(audioRef.current),
-              },
-              selectedClipIdRef.current
-            )
-          );
-          setSelectedClipId(id);
+          setMediaBin((prev) => [...prev, newBinItem]);
+          if (autoPlaceAtSec !== undefined) {
+            setTimeout(() => {
+              placeBinItemOnTimeline(newBinItem, { atTimeSec: autoPlaceAtSec, mode: 'exact' });
+            }, 0);
+          }
           if (sourceBlob) {
-            decodeVideoClipAudio(id, sourceBlob);
+            sourceBlob
+              .arrayBuffer()
+              .then((arr) => getAudioContext().decodeAudioData(arr))
+              .then((decoded) => {
+                setMediaBin((prev) =>
+                  prev.map((b) =>
+                    b.id === binId ? { ...b, decodedAudioBuffer: decoded } : b
+                  )
+                );
+                setMediaItems((prev) =>
+                  prev.map((m) =>
+                    m.url === url && !m.decodedAudioBuffer
+                      ? { ...m, decodedAudioBuffer: decoded }
+                      : m
+                  )
+                );
+              })
+              .catch(() => {
+                // Silent video or unsupported audio track; skip cleanly
+              });
           }
         };
         video.onerror = () => {
@@ -913,7 +1060,7 @@ export default function App() {
         video.src = url;
       }
     },
-    [decodeVideoClipAudio, lang, pushImmediateHistory, showError]
+    [getAudioContext, lang, placeBinItemOnTimeline, pushImmediateHistory, showError]
   );
 
   const applyAudioBuffer = useCallback(
@@ -932,7 +1079,8 @@ export default function App() {
         prevCover &&
         prevCover.startsWith('blob:') &&
         prevCover !== meta.embeddedCoverUrl &&
-        !mediaItemsRef.current.some((m) => m.url === prevCover)
+        !mediaItemsRef.current.some((m) => m.url === prevCover) &&
+        !mediaBinRef.current.some((b) => b.url === prevCover)
       ) {
         URL.revokeObjectURL(prevCover);
       }
@@ -975,12 +1123,22 @@ export default function App() {
           };
         });
 
-        if (meta.embeddedCoverUrl && mediaItemsRef.current.length === 0) {
-          appendVisualFromUrl(meta.embeddedCoverUrl, `${fileName} (Cover)`, 'image', true);
+        // Add embedded audio cover to Media Library (never auto-inserting onto the timeline)
+        if (
+          meta.embeddedCoverUrl &&
+          !mediaBinRef.current.some((b) => b.url === meta.embeddedCoverUrl)
+        ) {
+          ingestVisualAssetFromUrl(
+            meta.embeddedCoverUrl,
+            `${fileName} (Cover)`,
+            'image',
+            undefined,
+            true
+          );
         }
       }
     },
-    [appendVisualFromUrl, stopPlayback]
+    [ingestVisualAssetFromUrl, stopPlayback]
   );
 
   // Restore autosaved project from IndexedDB on initial mount
@@ -1077,6 +1235,73 @@ export default function App() {
           }
         }
 
+        // Cache blobKey -> objectURL so shared Media Library and timeline clips reuse URLs cleanly
+        const restoredUrlByKey = new Map<string, string>();
+        const restoredBin: MediaBinItem[] = [];
+        for (const sb of saved.mediaBin || []) {
+          if (!sb.blobKey) continue;
+          const blob = await loadBlobFromIDB(sb.blobKey);
+          if (!blob) continue;
+          let url = restoredUrlByKey.get(sb.blobKey);
+          if (!url) {
+            url = URL.createObjectURL(blob);
+            restoredUrlByKey.set(sb.blobKey, url);
+            blobKeyMapRef.current.set(url, sb.blobKey);
+          }
+          if (sb.kind === 'image') {
+            const img = await new Promise<HTMLImageElement | null>((resolve) => {
+              const el = new Image();
+              el.onload = () => resolve(el);
+              el.onerror = () => resolve(null);
+              el.src = url!;
+            });
+            if (img) {
+              restoredBin.push({
+                id: sb.id || `bin-${createItemId()}`,
+                kind: 'image',
+                fileName: sb.fileName,
+                url,
+                width: img.naturalWidth || sb.width,
+                height: img.naturalHeight || sb.height,
+                imageElement: img,
+                defaultDurationSec: sb.defaultDurationSec || 4.0,
+              });
+            }
+          } else {
+            const video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'metadata';
+            const ok = await new Promise<boolean>((resolve) => {
+              video.onloadedmetadata = () => resolve(true);
+              video.onerror = () => resolve(false);
+              video.src = url!;
+            });
+            if (ok) {
+              let decodedBuf: AudioBuffer | undefined;
+              try {
+                const arr = await blob.arrayBuffer();
+                decodedBuf = await getAudioContext().decodeAudioData(arr);
+              } catch {
+                // silent video
+              }
+              const vDur = video.duration || sb.videoDuration || 10;
+              restoredBin.push({
+                id: sb.id || `bin-${createItemId()}`,
+                kind: 'video',
+                fileName: sb.fileName,
+                url,
+                width: video.videoWidth || sb.width,
+                height: video.videoHeight || sb.height,
+                videoDuration: vDur,
+                decodedAudioBuffer: decodedBuf,
+                defaultDurationSec:
+                  sb.defaultDurationSec || Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
+              });
+            }
+          }
+        }
+
         // Rehydrate media clips cleanly in saved order
         const restoredClips: VisualMediaState[] = [];
         for (const sc of saved.clips || []) {
@@ -1094,6 +1319,7 @@ export default function App() {
               url: '',
               width: sc.width,
               height: sc.height,
+              startSec: sc.startSec,
               durationSec: sc.durationSec,
               sourceStartSec: sc.sourceStartSec,
               playbackRate: sc.playbackRate,
@@ -1107,17 +1333,21 @@ export default function App() {
               clipAudioMuted: sc.clipAudioMuted ?? true,
             });
           } else if (sc.blobKey) {
+            let url = restoredUrlByKey.get(sc.blobKey);
             const blob = await loadBlobFromIDB(sc.blobKey);
             if (!blob) continue;
-            const url = URL.createObjectURL(blob);
-            blobKeyMapRef.current.set(url, sc.blobKey);
+            if (!url) {
+              url = URL.createObjectURL(blob);
+              restoredUrlByKey.set(sc.blobKey, url);
+              blobKeyMapRef.current.set(url, sc.blobKey);
+            }
 
             if (sc.kind === 'image') {
               const img = await new Promise<HTMLImageElement | null>((resolve) => {
                 const el = new Image();
                 el.onload = () => resolve(el);
                 el.onerror = () => resolve(null);
-                el.src = url;
+                el.src = url!;
               });
               if (img) {
                 restoredClips.push({
@@ -1128,6 +1358,7 @@ export default function App() {
                   width: img.naturalWidth,
                   height: img.naturalHeight,
                   imageElement: img,
+                  startSec: sc.startSec,
                   durationSec: sc.durationSec,
                   sourceStartSec: sc.sourceStartSec,
                   playbackRate: sc.playbackRate,
@@ -1138,6 +1369,21 @@ export default function App() {
                   clipAudioVolume: sc.clipAudioVolume ?? 0,
                   clipAudioMuted: sc.clipAudioMuted ?? true,
                 });
+                if (
+                  !saved.mediaBin &&
+                  !restoredBin.some((b) => b.url && blobKeyMapRef.current.get(b.url) === sc.blobKey)
+                ) {
+                  restoredBin.push({
+                    id: `bin-${createItemId()}`,
+                    kind: 'image',
+                    fileName: sc.fileName,
+                    url,
+                    width: img.naturalWidth,
+                    height: img.naturalHeight,
+                    imageElement: img,
+                    defaultDurationSec: sc.durationSec || 4.0,
+                  });
+                }
               }
             } else {
               const video = document.createElement('video');
@@ -1148,7 +1394,7 @@ export default function App() {
               const ok = await new Promise<boolean>((resolve) => {
                 video.onloadedmetadata = () => resolve(true);
                 video.onerror = () => resolve(false);
-                video.src = url;
+                video.src = url!;
               });
               if (ok) {
                 let decodedBuf: AudioBuffer | undefined;
@@ -1158,6 +1404,7 @@ export default function App() {
                 } catch {
                   // silent video
                 }
+                const vDur = video.duration || sc.videoDuration || 10;
                 restoredClips.push({
                   id: sc.id,
                   kind: 'video',
@@ -1166,8 +1413,9 @@ export default function App() {
                   width: video.videoWidth || sc.width,
                   height: video.videoHeight || sc.height,
                   videoElement: video,
-                  videoDuration: video.duration || sc.videoDuration || 10,
+                  videoDuration: vDur,
                   decodedAudioBuffer: decodedBuf,
+                  startSec: sc.startSec,
                   durationSec: sc.durationSec,
                   sourceStartSec: sc.sourceStartSec,
                   playbackRate: sc.playbackRate,
@@ -1178,13 +1426,34 @@ export default function App() {
                   clipAudioVolume: sc.clipAudioVolume ?? 0.8,
                   clipAudioMuted: sc.clipAudioMuted ?? true,
                 });
+                if (
+                  !saved.mediaBin &&
+                  !restoredBin.some((b) => b.url && blobKeyMapRef.current.get(b.url) === sc.blobKey)
+                ) {
+                  restoredBin.push({
+                    id: `bin-${createItemId()}`,
+                    kind: 'video',
+                    fileName: sc.fileName,
+                    url,
+                    width: video.videoWidth || sc.width,
+                    height: video.videoHeight || sc.height,
+                    videoDuration: vDur,
+                    decodedAudioBuffer: decodedBuf,
+                    defaultDurationSec: Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
+                  });
+                }
               }
             }
           }
         }
-        if (!cancelled && restoredClips.length > 0) {
-          setMediaItems(restoredClips);
-          setSelectedClipId(restoredClips[0].id);
+        if (!cancelled) {
+          if (restoredBin.length > 0) {
+            setMediaBin(restoredBin);
+          }
+          if (restoredClips.length > 0) {
+            setMediaItems(restoredClips);
+            setSelectedClipId(restoredClips[0].id);
+          }
         }
       } catch {
         // Ignore IDB hydration errors cleanly
@@ -1213,7 +1482,8 @@ export default function App() {
         audio?.fileName,
         audio?.fileSize,
         audio?.isSyntheticDemo,
-        audioBlobKeyRef.current
+        audioBlobKeyRef.current,
+        mediaBin
       );
       const res = await saveProjectToIDB(serialized);
       if (!res.ok) {
@@ -1222,6 +1492,10 @@ export default function App() {
       } else {
         const activeKeys = new Set<string>();
         if (audioBlobKeyRef.current) activeKeys.add(audioBlobKeyRef.current);
+        for (const b of mediaBin) {
+          const key = b.url ? blobKeyMapRef.current.get(b.url) : undefined;
+          if (key) activeKeys.add(key);
+        }
         for (const item of mediaItems) {
           const key = item.url ? blobKeyMapRef.current.get(item.url) : undefined;
           if (key) activeKeys.add(key);
@@ -1234,7 +1508,7 @@ export default function App() {
       }
       autosaveTimerRef.current = null;
     }, 900);
-  }, [audio, config, mediaItems, showError]);
+  }, [audio, config, mediaBin, mediaItems, showError]);
 
   const handleAudioFile = useCallback(
     async (file: File) => {
@@ -1333,7 +1607,8 @@ export default function App() {
   }, [applyAudioBuffer, showError]);
 
   const handleVisualFiles = useCallback(
-    (files: File[]) => {
+    (files: File[], autoPlaceAtSec?: number) => {
+      let placeCursor = autoPlaceAtSec;
       for (const file of files) {
         if (!file || file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
           showError(`${tFor(lang).errUnsupportedFile}: ${file?.name || ''}`);
@@ -1355,11 +1630,114 @@ export default function App() {
             showError(res.error || tFor(langRef.current).saveStatusError);
           }
         });
-        appendVisualFromUrl(url, file.name, isVideo ? 'video' : 'image', false, file);
+        ingestVisualAssetFromUrl(
+          url,
+          file.name,
+          isVideo ? 'video' : 'image',
+          blobKey,
+          false,
+          file,
+          placeCursor
+        );
+        if (placeCursor !== undefined) {
+          placeCursor += 4.2;
+        }
       }
     },
-    [appendVisualFromUrl, lang, showError]
+    [ingestVisualAssetFromUrl, lang, showError]
   );
+
+  const handleDropFilesToTimeline = useCallback(
+    (files: File[], atTimeSec: number) => {
+      handleVisualFiles(files, atTimeSec);
+    },
+    [handleVisualFiles]
+  );
+
+  const handleAddBinItemToTimeline = useCallback(
+    (binItemId: string, options?: { atTimeSec?: number; mode?: 'playhead' | 'end' | 'exact' }) => {
+      const binItem = mediaBinRef.current.find((b) => b.id === binItemId);
+      if (!binItem) return;
+      placeBinItemOnTimeline(binItem, options);
+    },
+    [placeBinItemOnTimeline]
+  );
+
+  const handleDropBinItemToTimeline = useCallback(
+    (binItemId: string, atTimeSec: number) => {
+      handleAddBinItemToTimeline(binItemId, { atTimeSec, mode: 'exact' });
+    },
+    [handleAddBinItemToTimeline]
+  );
+
+  const handleAddAllBinToTimeline = useCallback(() => {
+    const binList = mediaBinRef.current;
+    if (binList.length === 0) return;
+    pushImmediateHistory();
+    const cfg = configRef.current;
+    const existing = [...mediaItemsRef.current];
+    const bounds = getEffectiveTimelineBounds(cfg, existing, audioRef.current);
+    const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+    const created: VisualMediaState[] = [];
+
+    let simulated = [...existing];
+    for (const b of binList) {
+      const dur =
+        b.kind === 'video' ? Number(Math.min(60, Math.max(1, b.videoDuration || 10)).toFixed(1)) : 4.0;
+      if (cfg.slideshowMode === 'manual') {
+        const intervals = getNormalizedManualClipIntervals(simulated);
+        const endCursor = intervals.length > 0 ? intervals[intervals.length - 1].endSec : 0;
+        const slot = findManualInsertionSlot(simulated, endCursor, dur, maxTimeline);
+        const clip = buildClipFromBinItem(b, {
+          startSec: slot.startSec,
+          durationSec: slot.durationSec,
+        });
+        created.push(clip);
+        simulated.push(clip);
+      } else {
+        const clip = buildClipFromBinItem(b, { durationSec: dur });
+        created.push(clip);
+        simulated.push(clip);
+      }
+    }
+
+    if (created.length > 0) {
+      setMediaItems((prev) => [...prev, ...created]);
+      setSelectedClipId(created[0].id);
+      setSelectedFxId(null);
+    }
+  }, [buildClipFromBinItem, getEffectiveTimelineBounds, pushImmediateHistory]);
+
+  const handleRemoveBinItem = useCallback(
+    (binItemId: string) => {
+      const target = mediaBinRef.current.find((b) => b.id === binItemId);
+      if (!target) return;
+      pushImmediateHistory();
+      setMediaBin((prev) => prev.filter((b) => b.id !== binItemId));
+      const usedElsewhere =
+        mediaItemsRef.current.some((m) => m.url === target.url) ||
+        audioRef.current?.metadata.embeddedCoverUrl === target.url;
+      if (!usedElsewhere && target.url.startsWith('blob:')) {
+        URL.revokeObjectURL(target.url);
+      }
+    },
+    [pushImmediateHistory]
+  );
+
+  const handleClearBin = useCallback(() => {
+    if (mediaBinRef.current.length === 0) return;
+    pushImmediateHistory();
+    const prevBin = mediaBinRef.current;
+    setMediaBin([]);
+    for (const target of prevBin) {
+      const usedElsewhere =
+        mediaItemsRef.current.some((m) => m.url === target.url) ||
+        audioRef.current?.metadata.embeddedCoverUrl === target.url;
+      if (!usedElsewhere && target.url.startsWith('blob:')) {
+        URL.revokeObjectURL(target.url);
+      }
+    }
+  }, [pushImmediateHistory]);
 
   const handleAddGeneratorScene = useCallback(
     (effect: Exclude<GeneratorEffectId, 'none'>, snapshotGlobalParams = false) => {
@@ -1381,61 +1759,140 @@ export default function App() {
             glow: cfg.generatorGlow,
           }
         : undefined;
+
+      let manualStart: number | undefined;
+      let sceneDur = 5.0;
+      if (cfg.slideshowMode === 'manual') {
+        const bounds = getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current);
+        const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+        const desiredStart = Math.max(0, currentTimeRef.current - bounds.trimBase);
+        const slot = findManualInsertionSlot(
+          mediaItemsRef.current,
+          desiredStart,
+          5.0,
+          maxTimeline
+        );
+        manualStart = slot.startSec;
+        sceneDur = slot.durationSec;
+      }
+
+      const newScene: VisualMediaState = {
+        id,
+        kind: 'generator',
+        fileName,
+        url: '',
+        width: 1920,
+        height: 1080,
+        startSec: manualStart,
+        durationSec: sceneDur,
+        sourceStartSec: 0,
+        playbackRate: 1.0,
+        transitionOut: 'crossfade',
+        transitionDurationSec: 0.65,
+        generatorId: effect,
+        generatorParams,
+        transform: { ...DEFAULT_CLIP_TRANSFORM },
+        clipAudioVolume: 0,
+        clipAudioMuted: true,
+      };
+
       setMediaItems((prev) =>
-        insertClipAfterSelection(
-          prev,
-          {
-            id,
-            kind: 'generator',
-            fileName,
-            url: '',
-            width: 1920,
-            height: 1080,
-            durationSec: 5.0,
-            sourceStartSec: 0,
-            playbackRate: 1.0,
-            transitionOut: 'crossfade',
-            transitionDurationSec: 0.65,
-            generatorId: effect,
-            generatorParams,
-            transform: { ...DEFAULT_CLIP_TRANSFORM },
-            clipAudioVolume: 0,
-            clipAudioMuted: true,
-          },
-          selectedClipIdRef.current
-        )
+        cfg.slideshowMode === 'manual'
+          ? [...prev, newScene]
+          : insertClipAfterSelection(prev, newScene, selectedClipIdRef.current)
       );
       setSelectedClipId(id);
+      setSelectedFxId(null);
     },
-    [lang, pushImmediateHistory]
+    [getEffectiveTimelineBounds, lang, pushImmediateHistory]
   );
 
   const handleUpdateClip = useCallback(
     (id: string, patch: Partial<VisualMediaState>) => {
       queueDebouncedHistory();
+      const cfg = configRef.current;
       const needsModeSwitch =
         (patch.durationSec !== undefined ||
           patch.transitionOut !== undefined ||
           patch.transitionDurationSec !== undefined) &&
         mediaItemsRef.current.length > 1 &&
-        configRef.current.slideshowMode !== 'custom_durations';
+        cfg.slideshowMode !== 'custom_durations' &&
+        cfg.slideshowMode !== 'manual';
 
       const bounds = needsModeSwitch
-        ? getEffectiveTimelineBounds(configRef.current, mediaItemsRef.current, audioRef.current)
+        ? getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current)
         : null;
 
       setMediaItems((prev) => {
         const base =
           needsModeSwitch && bounds
-            ? snapshotSegmentDurations(prev, bounds.clipDuration, configRef.current, beatCutTimestamps)
+            ? snapshotSegmentDurations(prev, bounds.clipDuration, cfg, beatCutTimestamps)
             : prev;
-        return base.map((item) => (item.id === id ? { ...item, ...patch } : item));
+
+        let safePatch = patch;
+        if (cfg.slideshowMode === 'manual' && patch.durationSec !== undefined) {
+          const intervals = getNormalizedManualClipIntervals(base);
+          const idx = intervals.findIndex((iv) => iv.id === id);
+          if (idx !== -1) {
+            const cur = intervals[idx];
+            const next = intervals[idx + 1];
+            const maxDur = next ? Math.max(0.4, next.startSec - cur.startSec) : 600;
+            safePatch = {
+              ...patch,
+              durationSec: Number(Math.max(0.4, Math.min(maxDur, patch.durationSec)).toFixed(2)),
+            };
+          }
+        }
+        return base.map((item) => (item.id === id ? { ...item, ...safePatch } : item));
       });
       if (needsModeSwitch) {
         setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
       }
     },
     [beatCutTimestamps, getEffectiveTimelineBounds, queueDebouncedHistory]
+  );
+
+  const handleMoveClipPosition = useCallback(
+    (clipId: string, rawStartSec: number) => {
+      const cfg = configRef.current;
+      const items = mediaItemsRef.current;
+      if (cfg.slideshowMode !== 'manual') return;
+      queueDebouncedHistory();
+      const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+      const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+      const beats = trackBeatGrid.beats.length > 0 ? [0, ...trackBeatGrid.beats] : [];
+      const clampedStart = clampManualClipMove(
+        items,
+        clipId,
+        rawStartSec,
+        maxTimeline,
+        beats,
+        cfg.snapToBeats
+      );
+      setMediaItems((prev) =>
+        prev.map((m) => (m.id === clipId ? { ...m, startSec: clampedStart } : m))
+      );
+    },
+    [getEffectiveTimelineBounds, queueDebouncedHistory, trackBeatGrid.beats]
+  );
+
+  const handleTrimClipLeftEdge = useCallback(
+    (clipId: string, nextStartSec: number, nextDurSec: number) => {
+      if (configRef.current.slideshowMode !== 'manual') return;
+      queueDebouncedHistory();
+      setMediaItems((prev) =>
+        prev.map((m) =>
+          m.id === clipId
+            ? {
+                ...m,
+                startSec: Math.max(0, Number(nextStartSec.toFixed(2))),
+                durationSec: Math.max(0.4, Number(nextDurSec.toFixed(2))),
+              }
+            : m
+        )
+      );
+    },
+    [queueDebouncedHistory]
   );
 
   const handleSelectClip = useCallback((id: string) => {
@@ -1477,9 +1934,31 @@ export default function App() {
         clonedVideo.src = orig.url;
       }
 
+      let dupStart = orig.startSec;
+      let dupDur = orig.durationSec;
+      if (configRef.current.slideshowMode === 'manual') {
+        const bounds = getEffectiveTimelineBounds(
+          configRef.current,
+          prev,
+          audioRef.current
+        );
+        const origInterval = getNormalizedManualClipIntervals(prev).find((iv) => iv.id === orig.id);
+        const desiredStart = origInterval ? origInterval.endSec : 0;
+        const slot = findManualInsertionSlot(
+          prev,
+          desiredStart,
+          orig.durationSec,
+          audioRef.current ? bounds.clipDuration : 3600
+        );
+        dupStart = slot.startSec;
+        dupDur = slot.durationSec;
+      }
+
       const copyItem: VisualMediaState = {
         ...orig,
         id: newId,
+        startSec: dupStart,
+        durationSec: dupDur,
         transform: { ...(orig.transform || DEFAULT_CLIP_TRANSFORM) },
         generatorParams: orig.generatorParams ? { ...orig.generatorParams } : undefined,
         overlayEffect: orig.overlayEffect
@@ -1492,12 +1971,16 @@ export default function App() {
       };
 
       const next = [...prev];
-      next.splice(idx + 1, 0, copyItem);
+      if (configRef.current.slideshowMode === 'manual') {
+        next.push(copyItem);
+      } else {
+        next.splice(idx + 1, 0, copyItem);
+      }
       setMediaItems(next);
       setSelectedClipId(newId);
       setSelectedFxId(null);
     },
-    [pushImmediateHistory]
+    [getEffectiveTimelineBounds, pushImmediateHistory]
   );
 
   const handleAddFxOverlay = useCallback(
@@ -1794,8 +2277,16 @@ export default function App() {
     pushImmediateHistory();
     const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
     const perClip = Number(Math.max(0.5, clipDuration / mediaItemsRef.current.length).toFixed(2));
-    setMediaItems((prev) => prev.map((item) => ({ ...item, durationSec: perClip })));
-    setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+    setMediaItems((prev) =>
+      prev.map((item, idx) => ({
+        ...item,
+        startSec: Number((idx * perClip).toFixed(2)),
+        durationSec: perClip,
+      }))
+    );
+    if (configRef.current.slideshowMode !== 'manual') {
+      setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+    }
   }, [config.trimEnd, config.trimStart, pushImmediateHistory]);
 
   const handleAutoBeatSyncClips = useCallback(
@@ -1813,13 +2304,17 @@ export default function App() {
         bounds.trimBase,
         mode
       );
+      let cursor = 0;
       setMediaItems((prev) =>
         prev.map((clip, i) => {
           const p = plan[i];
           if (!p) return clip;
           const baseTransform = clip.transform || DEFAULT_CLIP_TRANSFORM;
+          const clipStart = Number(cursor.toFixed(2));
+          cursor += p.durationSec;
           return {
             ...clip,
+            startSec: clipStart,
             durationSec: p.durationSec,
             transitionDurationSec: p.transitionDurationSec,
             transitionOut: applyMotionAndTrans ? p.suggestedTransition : clip.transitionOut,
@@ -1834,7 +2329,9 @@ export default function App() {
           };
         })
       );
-      setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+      if (configRef.current.slideshowMode !== 'manual') {
+        setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+      }
     },
     [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]
   );
@@ -1844,14 +2341,14 @@ export default function App() {
     const items = mediaItemsRef.current;
     if (!aud || items.length === 0) return;
     pushImmediateHistory();
-    const totalClips = items.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+    const totalClips = getTimelineSpanSec(items, configRef.current);
     setConfig((prev) => {
       const nextEnd = Math.min(aud.duration, prev.trimStart + Math.max(0.5, totalClips));
       return {
         ...prev,
         trimPreset: 'custom',
         trimEnd: Number(nextEnd.toFixed(2)),
-        slideshowMode: 'custom_durations',
+        slideshowMode: prev.slideshowMode === 'manual' ? 'manual' : 'custom_durations',
       };
     });
   }, [pushImmediateHistory]);
@@ -1869,15 +2366,18 @@ export default function App() {
         setConfig((prev) => ({ ...prev, transitionType: transitionOut }));
         setMediaItems((prev) => prev.map((m) => ({ ...m, transitionOut })));
       } else {
+        const cfg = configRef.current;
         const needsModeSwitch =
-          mediaItemsRef.current.length > 1 && configRef.current.slideshowMode !== 'custom_durations';
+          mediaItemsRef.current.length > 1 &&
+          cfg.slideshowMode !== 'custom_durations' &&
+          cfg.slideshowMode !== 'manual';
         const bounds = needsModeSwitch
-          ? getEffectiveTimelineBounds(configRef.current, mediaItemsRef.current, audioRef.current)
+          ? getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current)
           : null;
         setMediaItems((prev) => {
           const base =
             needsModeSwitch && bounds
-              ? snapshotSegmentDurations(prev, bounds.clipDuration, configRef.current, beatCutTimestamps)
+              ? snapshotSegmentDurations(prev, bounds.clipDuration, cfg, beatCutTimestamps)
               : prev;
           return base.map((m) => (m.id === id ? { ...m, transitionOut } : m));
         });
@@ -1958,7 +2458,10 @@ export default function App() {
         'cut',
       ];
       pushImmediateHistory();
-      if (configRef.current.slideshowMode !== 'custom_durations') {
+      if (
+        configRef.current.slideshowMode !== 'custom_durations' &&
+        configRef.current.slideshowMode !== 'manual'
+      ) {
         setConfig((prev) => {
           const idx = order.indexOf(prev.transitionType);
           return { ...prev, transitionType: order[(idx + 1) % order.length] };
@@ -2084,6 +2587,7 @@ export default function App() {
 
     const firstClip: VisualMediaState = {
       ...sourceForSplit,
+      startSec: Number(seg.startSec.toFixed(2)),
       durationSec: firstDur,
       generatorParams: sourceForSplit.generatorParams ? { ...sourceForSplit.generatorParams } : undefined,
       overlayEffect: sourceForSplit.overlayEffect
@@ -2096,6 +2600,7 @@ export default function App() {
     const secondClip: VisualMediaState = {
       ...sourceForSplit,
       id: newId,
+      startSec: Number((seg.startSec + firstDur).toFixed(2)),
       durationSec: secondDur,
       sourceStartSec:
         sourceForSplit.kind === 'video'
@@ -2118,7 +2623,7 @@ export default function App() {
     setMediaItems(workingItems);
     setSelectedClipId(newId);
     setSelectedFxId(null);
-    if (cfg.slideshowMode !== 'custom_durations') {
+    if (cfg.slideshowMode !== 'custom_durations' && cfg.slideshowMode !== 'manual') {
       setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
     }
   }, [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]);
@@ -2167,21 +2672,48 @@ export default function App() {
 
   const handleUseEmbeddedCover = useCallback(() => {
     const currentAudio = audioRef.current;
-    if (!currentAudio?.metadata.embeddedCoverUrl) return;
-    appendVisualFromUrl(
-      currentAudio.metadata.embeddedCoverUrl,
-      `${currentAudio.fileName} (Cover)`,
-      'image',
-      true
-    );
-  }, [appendVisualFromUrl]);
+    const coverUrl = currentAudio?.metadata.embeddedCoverUrl;
+    if (!coverUrl) return;
+    const existing = mediaBinRef.current.find((b) => b.url === coverUrl);
+    if (existing) {
+      placeBinItemOnTimeline(existing, { mode: 'playhead' });
+    } else {
+      ingestVisualAssetFromUrl(
+        coverUrl,
+        `${currentAudio.fileName} (Cover)`,
+        'image',
+        undefined,
+        true
+      );
+    }
+  }, [ingestVisualAssetFromUrl, placeBinItemOnTimeline]);
 
   const handleUpdateConfig = useCallback(
     (patch: Partial<StudioConfig>) => {
       queueDebouncedHistory();
+      if (
+        patch.slideshowMode === 'manual' &&
+        configRef.current.slideshowMode !== 'manual' &&
+        mediaItemsRef.current.length > 0
+      ) {
+        const bounds = getEffectiveTimelineBounds(
+          configRef.current,
+          mediaItemsRef.current,
+          audioRef.current
+        );
+        setMediaItems((prev) =>
+          snapshotSegmentDurations(
+            prev,
+            bounds.clipDuration,
+            configRef.current,
+            beatCutTimestamps,
+            true
+          )
+        );
+      }
       setConfig((prev) => ({ ...prev, ...patch }));
     },
-    [queueDebouncedHistory]
+    [beatCutTimestamps, getEffectiveTimelineBounds, queueDebouncedHistory]
   );
 
   const handleCompileCustomGlsl = useCallback(() => {
@@ -2390,7 +2922,8 @@ export default function App() {
       audioRef.current?.fileName,
       audioRef.current?.fileSize,
       audioRef.current?.isSyntheticDemo,
-      audioBlobKeyRef.current
+      audioBlobKeyRef.current,
+      mediaBinRef.current
     );
     const blob = new Blob([JSON.stringify(serialized, null, 2)], {
       type: 'application/json;charset=utf-8',
@@ -2511,7 +3044,80 @@ export default function App() {
           }
         }
 
-        // Restore generator clips + image & video clips whose IDB blobs exist locally
+        // Restore Media Library + generator/image/video clips whose IDB blobs exist locally
+        const urlByKey = new Map<string, string>();
+        const nextBin: MediaBinItem[] = [];
+        for (const sb of parsed.mediaBin || []) {
+          if (!sb.blobKey) continue;
+          const blob = await loadBlobFromIDB(sb.blobKey);
+          if (!blob) {
+            missingBinaryMedia = true;
+            continue;
+          }
+          let url = urlByKey.get(sb.blobKey);
+          if (!url) {
+            url = URL.createObjectURL(blob);
+            urlByKey.set(sb.blobKey, url);
+            blobKeyMapRef.current.set(url, sb.blobKey);
+          }
+          if (sb.kind === 'image') {
+            const img = await new Promise<HTMLImageElement | null>((resolve) => {
+              const el = new Image();
+              el.onload = () => resolve(el);
+              el.onerror = () => resolve(null);
+              el.src = url!;
+            });
+            if (img) {
+              nextBin.push({
+                id: sb.id || `bin-${createItemId()}`,
+                kind: 'image',
+                fileName: sb.fileName,
+                url,
+                width: img.naturalWidth || sb.width || 1920,
+                height: img.naturalHeight || sb.height || 1080,
+                imageElement: img,
+                defaultDurationSec: sb.defaultDurationSec || 4.0,
+              });
+            } else {
+              missingBinaryMedia = true;
+            }
+          } else {
+            const video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'metadata';
+            const ok = await new Promise<boolean>((resolve) => {
+              video.onloadedmetadata = () => resolve(true);
+              video.onerror = () => resolve(false);
+              video.src = url!;
+            });
+            if (ok) {
+              let decodedBuf: AudioBuffer | undefined;
+              try {
+                const arr = await blob.arrayBuffer();
+                decodedBuf = await getAudioContext().decodeAudioData(arr);
+              } catch {
+                // silent video
+              }
+              const vDur = video.duration || sb.videoDuration || 10;
+              nextBin.push({
+                id: sb.id || `bin-${createItemId()}`,
+                kind: 'video',
+                fileName: sb.fileName,
+                url,
+                width: video.videoWidth || sb.width || 1080,
+                height: video.videoHeight || sb.height || 1920,
+                videoDuration: vDur,
+                decodedAudioBuffer: decodedBuf,
+                defaultDurationSec:
+                  sb.defaultDurationSec || Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
+              });
+            } else {
+              missingBinaryMedia = true;
+            }
+          }
+        }
+
         const nextClips: VisualMediaState[] = [];
         for (const sc of parsed.clips || []) {
           const restoredOverlay = sc.overlayEffect
@@ -2528,6 +3134,7 @@ export default function App() {
               url: '',
               width: sc.width || 1920,
               height: sc.height || 1080,
+              startSec: sc.startSec,
               durationSec: sc.durationSec || 5,
               sourceStartSec: sc.sourceStartSec || 0,
               playbackRate: sc.playbackRate || 1,
@@ -2546,14 +3153,18 @@ export default function App() {
               missingBinaryMedia = true;
               continue;
             }
-            const url = URL.createObjectURL(blob);
-            blobKeyMapRef.current.set(url, sc.blobKey);
+            let url = urlByKey.get(sc.blobKey);
+            if (!url) {
+              url = URL.createObjectURL(blob);
+              urlByKey.set(sc.blobKey, url);
+              blobKeyMapRef.current.set(url, sc.blobKey);
+            }
             if (sc.kind === 'image') {
               const img = await new Promise<HTMLImageElement | null>((resolve) => {
                 const el = new Image();
                 el.onload = () => resolve(el);
                 el.onerror = () => resolve(null);
-                el.src = url;
+                el.src = url!;
               });
               if (img) {
                 nextClips.push({
@@ -2564,6 +3175,7 @@ export default function App() {
                   width: img.naturalWidth || sc.width || 1920,
                   height: img.naturalHeight || sc.height || 1080,
                   imageElement: img,
+                  startSec: sc.startSec,
                   durationSec: sc.durationSec || 4,
                   sourceStartSec: 0,
                   playbackRate: 1,
@@ -2574,8 +3186,22 @@ export default function App() {
                   clipAudioVolume: 0,
                   clipAudioMuted: true,
                 });
+                if (
+                  !parsed.mediaBin &&
+                  !nextBin.some((b) => b.url && blobKeyMapRef.current.get(b.url) === sc.blobKey)
+                ) {
+                  nextBin.push({
+                    id: `bin-${createItemId()}`,
+                    kind: 'image',
+                    fileName: sc.fileName,
+                    url,
+                    width: img.naturalWidth || sc.width || 1920,
+                    height: img.naturalHeight || sc.height || 1080,
+                    imageElement: img,
+                    defaultDurationSec: sc.durationSec || 4.0,
+                  });
+                }
               } else {
-                URL.revokeObjectURL(url);
                 missingBinaryMedia = true;
               }
             } else if (sc.kind === 'video') {
@@ -2587,7 +3213,7 @@ export default function App() {
               const ok = await new Promise<boolean>((resolve) => {
                 video.onloadedmetadata = () => resolve(true);
                 video.onerror = () => resolve(false);
-                video.src = url;
+                video.src = url!;
               });
               if (ok) {
                 let decodedBuf: AudioBuffer | undefined;
@@ -2597,6 +3223,7 @@ export default function App() {
                 } catch {
                   // silent video
                 }
+                const vDur = video.duration || sc.videoDuration || 10;
                 nextClips.push({
                   id: sc.id || createItemId(),
                   kind: 'video',
@@ -2605,8 +3232,9 @@ export default function App() {
                   width: video.videoWidth || sc.width || 1080,
                   height: video.videoHeight || sc.height || 1920,
                   videoElement: video,
-                  videoDuration: video.duration || sc.videoDuration || 10,
+                  videoDuration: vDur,
                   decodedAudioBuffer: decodedBuf,
+                  startSec: sc.startSec,
                   durationSec: sc.durationSec || 4,
                   sourceStartSec: sc.sourceStartSec || 0,
                   playbackRate: sc.playbackRate || 1,
@@ -2617,8 +3245,23 @@ export default function App() {
                   clipAudioVolume: sc.clipAudioVolume ?? 0.8,
                   clipAudioMuted: sc.clipAudioMuted ?? true,
                 });
+                if (
+                  !parsed.mediaBin &&
+                  !nextBin.some((b) => b.url && blobKeyMapRef.current.get(b.url) === sc.blobKey)
+                ) {
+                  nextBin.push({
+                    id: `bin-${createItemId()}`,
+                    kind: 'video',
+                    fileName: sc.fileName,
+                    url,
+                    width: video.videoWidth || sc.width || 1080,
+                    height: video.videoHeight || sc.height || 1920,
+                    videoDuration: vDur,
+                    decodedAudioBuffer: decodedBuf,
+                    defaultDurationSec: Number(Math.min(60, Math.max(1, vDur)).toFixed(1)),
+                  });
+                }
               } else {
-                URL.revokeObjectURL(url);
                 missingBinaryMedia = true;
               }
             }
@@ -2626,9 +3269,13 @@ export default function App() {
             missingBinaryMedia = true;
           }
         }
+        setMediaBin(nextBin);
         if (nextClips.length > 0) {
           setMediaItems(nextClips);
           setSelectedClipId(nextClips[0].id);
+        } else {
+          setMediaItems([]);
+          setSelectedClipId(null);
         }
         if (missingBinaryMedia) {
           showError(tFor(langRef.current).noticeJsonPartialRestore);
@@ -2643,6 +3290,12 @@ export default function App() {
   const handleResetAutosave = useCallback(async () => {
     stopPlayback();
     const seen = new Set<string>();
+    for (const b of mediaBinRef.current) {
+      if (b.url.startsWith('blob:') && !seen.has(b.url)) {
+        seen.add(b.url);
+        URL.revokeObjectURL(b.url);
+      }
+    }
     for (const item of mediaItemsRef.current) {
       if (item.kind === 'video' && item.videoElement) item.videoElement.pause();
       if (item.url.startsWith('blob:') && !seen.has(item.url)) {
@@ -2668,6 +3321,7 @@ export default function App() {
     futureRef.current = [];
     pendingBaseSnapshotRef.current = null;
     syncHistoryFlags();
+    setMediaBin([]);
     setMediaItems([]);
     setSelectedClipId(null);
     setSelectedFxId(null);
@@ -2889,7 +3543,7 @@ export default function App() {
           config,
           beatCutTimestamps
         );
-        const activeClip = mediaItems[slice.activeIndex];
+        const activeClip = slice.activeIndex !== null ? mediaItems[slice.activeIndex] : undefined;
         if (
           activeClip?.decodedAudioBuffer &&
           !activeClip.clipAudioMuted &&
@@ -3348,7 +4002,8 @@ export default function App() {
         cfg,
         beatCutTimestamps
       );
-      const activeClip = mediaItemsRef.current[slice.activeIndex];
+      const activeClip =
+        slice.activeIndex !== null ? mediaItemsRef.current[slice.activeIndex] : undefined;
       if (
         activeClip?.decodedAudioBuffer &&
         !activeClip.clipAudioMuted &&
@@ -3521,6 +4176,7 @@ export default function App() {
             <MediaInputPanel
               lang={lang}
               audio={audio}
+              mediaBin={mediaBin}
               mediaItems={mediaItems}
               selectedClipId={selectedClipId}
               config={config}
@@ -3529,6 +4185,10 @@ export default function App() {
               onAudioFile={handleAudioFile}
               onLoadDemoBeat={handleLoadDemoBeat}
               onVisualFiles={handleVisualFiles}
+              onAddBinItemToTimeline={handleAddBinItemToTimeline}
+              onAddAllBinToTimeline={handleAddAllBinToTimeline}
+              onRemoveBinItem={handleRemoveBinItem}
+              onClearBin={handleClearBin}
               onAddGeneratorScene={handleAddGeneratorScene}
               onSelectClip={handleSelectClip}
               onInspectClip={handleInspectClip}
@@ -3610,6 +4270,7 @@ export default function App() {
               onSelectClip={handleSelectClip}
               onSelectFx={handleSelectFx}
               onUpdateClip={handleUpdateClip}
+              onMoveClipPosition={handleMoveClipPosition}
               onApplyClipOverlay={handleApplyClipOverlay}
               onMoveClipOverlayToFxTrack={handleMoveClipOverlayToFxTrack}
               onDuplicateClip={handleDuplicateClip}
@@ -3649,6 +4310,10 @@ export default function App() {
         onInspectClip={handleInspectClip}
         onInspectFx={handleInspectFx}
         onUpdateClip={handleUpdateClip}
+        onMoveClipPosition={handleMoveClipPosition}
+        onTrimClipLeftEdge={handleTrimClipLeftEdge}
+        onDropBinItemToTimeline={handleDropBinItemToTimeline}
+        onDropFilesToTimeline={handleDropFilesToTimeline}
         onApplyClipOverlay={handleApplyClipOverlay}
         onVisualFiles={handleVisualFiles}
         onDuplicateClip={handleDuplicateClip}

@@ -337,7 +337,7 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   customGlslCode: DEFAULT_CUSTOM_GLSL,
   fxOverlays: [],
 
-  slideshowMode: 'custom_durations',
+  slideshowMode: 'manual',
   slideDurationSec: 4.0,
   minBeatCutSec: 2.0,
   transitionType: 'crossfade',

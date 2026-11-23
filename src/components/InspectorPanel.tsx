@@ -76,6 +76,7 @@ interface InspectorPanelProps {
   onSelectClip: (id: string) => void;
   onSelectFx: (id: string | null) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
+  onMoveClipPosition?: (id: string, rawStartSec: number) => void;
   onApplyClipOverlay: (
     clipId: string,
     effect: GeneratorEffectId,
@@ -139,6 +140,7 @@ export function InspectorPanel({
   onSelectClip,
   onSelectFx,
   onUpdateClip,
+  onMoveClipPosition,
   onApplyClipOverlay,
   onMoveClipOverlayToFxTrack,
   onDuplicateClip,
@@ -368,6 +370,32 @@ export function InspectorPanel({
                     </button>
                   </div>
                 </div>
+
+                {/* Timeline Start (Manual Mode) */}
+                {config.slideshowMode === 'manual' && (
+                  <div className="flex items-center justify-between text-xs pb-2 border-b border-[#262B38]/60">
+                    <span className="text-gray-200 font-medium">{t.clipTimelineStartLabel}</span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={0}
+                        max={3600}
+                        step={0.1}
+                        value={Number((selectedClip.startSec ?? 0).toFixed(2))}
+                        onChange={(e) => {
+                          const v = Math.max(0, Number(e.target.value) || 0);
+                          if (onMoveClipPosition) {
+                            onMoveClipPosition(selectedClip.id, v);
+                          } else {
+                            onUpdateClip(selectedClip.id, { startSec: Number(v.toFixed(2)) });
+                          }
+                        }}
+                        className="w-16 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-cyan-300"
+                      />
+                      <span className="text-[11px] font-mono text-gray-500">s</span>
+                    </div>
+                  </div>
+                )}
 
                 {/* Clip Duration */}
                 <div className="space-y-2">

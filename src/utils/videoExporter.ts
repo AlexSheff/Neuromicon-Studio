@@ -22,6 +22,7 @@ import {
   computeClipTimelineSegments,
   computeFadeEnvelope,
   createSmoothState,
+  getTimelineSpanSec,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
 } from './audioAnalyzer';
@@ -417,7 +418,7 @@ export async function exportStudioVideo(params: {
     config.customWidth,
     config.customHeight
   );
-  const rawClipsTotal = mediaItems.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+  const rawClipsTotal = getTimelineSpanSec(mediaItems, config);
   const effectiveConfig: StudioConfig = audio
     ? config
     : {
@@ -786,7 +787,7 @@ async function exportWithWebCodecs(params: {
           config,
           beatCutTimestamps
         );
-        const activeItem = mediaItems[slice.activeIndex];
+        const activeItem = slice.activeIndex !== null ? mediaItems[slice.activeIndex] : undefined;
         if (activeItem?.kind === 'video' && activeItem.videoElement) {
           const vidTime =
             activeItem.sourceStartSec + slice.slideLocalTime * (activeItem.playbackRate || 1);
@@ -1169,7 +1170,9 @@ async function exportWithMediaRecorder(params: {
           vid.currentTime = Math.min(Math.max(0, dur - 0.04), target);
         }
       };
-      syncVid(mediaItems[slice.activeIndex], slice.slideLocalTime);
+      if (slice.activeIndex !== null) {
+        syncVid(mediaItems[slice.activeIndex], slice.slideLocalTime);
+      }
       if (slice.prevIndex !== null) {
         syncVid(mediaItems[slice.prevIndex], slice.prevSlideLocalTime);
       }

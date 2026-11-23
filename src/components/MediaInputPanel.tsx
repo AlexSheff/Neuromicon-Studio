@@ -5,6 +5,7 @@ import {
   Copy,
   Download,
   Film,
+  GripVertical,
   Image as ImageIcon,
   Layers,
   Music,
@@ -25,6 +26,7 @@ import {
   BeatSyncMode,
   GeneratorEffectId,
   Language,
+  MediaBinItem,
   MediaFramingMode,
   OverlayLayer,
   SlideTransitionType,
@@ -34,6 +36,7 @@ import {
   TrimPresetId,
   VisualMediaState,
 } from '../types/studio';
+import { getTimelineSpanSec } from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
 
 type MediaPanelTab = 'media' | 'layers' | 'timing';
@@ -41,6 +44,7 @@ type MediaPanelTab = 'media' | 'layers' | 'timing';
 interface MediaInputPanelProps {
   lang: Language;
   audio: AudioTrackState | null;
+  mediaBin: MediaBinItem[];
   mediaItems: VisualMediaState[];
   selectedClipId: string | null;
   config: StudioConfig;
@@ -48,6 +52,13 @@ interface MediaInputPanelProps {
   onAudioFile: (file: File) => void;
   onLoadDemoBeat: () => void;
   onVisualFiles: (files: File[]) => void;
+  onAddBinItemToTimeline: (
+    binItemId: string,
+    options?: { atTimeSec?: number; mode?: 'playhead' | 'end' | 'exact' }
+  ) => void;
+  onAddAllBinToTimeline: () => void;
+  onRemoveBinItem: (binItemId: string) => void;
+  onClearBin: () => void;
   onAddGeneratorScene: (
     effect: Exclude<GeneratorEffectId, 'none'>,
     snapshotGlobalParams?: boolean
@@ -89,6 +100,7 @@ function formatSec(sec: number): string {
 export function MediaInputPanel({
   lang,
   audio,
+  mediaBin,
   mediaItems,
   selectedClipId,
   config,
@@ -96,6 +108,10 @@ export function MediaInputPanel({
   onAudioFile,
   onLoadDemoBeat,
   onVisualFiles,
+  onAddBinItemToTimeline,
+  onAddAllBinToTimeline,
+  onRemoveBinItem,
+  onClearBin,
   onAddGeneratorScene,
   onSelectClip,
   onInspectClip,
@@ -293,22 +309,36 @@ export function MediaInputPanel({
               </button>
             </section>
 
-            {/* Clip Bin & Generative Scenes */}
+            {/* Media Library / Bin (Uploads never auto-shift timeline) */}
             <section className="p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold text-gray-100 flex items-center gap-1.5 min-w-0">
                   <ImageIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
-                  <span className="truncate">{t.visualSectionTitle}</span>
+                  <span className="truncate">
+                    {t.mediaBinTitle}
+                    {mediaBin.length > 0 ? ` (${mediaBin.length})` : ''}
+                  </span>
                 </h2>
-                {mediaItems.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={onClearVisuals}
-                    className="text-[11px] text-gray-400 hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    {t.clearVisuals}
-                  </button>
-                )}
+                <div className="flex items-center gap-2 shrink-0">
+                  {mediaBin.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={onAddAllBinToTimeline}
+                      className="text-[11px] font-medium text-amber-400 hover:text-amber-300 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {t.binAddAllBtn}
+                    </button>
+                  )}
+                  {mediaBin.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={onClearBin}
+                      className="text-[11px] text-gray-400 hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {t.binClearBtn}
+                    </button>
+                  )}
+                </div>
               </div>
 
               <input
@@ -338,26 +368,143 @@ export function MediaInputPanel({
                 onDragLeave={() => setVisualDragOver(false)}
                 onDrop={handleVisualDrop}
                 className={`rounded-lg border border-dashed text-center cursor-pointer transition-colors ${
-                  mediaItems.length > 0 ? 'p-2' : 'p-3.5'
+                  mediaBin.length > 0 ? 'p-2' : 'p-3'
                 } ${
                   visualDragOver
                     ? 'border-amber-400 bg-amber-500/10'
                     : 'border-[#323849] bg-[#141821] hover:border-gray-500'
                 }`}
               >
-                {mediaItems.length === 0 ? (
+                {mediaBin.length === 0 ? (
                   <>
                     <Upload className="w-4 h-4 mx-auto mb-1.5 text-gray-400" aria-hidden="true" />
                     <p className="text-xs font-medium text-gray-200">{t.visualDropTitle}</p>
-                    <p className="text-[10px] text-gray-500 mt-0.5">{t.visualDropHint}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">{t.binEmptyHint}</p>
                   </>
                 ) : (
                   <div className="flex items-center justify-center gap-1.5 text-xs font-medium text-gray-300">
                     <Plus className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
                     <span>
-                      {t.addMoreVisuals} ({mediaItems.length} {t.mediaCountSuffix})
+                      {t.addMoreVisuals} ({mediaBin.length} {t.mediaCountSuffix})
                     </span>
                   </div>
+                )}
+              </div>
+
+              {audio?.metadata.embeddedCoverUrl && (
+                <button
+                  type="button"
+                  onClick={onUseEmbeddedCover}
+                  className="w-full py-1.5 px-2.5 rounded-md border border-[#262B38] bg-[#161A24] hover:bg-[#1D2230] text-[11px] font-medium text-amber-300 transition-colors cursor-pointer"
+                >
+                  {t.addCoverToBinBtn}
+                </button>
+              )}
+
+              {mediaBin.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-[10px] text-gray-400 leading-tight">{t.binDragHint}</p>
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
+                    {mediaBin.map((asset) => (
+                      <div
+                        key={asset.id}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('application/x-neuromicon-bin-id', asset.id);
+                          e.dataTransfer.effectAllowed = 'copy';
+                        }}
+                        className="rounded-md border border-[#262B38] bg-[#141821] hover:border-amber-500/55 p-1.5 flex items-center gap-1.5 cursor-grab active:cursor-grabbing transition-colors group"
+                      >
+                        <GripVertical
+                          className="w-3 h-3 text-gray-500 group-hover:text-amber-300 shrink-0"
+                          aria-hidden="true"
+                        />
+                        <div className="w-8 h-8 rounded bg-black/50 overflow-hidden shrink-0 border border-[#262B38] flex items-center justify-center">
+                          {asset.kind === 'image' ? (
+                            <img
+                              src={asset.url}
+                              alt={asset.fileName}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover pointer-events-none"
+                            />
+                          ) : (
+                            <video
+                              src={asset.url}
+                              muted
+                              className="w-full h-full object-cover pointer-events-none"
+                            />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className="text-[11px] font-medium text-gray-100 truncate"
+                            title={asset.fileName}
+                          >
+                            {asset.fileName}
+                          </p>
+                          <p className="text-[9.5px] text-gray-400 font-mono tabular-nums flex items-center gap-1">
+                            {asset.kind === 'video' && (
+                              <Film className="w-2.5 h-2.5 text-amber-400" aria-hidden="true" />
+                            )}
+                            <span>{asset.defaultDurationSec.toFixed(1)}s</span>
+                            <span>·</span>
+                            <span>
+                              {asset.width}×{asset.height}
+                            </span>
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => onAddBinItemToTimeline(asset.id, { mode: 'playhead' })}
+                            title={t.binPlaceAtPlayhead}
+                            className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#0E1016] hover:border-amber-500/70 text-[10px] font-medium text-amber-300 cursor-pointer whitespace-nowrap"
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onAddBinItemToTimeline(asset.id, { mode: 'end' })}
+                            title={t.binPlaceAtEnd}
+                            className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[10px] font-medium text-gray-300 hover:text-cyan-200 cursor-pointer whitespace-nowrap"
+                          >
+                            {t.binPlaceAtEnd}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onRemoveBinItem(asset.id)}
+                            aria-label={t.binRemoveAssetAria}
+                            title={t.binRemoveAssetAria}
+                            className="p-0.5 text-gray-500 hover:text-rose-400 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* Generative Scenes + Timeline Clips Overview */}
+            <section className="p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold text-gray-100 flex items-center gap-1.5 min-w-0">
+                  <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
+                  <span className="truncate">
+                    {t.timelineClipsListTitle}
+                    {mediaItems.length > 0 ? ` (${mediaItems.length})` : ''}
+                  </span>
+                </h2>
+                {mediaItems.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={onClearVisuals}
+                    className="text-[11px] text-gray-400 hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {t.clearVisuals}
+                  </button>
                 )}
               </div>
 
@@ -401,22 +548,13 @@ export function MediaInputPanel({
                     {t.addActiveFxSceneBtn}
                   </button>
                 )}
-
-                {audio?.metadata.embeddedCoverUrl && (
-                  <button
-                    type="button"
-                    onClick={onUseEmbeddedCover}
-                    className="w-full py-1.5 px-2.5 rounded-md border border-[#262B38] bg-[#161A24] hover:bg-[#1D2230] text-[11px] font-medium text-amber-300 transition-colors cursor-pointer"
-                  >
-                    {t.useEmbeddedCover}
-                  </button>
-                )}
               </div>
 
               {mediaItems.length > 0 && (
                 <div className="space-y-1.5 pt-1">
                   {mediaItems.map((item, idx) => {
                     const isSelected = selectedClip?.id === item.id;
+                    const explicitStart = item.startSec;
                     return (
                       <div
                         key={item.id}
@@ -450,19 +588,16 @@ export function MediaInputPanel({
                           </p>
                           <p className="text-[10px] text-gray-400 font-mono tabular-nums flex items-center gap-1 mt-0.5">
                             {item.kind === 'video' && <Film className="w-2.5 h-2.5 text-amber-400" />}
+                            {config.slideshowMode === 'manual' && explicitStart !== undefined && (
+                              <span className="text-gray-300">
+                                {explicitStart.toFixed(1)}–{(explicitStart + item.durationSec).toFixed(1)}s ·
+                              </span>
+                            )}
                             <span className="text-amber-300">{item.durationSec.toFixed(1)}s</span>
                             {item.overlayEffect && (
                               <span className="px-1 rounded bg-cyan-500/20 border border-cyan-500/40 text-[9px] text-cyan-200">
                                 FX
                               </span>
-                            )}
-                            {item.kind !== 'generator' && (
-                              <>
-                                <span>·</span>
-                                <span>
-                                  {item.width}×{item.height}
-                                </span>
-                              </>
                             )}
                           </p>
                         </div>
@@ -479,24 +614,28 @@ export function MediaInputPanel({
                           >
                             <SlidersHorizontal className="w-3.5 h-3.5" />
                           </button>
-                          <button
-                            type="button"
-                            disabled={idx === 0}
-                            onClick={() => onMoveVisual(idx, -1)}
-                            aria-label="Move up"
-                            className="p-1 rounded text-gray-400 hover:text-gray-100 disabled:opacity-25 cursor-pointer"
-                          >
-                            <ArrowUp className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={idx === mediaItems.length - 1}
-                            onClick={() => onMoveVisual(idx, 1)}
-                            aria-label="Move down"
-                            className="p-1 rounded text-gray-400 hover:text-gray-100 disabled:opacity-25 cursor-pointer"
-                          >
-                            <ArrowDown className="w-3.5 h-3.5" />
-                          </button>
+                          {config.slideshowMode !== 'manual' && (
+                            <>
+                              <button
+                                type="button"
+                                disabled={idx === 0}
+                                onClick={() => onMoveVisual(idx, -1)}
+                                aria-label="Move up"
+                                className="p-1 rounded text-gray-400 hover:text-gray-100 disabled:opacity-25 cursor-pointer"
+                              >
+                                <ArrowUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={idx === mediaItems.length - 1}
+                                onClick={() => onMoveVisual(idx, 1)}
+                                aria-label="Move down"
+                                className="p-1 rounded text-gray-400 hover:text-gray-100 disabled:opacity-25 cursor-pointer"
+                              >
+                                <ArrowDown className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
                             onClick={() => onDuplicateClip(item.id)}
@@ -945,8 +1084,7 @@ export function MediaInputPanel({
                 </h3>
                 {mediaItems.length > 0 && (
                   <span className="text-[11px] font-mono tabular-nums text-gray-400">
-                    {t.seqDurationBadge}:{' '}
-                    {mediaItems.reduce((acc, m) => acc + (m.durationSec || 0), 0).toFixed(1)}s
+                    {t.seqDurationBadge}: {getTimelineSpanSec(mediaItems, config).toFixed(1)}s
                   </span>
                 )}
               </div>
@@ -1026,6 +1164,17 @@ export function MediaInputPanel({
               )}
 
               <div className="grid grid-cols-2 gap-1">
+                <button
+                  type="button"
+                  onClick={() => onUpdateConfig({ slideshowMode: 'manual' })}
+                  className={`col-span-2 py-1.5 px-2 rounded border text-[11px] font-semibold cursor-pointer truncate ${
+                    config.slideshowMode === 'manual'
+                      ? 'border-amber-500/80 bg-amber-500/15 text-amber-300'
+                      : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                  }`}
+                >
+                  {t.slideshowManual}
+                </button>
                 {(
                   [
                     { id: 'custom_durations', label: t.slideshowCustom },
@@ -1048,6 +1197,12 @@ export function MediaInputPanel({
                   </button>
                 ))}
               </div>
+
+              {config.slideshowMode === 'manual' && (
+                <p className="text-[10.5px] text-amber-200/80 leading-snug bg-amber-500/5 border border-amber-500/20 rounded px-2 py-1.5">
+                  {t.manualModeHint}
+                </p>
+              )}
 
               {config.slideshowMode === 'fixed' && (
                 <div className="space-y-1">
@@ -1089,7 +1244,7 @@ export function MediaInputPanel({
                 </div>
               )}
 
-              {config.slideshowMode !== 'custom_durations' && (
+              {config.slideshowMode !== 'custom_durations' && config.slideshowMode !== 'manual' && (
                 <>
                   <div className="space-y-1.5">
                     <span className="text-[11px] text-gray-400 block">{t.transitionTypeLabel}</span>

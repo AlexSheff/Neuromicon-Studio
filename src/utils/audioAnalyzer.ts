@@ -296,6 +296,200 @@ export interface TimelineClipSegment {
   isLoopRepeat?: boolean;
 }
 
+export interface NormalizedClipInterval {
+  clipIndex: number;
+  id: string;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+}
+
+export function getNormalizedManualClipIntervals(
+  mediaItems: VisualMediaState[]
+): NormalizedClipInterval[] {
+  const result: NormalizedClipInterval[] = [];
+  let cursor = 0;
+  for (let i = 0; i < mediaItems.length; i++) {
+    const clip = mediaItems[i];
+    const dur = Math.max(0.4, clip.durationSec || 4);
+    const startSec =
+      clip.startSec !== undefined && Number.isFinite(clip.startSec)
+        ? Math.max(0, clip.startSec)
+        : cursor;
+    const endSec = startSec + dur;
+    cursor = Math.max(cursor, endSec);
+    result.push({
+      clipIndex: i,
+      id: clip.id,
+      startSec,
+      endSec,
+      durationSec: dur,
+    });
+  }
+  result.sort((a, b) => a.startSec - b.startSec || a.clipIndex - b.clipIndex);
+  return result;
+}
+
+export function getTimelineSpanSec(
+  mediaItems: VisualMediaState[],
+  config: Pick<StudioConfig, 'slideshowMode'>
+): number {
+  if (mediaItems.length === 0) return 12;
+  if (config.slideshowMode === 'manual') {
+    const intervals = getNormalizedManualClipIntervals(mediaItems);
+    const maxEnd = intervals.reduce((acc, item) => Math.max(acc, item.endSec), 0);
+    return Math.max(0.5, maxEnd);
+  }
+  const sum = mediaItems.reduce((acc, m) => acc + Math.max(0.5, m.durationSec || 4), 0);
+  return Math.max(0.5, sum);
+}
+
+/**
+ * Finds a non-overlapping [startSec, durationSec] slot for placing a new clip onto a manual timeline
+ * without shifting or modifying any existing clips.
+ */
+export function findManualInsertionSlot(
+  mediaItems: VisualMediaState[],
+  desiredStartSec: number,
+  desiredDurSec: number,
+  maxTimelineSec = 3600
+): { startSec: number; durationSec: number } {
+  const dur = Math.max(0.5, desiredDurSec || 4);
+  const clampedDesired = Math.max(0, Math.min(Math.max(0, maxTimelineSec - 0.5), desiredStartSec));
+  const others = getNormalizedManualClipIntervals(mediaItems);
+  if (others.length === 0) {
+    return {
+      startSec: Number(clampedDesired.toFixed(2)),
+      durationSec: Number(Math.min(dur, Math.max(0.5, maxTimelineSec - clampedDesired)).toFixed(2)),
+    };
+  }
+
+  const gaps: { start: number; end: number }[] = [];
+  let cursor = 0;
+  for (const item of others) {
+    if (item.startSec > cursor + 0.02) {
+      gaps.push({ start: cursor, end: Math.min(maxTimelineSec, item.startSec) });
+    }
+    cursor = Math.max(cursor, item.endSec);
+  }
+  if (cursor < maxTimelineSec - 0.02) {
+    gaps.push({ start: cursor, end: maxTimelineSec });
+  }
+
+  // 1. Check if desiredStartSec falls inside any open gap (>= 0.5s)
+  const directGap = gaps.find(
+    (g) => clampedDesired >= g.start - 0.02 && clampedDesired <= g.end + 0.02 && g.end - g.start >= 0.5
+  );
+  if (directGap) {
+    const start = Math.max(directGap.start, Math.min(directGap.end - 0.5, clampedDesired));
+    const roomAfter = directGap.end - start;
+    if (roomAfter >= dur) {
+      return { startSec: Number(start.toFixed(2)), durationSec: Number(dur.toFixed(2)) };
+    }
+    if (directGap.end - directGap.start >= dur) {
+      return {
+        startSec: Number((directGap.end - dur).toFixed(2)),
+        durationSec: Number(dur.toFixed(2)),
+      };
+    }
+    return {
+      startSec: Number(start.toFixed(2)),
+      durationSec: Number(Math.max(0.5, roomAfter).toFixed(2)),
+    };
+  }
+
+  // 2. Otherwise search forward (then closest overall) for a gap that fits full duration
+  const forwardFull = gaps.find((g) => g.end >= clampedDesired && g.end - g.start >= dur);
+  if (forwardFull) {
+    const start = Math.max(forwardFull.start, clampedDesired);
+    return { startSec: Number(start.toFixed(2)), durationSec: Number(dur.toFixed(2)) };
+  }
+
+  const anyFull = gaps.find((g) => g.end - g.start >= dur);
+  if (anyFull) {
+    return { startSec: Number(anyFull.start.toFixed(2)), durationSec: Number(dur.toFixed(2)) };
+  }
+
+  // 3. Fallback: pick largest available gap or append cleanly
+  const largestGap = [...gaps].sort((a, b) => b.end - b.start - (a.end - a.start))[0];
+  if (largestGap && largestGap.end - largestGap.start >= 0.5) {
+    return {
+      startSec: Number(largestGap.start.toFixed(2)),
+      durationSec: Number(Math.min(dur, largestGap.end - largestGap.start).toFixed(2)),
+    };
+  }
+
+  return {
+    startSec: Number(cursor.toFixed(2)),
+    durationSec: Number(dur.toFixed(2)),
+  };
+}
+
+/**
+ * Computes a collision-free startSec when dragging an existing clip horizontally in manual mode,
+ * keeping all other clips stationary.
+ */
+export function clampManualClipMove(
+  mediaItems: VisualMediaState[],
+  movingClipId: string,
+  desiredStartSec: number,
+  maxTimelineSec = 3600,
+  beatSnapPoints: number[] = [],
+  snapEnabled = false
+): number {
+  const target = mediaItems.find((m) => m.id === movingClipId);
+  if (!target) return Math.max(0, desiredStartSec);
+  const clipDur = Math.max(0.4, target.durationSec || 4);
+  const others = getNormalizedManualClipIntervals(mediaItems).filter((m) => m.id !== movingClipId);
+
+  const windows: { minStart: number; maxStart: number }[] = [];
+  const edgeSnapPoints: number[] = [0];
+  let cursor = 0;
+  for (const item of others) {
+    edgeSnapPoints.push(item.startSec, item.endSec);
+    const maxAllowedStart = item.startSec - clipDur;
+    if (maxAllowedStart >= cursor - 0.005) {
+      windows.push({
+        minStart: cursor,
+        maxStart: Math.max(cursor, maxAllowedStart),
+      });
+    }
+    cursor = Math.max(cursor, item.endSec);
+  }
+  const finalMax = Math.max(cursor, maxTimelineSec - clipDur);
+  windows.push({ minStart: cursor, maxStart: finalMax });
+
+  let bestWin = windows[0];
+  let bestDist = Infinity;
+  const clampedDesired = Math.max(0, desiredStartSec);
+  for (const w of windows) {
+    const inside = Math.max(w.minStart, Math.min(w.maxStart, clampedDesired));
+    const dist = Math.abs(inside - clampedDesired);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestWin = w;
+    }
+  }
+
+  let nextStart = Math.max(bestWin.minStart, Math.min(bestWin.maxStart, clampedDesired));
+  const combinedSnaps = snapEnabled
+    ? [...beatSnapPoints, ...edgeSnapPoints]
+    : edgeSnapPoints;
+  if (combinedSnaps.length > 0) {
+    const thresh = snapEnabled ? 0.22 : 0.12;
+    const snappedLeft = snapTimeToBeat(nextStart, combinedSnaps, thresh);
+    const snappedRight = snapTimeToBeat(nextStart + clipDur, combinedSnaps, thresh) - clipDur;
+    const diffLeft = Math.abs(snappedLeft - nextStart);
+    const diffRight = Math.abs(snappedRight - nextStart);
+    const candidate = diffLeft <= diffRight ? snappedLeft : snappedRight;
+    if (candidate >= bestWin.minStart - 0.005 && candidate <= bestWin.maxStart + 0.005) {
+      nextStart = Math.max(bestWin.minStart, Math.min(bestWin.maxStart, candidate));
+    }
+  }
+
+  return Number(nextStart.toFixed(2));
+}
+
 /**
  * Computes exact non-overlapping timeline segments for all clips across [0 .. clipDuration].
  */
@@ -307,6 +501,27 @@ export function computeClipTimelineSegments(
 ): TimelineClipSegment[] {
   const count = mediaItems.length;
   if (count === 0 || clipDuration <= 0) return [];
+
+  if (config.slideshowMode === 'manual') {
+    const intervals = getNormalizedManualClipIntervals(mediaItems);
+    const segments: TimelineClipSegment[] = [];
+    let prevEnd = 0;
+    for (const item of intervals) {
+      const startSec = Math.max(prevEnd, item.startSec);
+      if (startSec >= clipDuration - 0.005) continue;
+      const endSec = Math.min(clipDuration, Math.max(startSec, item.endSec));
+      if (endSec - startSec < 0.05) continue;
+      segments.push({
+        clipIndex: item.clipIndex,
+        startSec,
+        endSec,
+        isLoopRepeat: false,
+      });
+      prevEnd = endSec;
+    }
+    return segments;
+  }
+
   if (count === 1) {
     return [{ clipIndex: 0, startSec: 0, endSec: clipDuration, isLoopRepeat: false }];
   }
@@ -654,7 +869,7 @@ export function packTimelineLanes<T extends { startSec: number; durationSec: num
 }
 
 export interface ActiveSlideshowSlice {
-  activeIndex: number;
+  activeIndex: number | null;
   prevIndex: number | null;
   transitionProgress: number;
   transitionType: SlideTransitionType;
@@ -671,8 +886,22 @@ export function resolveActiveSlideshowSlice(
   config: StudioConfig,
   beatCutTimestamps: number[]
 ): ActiveSlideshowSlice {
+  const emptySlice: ActiveSlideshowSlice = {
+    activeIndex: null,
+    prevIndex: null,
+    transitionProgress: 1,
+    transitionType: 'cut',
+    slideLocalTime: localTime,
+    prevSlideLocalTime: 0,
+    activeSegmentDuration: clipDuration,
+    prevSegmentDuration: clipDuration,
+  };
+
   const count = mediaItems.length;
-  if (count <= 1) {
+  if (count === 0) {
+    return emptySlice;
+  }
+  if (count === 1 && config.slideshowMode !== 'manual') {
     return {
       activeIndex: 0,
       prevIndex: null,
@@ -687,28 +916,30 @@ export function resolveActiveSlideshowSlice(
 
   const segments = computeClipTimelineSegments(mediaItems, clipDuration, config, beatCutTimestamps);
   if (segments.length === 0) {
-    return {
-      activeIndex: 0,
-      prevIndex: null,
-      transitionProgress: 1,
-      transitionType: 'cut',
-      slideLocalTime: localTime,
-      prevSlideLocalTime: 0,
-      activeSegmentDuration: clipDuration,
-      prevSegmentDuration: clipDuration,
-    };
+    return emptySlice;
   }
 
-  let segPos = segments.length - 1;
+  let segPos = -1;
   for (let i = 0; i < segments.length; i++) {
-    if (localTime < segments[i].endSec) {
+    if (localTime >= segments[i].startSec - 1e-6 && localTime < segments[i].endSec) {
       segPos = i;
       break;
     }
   }
+  if (segPos === -1) {
+    const lastSeg = segments[segments.length - 1];
+    if (localTime >= lastSeg.endSec - 1e-6 && Math.abs(lastSeg.endSec - clipDuration) < 0.02) {
+      segPos = segments.length - 1;
+    } else {
+      return emptySlice;
+    }
+  }
 
   const currentSeg = segments[segPos];
-  const prevSeg = segPos > 0 ? segments[segPos - 1] : null;
+  const candidatePrev = segPos > 0 ? segments[segPos - 1] : null;
+  // Only trigger clip-to-clip transition when the outgoing clip actually touches the incoming clip
+  const prevSeg =
+    candidatePrev && currentSeg.startSec - candidatePrev.endSec <= 0.08 ? candidatePrev : null;
   const currentSegLen = Math.max(0.1, currentSeg.endSec - currentSeg.startSec);
   const prevSegLen = prevSeg ? Math.max(0.1, prevSeg.endSec - prevSeg.startSec) : currentSegLen;
   const timeInSlide = Math.max(0, localTime - currentSeg.startSec);
@@ -727,17 +958,17 @@ export function resolveActiveSlideshowSlice(
     };
   }
 
+  const usePerClipTransition =
+    config.slideshowMode === 'custom_durations' || config.slideshowMode === 'manual';
   const prevClip = mediaItems[prevSeg.clipIndex];
   const tType =
-    config.slideshowMode === 'custom_durations' && prevClip
-      ? prevClip.transitionOut
-      : config.transitionType;
+    usePerClipTransition && prevClip ? prevClip.transitionOut : config.transitionType;
   const requestedTDur =
     tType === 'cut'
       ? 0
       : Math.max(
           0.05,
-          config.slideshowMode === 'custom_durations' && prevClip
+          usePerClipTransition && prevClip
             ? prevClip.transitionDurationSec
             : config.transitionDurationSec
         );

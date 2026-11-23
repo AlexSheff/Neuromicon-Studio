@@ -849,7 +849,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
       config,
       beatCutTimestamps
     );
-    const activeMedia = mediaItems[slice.activeIndex];
+    const activeMedia = slice.activeIndex !== null ? mediaItems[slice.activeIndex] : null;
     const prevMedia = slice.prevIndex !== null ? mediaItems[slice.prevIndex] : null;
     const p = slice.transitionProgress;
 
