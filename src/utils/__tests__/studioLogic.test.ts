@@ -1058,3 +1058,85 @@ test('generateAutoClipPlan maintains zero-gap exact beat boundaries and handles 
     assert.ok(Math.abs(end - 24) <= 0.1, `Expected preset ${preset.id} to reach 24s cleanly, got ${end}s`);
   }
 });
+
+test('generateAutoClipPlan never leaves untrimmed full-length clips on long tracks, sparse manual markers, or 4-5s videos', () => {
+  const mixedAssets: MediaBinItem[] = [
+    {
+      id: 'm-long',
+      kind: 'video',
+      fileName: 'long.mp4',
+      url: 'blob:m-long',
+      width: 1920,
+      height: 1080,
+      videoDuration: 28.0,
+      defaultDurationSec: 28.0,
+    },
+    {
+      id: 'm-4s',
+      kind: 'video',
+      fileName: 'four.mp4',
+      url: 'blob:m-4s',
+      width: 1920,
+      height: 1080,
+      videoDuration: 4.0,
+      defaultDurationSec: 4.0,
+    },
+    {
+      id: 'm-5s',
+      kind: 'video',
+      fileName: 'five.mp4',
+      url: 'blob:m-5s',
+      width: 1920,
+      height: 1080,
+      videoDuration: 5.0,
+      defaultDurationSec: 5.0,
+    },
+  ];
+
+  // 1. Long 340s 120 BPM (0.5s beat) beat_flash plan exceeds 480 cuts cleanly with NO giant tail clip
+  const fastBeatSec = 0.5;
+  const fastBeats = Array.from({ length: 700 }, (_, i) => Number((i * fastBeatSec).toFixed(3)));
+  const fastGrid = { bpm: 120, beatSec: fastBeatSec, beats: fastBeats, downbeatOffset: 0 };
+  const flashPreset = AUTO_CLIP_PRESETS.find((p) => p.id === 'beat_flash')!.config;
+  const longFlash = generateAutoClipPlan(mixedAssets, fastGrid, [], 0, 340, {
+    ...flashPreset,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+  assert.ok(longFlash.length > 480, `Expected >480 clips on 340s 120BPM beat_flash, got ${longFlash.length}`);
+  const maxAllowedFlash = flashPreset.maxClipSec + fastBeatSec;
+  for (const p of longFlash) {
+    assert.ok(
+      p.durationSec <= maxAllowedFlash,
+      `Clip at ${p.startSec}s was oversized/untrimmed: ${p.durationSec}s > ${maxAllowedFlash.toFixed(2)}s`
+    );
+  }
+  const flashEnd = Number((longFlash[longFlash.length - 1].startSec + longFlash[longFlash.length - 1].durationSec).toFixed(2));
+  assert.ok(Math.abs(flashEnd - 340) <= 0.1, `Expected 340s end, got ${flashEnd}s`);
+
+  // 2. Sparse manual markers [15, 75] on 180s track must NOT create 15s or 60s untrimmed clips
+  const musicStory = AUTO_CLIP_PRESETS.find((p) => p.id === 'music_story')!.config;
+  const beats120 = Array.from({ length: 365 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid120 = { bpm: 120, beatSec: 0.5, beats: beats120, downbeatOffset: 0 };
+  const sparseManualPlan = generateAutoClipPlan(mixedAssets, grid120, [15, 75], 0, 180, {
+    ...musicStory,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+  assert.ok(sparseManualPlan.length >= 40);
+  const maxAllowedStory = musicStory.maxClipSec + 0.55;
+  for (const p of sparseManualPlan) {
+    assert.ok(
+      p.durationSec <= maxAllowedStory,
+      `Sparse manual marker produced oversized clip at ${p.startSec}s: ${p.durationSec}s`
+    );
+  }
+  // 4s and 5s videos should be trimmed strictly below their full duration in music_story slices
+  const slicesFor4s = sparseManualPlan.filter((p) => p.binItemId === 'm-4s');
+  assert.ok(slicesFor4s.length > 0);
+  assert.ok(
+    slicesFor4s.every((p) => p.durationSec <= 4.0 * 0.72),
+    `Expected 4s video to be trimmed <= 2.88s, got max ${Math.max(...slicesFor4s.map((s) => s.durationSec))}`
+  );
+});
+

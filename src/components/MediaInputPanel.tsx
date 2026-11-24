@@ -19,7 +19,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import {
   AudioTrackState,
@@ -188,6 +188,12 @@ export function MediaInputPanel({
     }
     return getTimelineSpanSec(mediaItems, config) >= clipDuration - 0.45;
   }, [audio, config, mediaItems]);
+
+  useEffect(() => {
+    if (mediaItems.length === 0 && autoClipCfg.targetMode === 'append') {
+      setAutoClipCfg((prev) => ({ ...prev, targetMode: 'replace' }));
+    }
+  }, [autoClipCfg.targetMode, mediaItems.length]);
 
   const applyAutoClipPreset = (presetId: AutoClipPresetId) => {
     const found = AUTO_CLIP_PRESETS.find((p) => p.id === presetId);

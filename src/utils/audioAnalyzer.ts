@@ -1981,24 +1981,56 @@ export function generateAutoClipPlan(
     .filter((t) => t > startOffsetSec + 0.15 && t < targetLimit - 0.15)
     .sort((a, b) => a - b);
 
+  const detectedFiltered =
+    beatGrid.beats.length >= 2
+      ? beatGrid.beats.filter((b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15)
+      : [];
+  const filteredIdx =
+    beatGrid.beats.length >= 2
+      ? beatGrid.beats.findIndex((b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15)
+      : -1;
+
   let baseBeats: number[];
   let barAnchorIdx = 0;
   if (manualRel.length >= 2) {
-    baseBeats = [startOffsetSec, ...manualRel];
+    // Anchor cuts to manual markers while filling any sparse >1.65*beatSec gaps using detected/regular beats
+    // so sparse user markers never create giant multi-second untrimmed clips
+    const merged: number[] = [startOffsetSec];
+    const denseMarkers = [startOffsetSec, ...manualRel];
+    for (let i = 0; i < denseMarkers.length; i++) {
+      const a = denseMarkers[i];
+      if (i > 0 && a - merged[merged.length - 1] >= 0.15) {
+        merged.push(a);
+      }
+      const nextAnchor = i + 1 < denseMarkers.length ? denseMarkers[i + 1] : null;
+      if (nextAnchor !== null && nextAnchor - a > beatSec * 1.65) {
+        const innerDetected = detectedFiltered.filter(
+          (b) => b > a + beatSec * 0.48 && b < nextAnchor - beatSec * 0.48
+        );
+        if (innerDetected.length > 0) {
+          for (const b of innerDetected) {
+            if (b - merged[merged.length - 1] >= beatSec * 0.48) {
+              merged.push(b);
+            }
+          }
+        } else {
+          let filler = a + beatSec;
+          while (filler < nextAnchor - beatSec * 0.48) {
+            merged.push(Number(filler.toFixed(3)));
+            filler += beatSec;
+          }
+        }
+      }
+    }
+    baseBeats = merged;
     barAnchorIdx = manualRel[0] > startOffsetSec + 0.05 ? 1 : 0;
-  } else if (beatGrid.beats.length >= 2) {
-    const filteredIdx = beatGrid.beats.findIndex(
-      (b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15
-    );
-    const filtered = beatGrid.beats.filter(
-      (b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15
-    );
-    baseBeats = [startOffsetSec, ...filtered];
+  } else if (detectedFiltered.length >= 1) {
+    baseBeats = [startOffsetSec, ...detectedFiltered];
     const gridDownbeat = beatGrid.downbeatOffset ?? 0;
     if (filteredIdx >= 0) {
       // Shift anchor so modulo-4 bar downbeats align to detected musical bar 1 even if startOffsetSec was prepended
       const offsetInFiltered = ((gridDownbeat - filteredIdx) % 4 + 4) % 4;
-      barAnchorIdx = (filtered[0] > startOffsetSec + 0.05 ? 1 : 0) + offsetInFiltered;
+      barAnchorIdx = (detectedFiltered[0] > startOffsetSec + 0.05 ? 1 : 0) + offsetInFiltered;
     }
   } else {
     baseBeats = [startOffsetSec];
@@ -2010,7 +2042,8 @@ export function generateAutoClipPlan(
     beatTimes.unshift(startOffsetSec);
   }
   let lastBeat = beatTimes[beatTimes.length - 1];
-  while (lastBeat + beatSec < targetLimit + beatSec * 6 && beatTimes.length < 2400) {
+  const maxBeatEntries = Math.max(2400, Math.ceil((targetLimit - startOffsetSec) / Math.max(0.25, beatSec)) + 32);
+  while (lastBeat + beatSec < targetLimit + beatSec * 6 && beatTimes.length < maxBeatEntries) {
     lastBeat = Number((lastBeat + beatSec).toFixed(3));
     beatTimes.push(lastBeat);
   }
@@ -2046,6 +2079,7 @@ export function generateAutoClipPlan(
   type PoolAsset = PoolImage | PoolVideo;
 
   const minSliceMediaSec = Math.max(0.45, minClipBound * 0.9);
+  const hardMaxDur = Math.max(maxClipBound + beatSec * 0.45, maxClipBound * 1.12);
 
   const buildPool = (respectExclusions: boolean, allowShortLoopFallback = false): PoolAsset[] => {
     const out: PoolAsset[] = [];
@@ -2117,10 +2151,23 @@ export function generateAutoClipPlan(
     return true;
   };
 
-  const canAssetFitDur = (entry: PoolAsset, dur: number, allowLoopWrap = false): boolean => {
+  const canAssetFitDur = (
+    entry: PoolAsset,
+    dur: number,
+    allowLoopWrap = false,
+    preferTrimmedSlice = false
+  ): boolean => {
     if (entry.kind === 'image') return !entry.used || allowLoopWrap;
-    if (allowLoopWrap) return entry.vDur >= 0.25;
     const mediaNeed = dur * entry.rate;
+    // Avoid dropping >=72% of a multi-second source video as one uncut block when shorter beat cuts exist
+    if (
+      preferTrimmedSlice &&
+      entry.vDur >= Math.max(2.0, minClipBound * 1.45) &&
+      mediaNeed > entry.vDur * 0.7
+    ) {
+      return false;
+    }
+    if (allowLoopWrap) return entry.vDur >= 0.25;
     if (mode === 'sequential') {
       return entry.freeRanges.some(([rs, re]) => re - Math.max(rs, entry.seqCursor) >= mediaNeed - 0.01);
     }
@@ -2141,19 +2188,19 @@ export function generateAutoClipPlan(
     } else if (rhythm === 'beats_4') {
       preferredOrder = [4, 2, 8, 1];
     } else if (rhythm === 'smooth') {
-      preferredOrder = energy > 0.72 ? [4, 6, 8, 2] : [8, 6, 4, 2];
+      preferredOrder = energy > 0.72 ? [4, 6, 2] : [6, 8, 4, 2];
     } else if (mode === 'auto_rhythm') {
       if (energy < 0.36) {
-        preferredOrder = [8, 6, 4, 2];
+        preferredOrder = [4, 6, 2];
       } else if (energy < 0.68) {
-        preferredOrder = [4, 2, 6, 3, 1];
+        preferredOrder = [2, 4, 3, 1];
       } else {
-        preferredOrder = beatSec >= 0.55 ? [2, 1, 4] : [2, 4, 1];
+        preferredOrder = beatSec < 0.42 ? [2, 1, 4] : [1, 2, 4];
       }
     } else if (mode === 'sequential') {
-      preferredOrder = [4, 2, 6, 8, 1];
+      preferredOrder = [4, 2, 3, 1, 6];
     } else {
-      preferredOrder = [4, 2, 6, 1, 3];
+      preferredOrder = [2, 4, 1, 3];
     }
 
     const minSteps = Math.max(1, Math.ceil(minClipBound / beatSec - 0.05));
@@ -2197,7 +2244,10 @@ export function generateAutoClipPlan(
   let beatIdx = 0;
   let lastBinItemId: string | null = null;
   let seqPoolPointer = 0;
-  const maxPlacements = 480;
+  const maxPlacements = Math.max(
+    960,
+    Math.ceil((targetLimit - startOffsetSec) / Math.max(0.32, Math.min(beatSec, 0.45))) + 64
+  );
 
   while (beatIdx < beatTimes.length - 1 && placements.length < maxPlacements) {
     // Anchor clip start directly onto the previous clip's exact rounded end to prevent micro-gaps/drift
@@ -2220,19 +2270,35 @@ export function generateAutoClipPlan(
       cutImpact: number;
     } | null = null;
 
-    const trySelect = (stepsToTry: number[], relaxMinDur: boolean, allowLoopWrap: boolean) => {
+    const trySelect = (
+      stepsToTry: number[],
+      relaxMinDur: boolean,
+      allowLoopWrap: boolean,
+      preferTrimmedSlice: boolean
+    ) => {
       for (const stepCount of stepsToTry) {
-        const nextIdx = Math.min(beatTimes.length - 1, beatIdx + stepCount);
+        let nextIdx = Math.min(beatTimes.length - 1, beatIdx + stepCount);
         if (nextIdx <= beatIdx) continue;
-        const rawEnd = Number(Math.min(targetLimit, beatTimes[nextIdx]).toFixed(2));
-        const dur = Number((rawEnd - cursorSec).toFixed(2));
+        let rawEnd = Number(Math.min(targetLimit, beatTimes[nextIdx]).toFixed(2));
+        let dur = Number((rawEnd - cursorSec).toFixed(2));
+        // Strictly prevent oversized/untrimmed spans if a beat interval ever exceeds hardMaxDur
+        if (dur > hardMaxDur) {
+          const fallbackSteps = Math.max(1, Math.floor(maxClipBound / beatSec));
+          const cappedEnd = Math.min(targetLimit, cursorSec + Math.min(maxClipBound, fallbackSteps * beatSec));
+          rawEnd = Number(Math.max(cursorSec + 0.45, cappedEnd).toFixed(2));
+          dur = Number((rawEnd - cursorSec).toFixed(2));
+          nextIdx = beatIdx + 1;
+          while (nextIdx < beatTimes.length - 1 && beatTimes[nextIdx] < rawEnd - 0.04) {
+            nextIdx++;
+          }
+        }
         const minAllow = relaxMinDur
           ? 0.4
           : Math.max(0.45, Math.min(minClipBound * 0.85, targetLimit - cursorSec));
         if (dur < minAllow) continue;
 
         const eligible: PoolAsset[] = pool.filter((entry) =>
-          canAssetFitDur(entry, dur, allowLoopWrap)
+          canAssetFitDur(entry, dur, allowLoopWrap, preferTrimmedSlice)
         );
         if (eligible.length === 0) continue;
 
@@ -2241,7 +2307,7 @@ export function generateAutoClipPlan(
           let found: PoolAsset | null = null;
           for (let offset = 0; offset < pool.length; offset++) {
             const idx = (seqPoolPointer + offset) % pool.length;
-            if (canAssetFitDur(pool[idx], dur, allowLoopWrap)) {
+            if (canAssetFitDur(pool[idx], dur, allowLoopWrap, preferTrimmedSlice)) {
               found = pool[idx];
               seqPoolPointer = (idx + 1) % pool.length;
               break;
@@ -2292,14 +2358,18 @@ export function generateAutoClipPlan(
         }
 
         if (allowLoopWrap) {
-          const maxOffset = Math.max(0, chosen.vDur - 0.5);
+          const mediaNeed = dur * chosen.rate;
+          const maxOffset =
+            chosen.vDur > mediaNeed + 0.1
+              ? chosen.vDur - mediaNeed
+              : Math.max(0, chosen.vDur - 0.5);
           const wrappedStart =
             mode === 'sequential'
               ? Number((chosen.seqCursor % Math.max(0.25, chosen.vDur)).toFixed(2))
               : Number((rng() * maxOffset).toFixed(2));
           if (mode === 'sequential') {
             chosen.seqCursor = Number(
-              ((wrappedStart + dur * chosen.rate) % Math.max(0.25, chosen.vDur)).toFixed(2)
+              ((wrappedStart + mediaNeed) % Math.max(0.25, chosen.vDur)).toFixed(2)
             );
           }
           return {
@@ -2370,26 +2440,34 @@ export function generateAutoClipPlan(
       return null;
     };
 
-    chosenResult = trySelect(stepCandidates, false, loopFallbackActive);
+    // Pass 1: Prefer genuinely trimmed slices (<70% of multi-second videos) before falling back to full-clip spans
+    chosenResult = trySelect(stepCandidates, false, loopFallbackActive, true);
+    if (!chosenResult) {
+      chosenResult = trySelect(stepCandidates, false, loopFallbackActive, false);
+    }
 
     // If strict unlooped constraints could not fit stepCandidates:
     // 1. In fillToTargetEnd mode (or before producing ANY placement), relax/refill cleanly so generation never stalls!
     // 2. When fillToTargetEnd === false and we already produced placements, allow shorter unlooped steps before stopping at unique-slice exhaustion.
     if (!chosenResult && placements.length === 0) {
       const relaxedSteps = Array.from(new Set([...stepCandidates, 2, 1])).sort((a, b) => a - b);
-      chosenResult = trySelect(relaxedSteps, true, false);
+      chosenResult = trySelect(relaxedSteps, true, false, true) || trySelect(relaxedSteps, true, false, false);
       if (!chosenResult) {
         refillExhaustedPool(true);
         loopFallbackActive = true;
-        chosenResult = trySelect(stepCandidates, true, true);
+        chosenResult = trySelect(stepCandidates, true, true, true) || trySelect(stepCandidates, true, true, false);
       }
     } else if (!chosenResult && fillToTargetEnd) {
       if (refillExhaustedPool(true)) {
-        chosenResult = trySelect(stepCandidates, false, loopFallbackActive);
+        chosenResult =
+          trySelect(stepCandidates, false, loopFallbackActive, true) ||
+          trySelect(stepCandidates, false, loopFallbackActive, false);
       }
       if (!chosenResult) {
         loopFallbackActive = true;
-        chosenResult = trySelect(stepCandidates, true, true);
+        chosenResult =
+          trySelect(stepCandidates, true, true, true) ||
+          trySelect(stepCandidates, true, true, false);
       }
     }
 
@@ -2480,32 +2558,73 @@ export function generateAutoClipPlan(
     beatIdx = chosenResult.nextBeatIdx;
   }
 
-  // Ensure full coverage up to targetLimit when requested without ever overshooting targetLimit
+  // Ensure full coverage up to targetLimit using beat-sized trimmed slices (never dumping one giant untrimmed clip)
   if (placements.length > 0 && hasAudio) {
-    const last = placements[placements.length - 1];
-    const lastEnd = Number((last.startSec + last.durationSec).toFixed(2));
-    if (lastEnd > targetLimit) {
-      last.durationSec = Number(Math.max(0.4, targetLimit - last.startSec).toFixed(2));
-    } else if (fillToTargetEnd && lastEnd < targetLimit - 0.02) {
-      const rem = targetLimit - lastEnd;
-      if (rem <= Math.max(beatSec * 3, 4.0) || placements.length >= maxPlacements) {
-        last.durationSec = Number(Math.max(0.4, targetLimit - last.startSec).toFixed(2));
-      } else {
-        const fallbackAsset =
-          pool.find((p) => p.binItem.id !== lastBinItemId) || pool[0];
-        if (fallbackAsset) {
-          placements.push({
-            binItemId: fallbackAsset.binItem.id,
-            startSec: lastEnd,
-            durationSec: Number(rem.toFixed(2)),
-            sourceStartSec: fallbackAsset.kind === 'video' ? fallbackAsset.initStart : 0,
-            playbackRate: fallbackAsset.kind === 'video' ? fallbackAsset.rate : 1.0,
-            transitionOut: transitionStyle === 'cuts_only' ? 'cut' : 'crossfade',
-            transitionDurationSec: transitionStyle === 'cuts_only' ? 0 : 0.35,
-            scaleStart: 1.0,
-            scaleEnd: motionLevel === 'off' ? 1.0 : 1.03,
-          });
+    const first = placements[placements.length - 1];
+    if (first.startSec + first.durationSec > targetLimit) {
+      first.durationSec = Number(Math.max(0.4, targetLimit - first.startSec).toFixed(2));
+    } else if (fillToTargetEnd) {
+      const targetSliceDur = Math.max(
+        minClipBound,
+        Math.min(maxClipBound, beatSec * (rhythm === 'beats_1' ? 1 : rhythm === 'beats_2' ? 2 : 4))
+      );
+      let guard = 0;
+      while (guard < 2000) {
+        guard++;
+        const last = placements[placements.length - 1];
+        const lastEnd = Number((last.startSec + last.durationSec).toFixed(2));
+        if (lastEnd >= targetLimit - 0.02) break;
+        const rem = Number((targetLimit - lastEnd).toFixed(2));
+        // Only extend previous clip when remainder is tiny AND extending stays within maxClipBound
+        if (rem <= Math.min(beatSec * 1.5, 1.2) && last.durationSec + rem <= hardMaxDur) {
+          last.durationSec = Number((targetLimit - last.startSec).toFixed(2));
+          break;
         }
+        const sliceDur =
+          rem <= hardMaxDur
+            ? rem
+            : Number(Math.min(targetSliceDur, rem - 0.5 >= 0.5 ? targetSliceDur : rem).toFixed(2));
+        const fallbackPool = avoidAdjacentRepeat && pool.length > 1
+          ? pool.filter((p) => p.binItem.id !== lastBinItemId)
+          : pool;
+        const fallbackAsset = fallbackPool[Math.floor(rng() * fallbackPool.length)] || pool[0];
+        if (!fallbackAsset) break;
+
+        let srcStart = 0;
+        if (fallbackAsset.kind === 'video') {
+          const needMedia = sliceDur * fallbackAsset.rate;
+          const maxOff =
+            fallbackAsset.vDur > needMedia + 0.1
+              ? fallbackAsset.vDur - needMedia
+              : Math.max(0, fallbackAsset.vDur - 0.5);
+          srcStart =
+            mode === 'sequential'
+              ? Number((fallbackAsset.seqCursor % Math.max(0.25, fallbackAsset.vDur)).toFixed(2))
+              : Number((rng() * maxOff).toFixed(2));
+          fallbackAsset.seqCursor = Number(
+            ((srcStart + needMedia) % Math.max(0.25, fallbackAsset.vDur)).toFixed(2)
+          );
+        }
+
+        const trType: SlideTransitionType =
+          transitionStyle === 'cuts_only'
+            ? 'cut'
+            : transitionStyle === 'dissolve' || rhythm === 'smooth'
+              ? 'crossfade'
+              : 'cut';
+
+        placements.push({
+          binItemId: fallbackAsset.binItem.id,
+          startSec: lastEnd,
+          durationSec: Math.max(0.4, sliceDur),
+          sourceStartSec: srcStart,
+          playbackRate: fallbackAsset.kind === 'video' ? fallbackAsset.rate : 1.0,
+          transitionOut: trType,
+          transitionDurationSec: trType === 'cut' ? 0 : Math.min(0.32, sliceDur * 0.25),
+          scaleStart: 1.0,
+          scaleEnd: motionLevel === 'off' ? 1.0 : 1.02,
+        });
+        lastBinItemId = fallbackAsset.binItem.id;
       }
     }
   }
