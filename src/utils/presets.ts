@@ -436,6 +436,9 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   mirrorVisualizer: false,
   visualizerPlacement: 'bottom',
   backgroundPulse: 0.45,
+  disableBeatPulse: false,
+  stabilizeMotion: false,
+  showBottomAudioTrack: true,
 
   generatorEffect: 'space_nebula',
   generatorBlend: 'screen',

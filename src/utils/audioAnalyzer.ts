@@ -221,10 +221,20 @@ export function computeBeatCutTimestamps(
   const energies: number[] = [];
   const times: number[] = [];
   let maxEnergy = 0;
+  let prevSpec: Float32Array | null = null;
 
   for (let t = 0.2; t < clipDuration - 0.3; t += stepSec) {
     const metrics = analyzeAudioAtTime(mono, sampleRate, trimStart + t, sensitivity);
-    const energy = metrics.bass * 0.75 + metrics.rms * 0.25;
+    let specDelta = 0;
+    if (prevSpec) {
+      for (let b = 3; b < Math.min(36, metrics.spectrum.length); b++) {
+        specDelta += Math.abs(metrics.spectrum[b] - prevSpec[b]);
+      }
+      specDelta = Math.min(1.0, specDelta / 6);
+    }
+    prevSpec = metrics.spectrum.slice();
+    const energy =
+      metrics.bass * 0.56 + metrics.mid * 0.18 + metrics.rms * 0.14 + specDelta * 0.28;
     energies.push(energy);
     times.push(t);
     if (energy > maxEnergy) maxEnergy = energy;
@@ -749,6 +759,7 @@ export interface TrackBeatGrid {
   bpm: number;
   beatSec: number;
   beats: number[]; // relative to trimStart (0..clipDuration)
+  downbeatOffset?: number; // index offset (0..3) marking musical bar-1 downbeats
 }
 
 /**
@@ -881,10 +892,12 @@ export function detectTrackBpmAndBeats(
   }
 
   const rawBpm = 60 / (refinedLag * hopSec);
-  const bpm = Math.max(60, Math.min(188, Math.round(rawBpm)));
-  const beatSec = 60 / bpm;
+  const clampedRawBpm = Math.max(60, Math.min(188, rawBpm));
+  const bpm = Math.round(clampedRawBpm);
+  // Keep sub-BPM floating precision so long tracks never drift off the beat grid
+  const beatSec = Number((60 / clampedRawBpm).toFixed(5));
 
-  // Phase alignment within first beat cycle + bar-1 preference across first 4 beats
+  // Phase alignment within first beat cycle + bar-1 preference
   const phaseSteps = Math.max(1, Math.min(totalSteps, Math.round((beatSec * 1.25) / hopSec)));
   let bestPhase = 0;
   let bestPhaseScore = -1;
@@ -927,7 +940,20 @@ export function detectTrackBpmAndBeats(
     }
   }
 
-  return { bpm, beatSec, beats };
+  // Score modulo-4 bar phase so downbeatOffset aligns with real musical 4/4 bar 1
+  const barScores = [0, 0, 0, 0];
+  for (let i = 0; i < beats.length; i++) {
+    const stepIdx = Math.max(0, Math.min(totalSteps - 1, Math.round(beats[i] / hopSec)));
+    barScores[i % 4] += onsets[stepIdx] || 0;
+  }
+  let downbeatOffset = 0;
+  for (let k = 1; k < 4; k++) {
+    if (barScores[k] > barScores[downbeatOffset]) {
+      downbeatOffset = k;
+    }
+  }
+
+  return { bpm, beatSec, beats, downbeatOffset };
 }
 
 export interface BeatAlignedClipPlan {
@@ -940,7 +966,7 @@ export interface BeatAlignedClipPlan {
 
 /**
  * Aligns every clip's duration, outgoing transition, and optional gentle motion keyframes
- * to musical beats across [0..clipDuration].
+ * to musical beats & melodic phrase turns across [0..clipDuration], strictly <= clipDuration.
  */
 export function computeAutoBeatAlignedClips(
   clipCount: number,
@@ -948,9 +974,11 @@ export function computeAutoBeatAlignedClips(
   beatGrid: TrackBeatGrid,
   manualMarkersAbs: number[],
   trimStart: number,
-  mode: BeatSyncMode = 'fit_track'
+  mode: BeatSyncMode = 'fit_track',
+  monoData?: Float32Array,
+  sampleRate?: number
 ): BeatAlignedClipPlan[] {
-  if (clipCount <= 0) return [];
+  if (clipCount <= 0 || clipDuration < 0.4) return [];
   const beatSec = beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
   const rhythmicTransitions: SlideTransitionType[] = ['crossfade', 'cut', 'crossfade', 'zoom_cross'];
 
@@ -971,7 +999,15 @@ export function computeAutoBeatAlignedClips(
     const beatMult =
       mode === 'beats_1' ? 1 : mode === 'beats_2' ? 2 : mode === 'beats_8' ? 8 : 4;
     const rawDur = Math.max(0.5, Math.min(30, beatSec * beatMult));
-    return Array.from({ length: clipCount }, (_, i) => makeMotionAndTrans(i, rawDur));
+    const plans: BeatAlignedClipPlan[] = [];
+    let remaining = clipDuration;
+    for (let i = 0; i < clipCount; i++) {
+      if (remaining < 0.4) break;
+      const d = Math.min(rawDur, remaining);
+      plans.push(makeMotionAndTrans(i, d));
+      remaining = Number((remaining - d).toFixed(3));
+    }
+    return plans;
   }
 
   // Prefer manual markers if >=clipCount exist inside trim range, otherwise use detected beat grid
@@ -990,31 +1026,67 @@ export function computeAutoBeatAlignedClips(
   const uniqueGrid = Array.from(new Set(grid)).sort((a, b) => a - b);
 
   if (uniqueGrid.length > clipCount) {
-    // Pick evenly spaced beat indices across the musical grid so every cut hits a beat
+    // Score beats by transient onset, melodic/harmonic novelty, and 4/4 downbeat phase
+    const accents =
+      monoData && monoData.length > 0 && sampleRate && sampleRate > 0
+        ? computeBeatMusicalAccents(uniqueGrid, trimStart, monoData, sampleRate)
+        : null;
+    const downbeatShift = beatGrid.downbeatOffset ?? 0;
     const step = (uniqueGrid.length - 1) / clipCount;
     const cutPoints: number[] = [0];
+
     for (let i = 1; i < clipCount; i++) {
-      const idx = Math.min(uniqueGrid.length - 1, Math.max(i, Math.round(i * step)));
-      const candidate = uniqueGrid[idx];
+      const targetIdx = Math.min(uniqueGrid.length - 1, Math.max(i, Math.round(i * step)));
       const prev = cutPoints[cutPoints.length - 1];
+      let chosenIdx = targetIdx;
+      let bestScore = -1;
+      const minIdx = Math.max(i, targetIdx - 2);
+      const maxIdx = Math.min(uniqueGrid.length - (clipCount - i), targetIdx + 2);
+      for (let cIdx = minIdx; cIdx <= maxIdx; cIdx++) {
+        const candTime = uniqueGrid[cIdx];
+        if (candTime <= prev + 0.45) continue;
+        const barBonus = ((cIdx - downbeatShift) % 4 + 4) % 4 === 0 ? 0.22 : cIdx % 2 === 0 ? 0.08 : 0;
+        const musicalScore = accents
+          ? (accents.onsetAccent[cIdx] ?? 0.4) * 0.45 +
+            (accents.melodicNovelty[cIdx] ?? 0.35) * 0.55
+          : 0.4;
+        const distPenalty = Math.abs(cIdx - targetIdx) * 0.09;
+        const totalScore = musicalScore + barBonus - distPenalty;
+        if (totalScore > bestScore) {
+          bestScore = totalScore;
+          chosenIdx = cIdx;
+        }
+      }
+      const candidate = uniqueGrid[chosenIdx];
       cutPoints.push(
-        candidate > prev + 0.45 ? candidate : Number((prev + Math.max(0.5, beatSec)).toFixed(2))
+        candidate > prev + 0.45
+          ? Math.min(clipDuration - 0.4 * (clipCount - i), candidate)
+          : Number((prev + Math.max(0.45, Math.min(beatSec, (clipDuration - prev) / (clipCount - i + 1)))).toFixed(2))
       );
     }
     cutPoints.push(clipDuration);
 
     return Array.from({ length: clipCount }, (_, i) => {
-      const rawDur = Math.max(0.5, Math.min(30, cutPoints[i + 1] - cutPoints[i]));
+      const rawDur = Math.max(0.4, Math.min(30, cutPoints[i + 1] - cutPoints[i]));
       return makeMotionAndTrans(i, rawDur);
     });
   }
 
-  // Fallback: quantize target duration per clip to integer number of beats
+  // Fallback: quantize target duration per clip to integer number of beats while keeping total <= clipDuration
   const rawPerClip = clipDuration / clipCount;
-  const beatsPerClip = Math.max(1, Math.round(rawPerClip / beatSec));
-  const quantizedDur = Math.max(0.5, Math.min(30, beatsPerClip * beatSec));
+  const beatsPerClip = Math.max(1, Math.floor(rawPerClip / beatSec) || Math.round(rawPerClip / beatSec));
+  const quantizedDur = Math.max(0.4, Math.min(rawPerClip, beatsPerClip * beatSec));
 
-  return Array.from({ length: clipCount }, (_, i) => makeMotionAndTrans(i, quantizedDur));
+  const plans: BeatAlignedClipPlan[] = [];
+  let remaining = clipDuration;
+  for (let i = 0; i < clipCount; i++) {
+    if (remaining < 0.4) break;
+    const isLast = i === clipCount - 1;
+    const d = isLast ? Math.min(30, remaining) : Math.min(quantizedDur, remaining);
+    plans.push(makeMotionAndTrans(i, d));
+    remaining = Number((remaining - d).toFixed(3));
+  }
+  return plans;
 }
 
 export function snapFxOverlayToBeats(
@@ -1633,22 +1705,28 @@ export function computeBeatMusicalAccents(
     };
   }
 
-  const fft = new Radix2FFT(FFT_SIZE);
-  const slice = new Float32Array(FFT_SIZE);
-  const mags = new Float32Array(FFT_SIZE >> 1);
-  const hann = new Float32Array(FFT_SIZE);
-  for (let i = 0; i < FFT_SIZE; i++) {
-    hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (FFT_SIZE - 1)));
+  const ACCENT_FFT_SIZE = 2048;
+  const fft = new Radix2FFT(ACCENT_FFT_SIZE);
+  const slice = new Float32Array(ACCENT_FFT_SIZE);
+  const mags = new Float32Array(ACCENT_FFT_SIZE >> 1);
+  const hann = new Float32Array(ACCENT_FFT_SIZE);
+  for (let i = 0; i < ACCENT_FFT_SIZE; i++) {
+    hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (ACCENT_FFT_SIZE - 1)));
   }
 
   const BANDS = 24;
+  const CHROMA = 12;
   const minFreq = 55;
   const maxFreq = Math.min(8000, sampleRate * 0.45);
   const logMin = Math.log(minFreq);
   const logMax = Math.log(Math.max(minFreq * 2, maxFreq));
-  const binHz = sampleRate / FFT_SIZE;
+  const binHz = sampleRate / ACCENT_FFT_SIZE;
+  const maxChromaFreq = Math.min(3600, sampleRate * 0.42);
+  const minChromaBin = Math.max(1, Math.floor(75 / binHz));
+  const maxChromaBin = Math.min(mags.length - 1, Math.ceil(maxChromaFreq / binHz));
 
   const beatSpectra: Float32Array[] = new Array(count);
+  const beatChromas: Float32Array[] = new Array(count);
   const rawOnset = new Array<number>(count).fill(0);
   const rawMelody = new Array<number>(count).fill(0);
   const totalSamples = monoData.length;
@@ -1669,11 +1747,11 @@ export function computeBeatMusicalAccents(
     const postRms = Math.sqrt(postSq / Math.max(1, post1 - centerSample));
     rawOnset[i] = Math.max(0, postRms - preRms * 0.8) + postRms * 0.35;
 
-    // 2. Melodic spectrum inside the beat body (+40ms after transient)
+    // 2. Melodic chroma + harmonic spectrum inside the beat body (+40ms after transient)
     const segNext = i + 1 < count ? beatTimes[i + 1] : bt + 0.5;
     const bodyCenterTime = trimStart + bt + Math.min(0.12, Math.max(0.02, (segNext - bt) * 0.35));
-    const sStart = Math.max(0, Math.floor(bodyCenterTime * sampleRate) - (FFT_SIZE >> 1));
-    for (let k = 0; k < FFT_SIZE; k++) {
+    const sStart = Math.max(0, Math.floor(bodyCenterTime * sampleRate) - (ACCENT_FFT_SIZE >> 1));
+    for (let k = 0; k < ACCENT_FFT_SIZE; k++) {
       const idx = sStart + k;
       slice[k] = (idx < totalSamples ? monoData[idx] : 0) * hann[k];
     }
@@ -1696,17 +1774,38 @@ export function computeBeatMusicalAccents(
     for (let b = 0; b < BANDS; b++) bands[b] *= invNorm;
     beatSpectra[i] = bands;
 
+    // 12-semitone Pitch-Class Chroma for chord/melody harmonic turn sensitivity
+    const chroma = new Float32Array(CHROMA);
+    for (let k = minChromaBin; k <= maxChromaBin; k++) {
+      const freq = k * binHz;
+      if (freq <= 0) continue;
+      const semitone = Math.round(12 * Math.log2(freq / 440));
+      const pitchClass = ((semitone % 12) + 12) % 12;
+      chroma[pitchClass] += mags[k];
+    }
+    let cNorm = 1e-6;
+    for (let c = 0; c < CHROMA; c++) cNorm += chroma[c] * chroma[c];
+    const invCNorm = 1 / Math.sqrt(cNorm);
+    for (let c = 0; c < CHROMA; c++) chroma[c] *= invCNorm;
+    beatChromas[i] = chroma;
+
     if (i > 0) {
       const prev = beatSpectra[i - 1];
       let cos = 0;
       let melodicShift = 0;
       for (let b = 0; b < BANDS; b++) {
         cos += bands[b] * prev[b];
-        // Emphasize harmonic/melodic pitch bins (bins 4..20 ~ 120Hz..3.8kHz)
         const w = b >= 4 && b <= 20 ? 1.4 : 0.6;
         melodicShift += Math.abs(bands[b] - prev[b]) * w;
       }
-      rawMelody[i] = Math.max(0, 1 - cos) * 0.6 + melodicShift * 0.4;
+      const prevChroma = beatChromas[i - 1];
+      let chromaCos = 0;
+      for (let c = 0; c < CHROMA; c++) {
+        chromaCos += chroma[c] * prevChroma[c];
+      }
+      const specChange = Math.max(0, 1 - cos) * 0.6 + melodicShift * 0.4;
+      const chromaChange = Math.max(0, 1 - chromaCos);
+      rawMelody[i] = chromaChange * 0.55 + specChange * 0.45;
     }
   }
 
@@ -1809,13 +1908,24 @@ export function generateAutoClipPlan(
     .sort((a, b) => a - b);
 
   let baseBeats: number[];
+  let barAnchorIdx = 0;
   if (manualRel.length >= 2) {
     baseBeats = [startOffsetSec, ...manualRel];
+    barAnchorIdx = manualRel[0] > startOffsetSec + 0.05 ? 1 : 0;
   } else if (beatGrid.beats.length >= 2) {
-    baseBeats = [
-      startOffsetSec,
-      ...beatGrid.beats.filter((b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15),
-    ];
+    const filteredIdx = beatGrid.beats.findIndex(
+      (b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15
+    );
+    const filtered = beatGrid.beats.filter(
+      (b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15
+    );
+    baseBeats = [startOffsetSec, ...filtered];
+    const gridDownbeat = beatGrid.downbeatOffset ?? 0;
+    if (filteredIdx >= 0) {
+      // Shift anchor so modulo-4 bar downbeats align to detected musical bar 1 even if startOffsetSec was prepended
+      const offsetInFiltered = ((gridDownbeat - filteredIdx) % 4 + 4) % 4;
+      barAnchorIdx = (filtered[0] > startOffsetSec + 0.05 ? 1 : 0) + offsetInFiltered;
+    }
   } else {
     baseBeats = [startOffsetSec];
   }
@@ -1982,12 +2092,12 @@ export function generateAutoClipPlan(
       const rankB = clampedPreferred.indexOf(b);
       const prefA = rankA >= 0 ? Math.max(0.1, 1 - rankA * 0.22) : 0.05;
       const prefB = rankB >= 0 ? Math.max(0.1, 1 - rankB * 0.22) : 0.05;
-      const barA = idxA % 4 === 0 ? 0.12 : idxA % 2 === 0 ? 0.05 : 0;
-      const barB = idxB % 4 === 0 ? 0.12 : idxB % 2 === 0 ? 0.05 : 0;
+      const barA = ((idxA - barAnchorIdx) % 4 + 4) % 4 === 0 ? 0.14 : ((idxA - barAnchorIdx) % 2 + 2) % 2 === 0 ? 0.05 : 0;
+      const barB = ((idxB - barAnchorIdx) % 4 + 4) % 4 === 0 ? 0.14 : ((idxB - barAnchorIdx) % 2 + 2) % 2 === 0 ? 0.05 : 0;
 
       // In explicit fixed-beat modes (beats_1/beats_2/beats_4), respect beat multiplier primarily
-      const weightMusical = hasCustomBarMode ? 0.24 : 0.42;
-      const weightPref = hasCustomBarMode ? 0.76 : 0.58;
+      const weightMusical = hasCustomBarMode ? 0.24 : 0.44;
+      const weightPref = hasCustomBarMode ? 0.76 : 0.56;
       const scoreA = musicalA * weightMusical + (prefA + barA) * weightPref;
       const scoreB = musicalB * weightMusical + (prefB + barB) * weightPref;
       return scoreB - scoreA;

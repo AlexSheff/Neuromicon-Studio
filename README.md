@@ -6,42 +6,42 @@
 
 ### Multi-Track NLE & Synchronized Timeline Dock
 - **Collapsible & Height-Resizable Timeline (`148px – 360px`)**: Drag the top grip handle or collapse the dock (`localStorage`-persisted) to reclaim extra canvas viewport height on smaller screens.
-- **Synchronized Multi-Lane Tracks (`1× – 8×` Anchored Zoom & Auto-Follow)**:
-  - **Time Ruler + Clips Track**: Click boundary pills (`CF` / `ZM` / `WP` / `DIP` / `SLD` / `CUT`) or use the inline **Outgoing Transition** selector right in the clip bar.
+- **Synchronized Multi-Lane Tracks (`1× – 16×` Anchored Zoom & Auto-Follow)**:
+  - **Time Ruler + Clips Track**: Edge-trim clip starts/ends directly on the timeline, drag clips freely or drop directly from the **Media Bin**, click boundary pills (`CF` / `ZM` / `WP` / `DIP` / `SLD` / `CUT`), and stay strictly bounded within the master audio duration without horizontal overflow.
   - **Multi-Lane FX Overlays Track**: Layer overlapping procedural generator effects over clips; non-overlapping lanes auto-pack cleanly with edge trim/resize handles.
   - **Timed Overlays Track**: Drag text badges and PNG/logo layers horizontally (`Start (s)`) or resize their duration directly on the timeline.
-  - **Hi-DPI Canvas Audio Waveforms & Beat Markers**: Master trim overview with large accessible keyboard-navigable Trim In/Out sliders paired with a zoomed slice displaying BPM grid, auto-cuts, and manual beat markers.
+  - **Hi-DPI Canvas Audio Track & Clip Audio Mute Controls**: Master trim overview with keyboard-navigable Trim In/Out sliders paired with a zoomed waveform slice displaying BPM grid, auto-cuts, and manual beat markers—plus a one-click **Hide/Show Audio Track** toggle (`×` / `More` menu) and **Mute/Unmute All Video Clip Audio** button.
   - **Subtitles Lane**: Jump directly to SRT/VTT cues aligned with playback.
 - **Anchored Zoom & Follow Playhead**: Zoom around your cursor (`Ctrl/Cmd + Wheel`) or playhead (`1× Fit` / `Locate Playhead`), with optional **Follow Playhead** auto-scrolling.
 - **Loop Segment Separation**: Repeat segments automatically shown when clips loop shorter than audio can be turned into independent editable clips with one click (**Make Independent**).
 - **Collapsible & Resizable Side Panels**: Toggle or drag the width of **Media Bin** and **Inspector** panels (`localStorage`-persisted) plus a **New Project** confirmation modal to clear media and IndexedDB cleanly.
 
-### Non-Linear Editing Tools & Beat Sync
+### Music, Melody & Beat-Aligned Auto-Generators
 - **Split at Playhead (`S`)**, **Duplicate Clip/FX (`Ctrl+D`)**, & **Ripple Delete (`Del`)** with an inline **Undo Toast**.
-- **Auto Beat-Sync & BPM Grid**: Estimate track BPM via onset autocorrelation and align all clip durations, transitions, and motion easing to musical beats.
-- **Insert at Selection**: Newly added media or generator scenes insert immediately after the selected clip.
+- **Fractional BPM Grid & 4/4 Downbeat Alignment**: High-precision BPM tracking prevents long-track drift and locks cuts/transitions onto musical bar downbeats.
+- **2048-FFT Pitch-Class Chroma & Phrase Energy**: Detects harmonic chord changes, melodic novelty, and quiet/drop energy transitions to generate smooth **Auto-Rhythm**, non-repeating **Random Beat**, or **Sequential** video edits that stay strictly within the music length.
+- **Non-Overlapping Manual Placement**: Dropped or inserted clips attach cleanly at the playhead or open gaps without splitting unrelated clips into alternating fragments.
 - **Undo / Redo (`Ctrl+Z` / `Ctrl+Y`)** across 30 history steps with interactive element keyboard-focus protection.
 
-### Procedural Visual Generators (10 WebGL2 Shaders + Custom GLSL Sandbox)
-Add **any** of the 11 procedural generators onto clips, the FX overlay lane, or as standalone scenes from the portal **`+ Generator`** menu, customize **per-clip shader overrides** with HDR-safe **0°–360° full-spectrum HSV Hue** sliders, and render cleanly with automatic 2D Canvas fallback on WebGL context loss:
-1. **Julia Fractal** · 2. **Fractal Kaleidoscope** · 3. **Mandelbrot Orbit** · 4. **Deep Space Nebula** · 5. **Spiral Galaxy** · 6. **Solar Aurora** · 7. **Event Horizon** · 8. **Cosmic Particle Warp** · 9. **Synthwave Cyber Grid** · 10. **Voronoi Bio-Plasma** · 11. **Custom GLSL Sandbox**
+### Motion Stabilization, Slow-Mo & Procedural Visuals
+- **Beat Pulse Disable & Motion Stabilization**: Independently turn off beat-reactive frame pulsing (`disableBeatPulse`, bypassing `backgroundPulse` and `beat_zoom`) or enable **Stabilize Motion** (`stabilizeMotion`) to freeze Ken Burns drift and reactive camera jitter.
+- **Video Slow-Mo Presets (`0.25×` – `2.0×`)**: Built-in `0.25×`, `0.35×`, and `0.5×` slow-motion controls in Inspector, Media Bin, and Media Preview Modal.
+- **11 Real-Time WebGL2 Procedural Generators + Custom GLSL Sandbox**: Add **any** generator onto clips, the FX overlay lane, or as standalone scenes from the portal **`+ Generator`** menu, customize **per-clip shader overrides** with HDR-safe **0°–360° full-spectrum HSV Hue** sliders, and render cleanly with automatic 2D Canvas fallback on WebGL context loss:
+  1. **Julia Fractal** · 2. **Fractal Kaleidoscope** · 3. **Mandelbrot Orbit** · 4. **Deep Space Nebula** · 5. **Spiral Galaxy** · 6. **Solar Aurora** · 7. **Event Horizon** · 8. **Cosmic Particle Warp** · 9. **Synthwave Cyber Grid** · 10. **Voronoi Bio-Plasma** · 11. **Custom GLSL Sandbox**
 
-### MP4 Video & Beat-Synced Visualizers
-- **Full `.mp4` / `.mov` / `.webm` Support**: Upload `.mp4` files as visual clips (automatically unmuted when no master track is present), extract audio from `.mp4` directly into the Audio Track (`Use Clip Audio as Master Track`) for waveform beat-sync, or load `.mp4` straight into the audio slot.
+### MP4 Video, Visualizers & Color Grading
+- **Full `.mp4` / `.mov` / `.webm` Support**: Automatically mutes embedded video audio when a master music track is loaded (with one-click unmute/mute all), extracts audio from `.mp4` directly into the Audio Track (`Use Clip Audio as Master Track`), or loads `.mp4` straight into the audio slot.
+- **Media Error Classification**: Typed client-side diagnostics (`empty_file`, `file_too_large`, `unsupported_container`, `unsupported_codec`, `decode_failed`) with localized EN/RU conversion advice (e.g., H.264 MP4 / WebM).
 - **6 Real-Time FFT Presets**: *Spectrum Bars*, *Radial Pulse*, *Horizon Wave*, *Beat Pulse Zoom*, *Reactive Particles*, and *Editorial Frame* (with **Show/Hide Visualizer** toggle and full **360° Hue Spectrum** + hex color controls).
-- **One-Click Studio Moods**: *Deep Cosmos*, *Neon Synthwave*, *Fractal Mandala*, and *Editorial Noir*.
-- **Framing, Color LUTs & Safari Compatibility**: Automatic software downscaled blur fallback when `CanvasRenderingContext2D.filter` is unavailable (e.g. Safari), with an inline non-blocking compatibility indicator.
+- **Cinema LUTs & Studio Moods**: Film-inspired grading presets (*Kodak 2383*, *Teal & Orange*, *Fuji Eterna*, *Bleach Bypass*, *Cyber Noir*) plus *Deep Cosmos*, *Neon Synthwave*, *Fractal Mandala*, and *Editorial Noir*.
 
-### Animated Typography, Subtitles & Timed Overlays
+### Animated Typography, Subtitles & Direct-to-Disk 4K Export
 - **6 Bundled Cyrillic + Latin Fonts** (`@fontsource` offline bundles): *Manrope*, *Montserrat*, *Oswald*, *Cormorant Garamond*, *Playfair Display*, and *JetBrains Mono*, paired with a full **0°–360° Accent Hue** slider.
-- **ID3v2 Metadata**: Automatic title, artist, album, year, Windows-1251 Cyrillic heuristic decoding, and cover art extraction from MP3 files.
-- **Subtitles (SRT / VTT)** & **Timed Overlays (`Start (s)` / `Dur (s)`)**: Place text badges and PNG/SVG watermarks over specific timeline spans or the whole video.
-- **Guided 4-Step Onboarding Checklist**: Appears on empty projects with instant `16:9` / `9:16` / `1:1` aspect buttons and demo synth beat loader.
+- **ID3v2 Metadata & Subtitles (SRT / VTT)**: Automatic title, artist, album, year, Windows-1251 Cyrillic heuristic decoding, cover art extraction, and timed overlay badges/watermarks.
+- **Fault-Tolerant Persistence (`Schema v5`)**: React `ErrorBoundary` recovery UI, IndexedDB project schema v5 validation (`isSupportedProjectRecord`), safe connection cleanup, orphan blob pruning, and emergency database reset (`deleteStudioDatabase`).
+- **WebCodecs Pre-Flight Check & Direct-to-Disk Streaming**: Hardware/software H.264/VP9/AAC/Opus codec probing, RAM budget guard, `showSaveFilePicker` streaming export, `MediaRecorder` fallback, Batch Export (`16:9 + 9:16 + 1:1`), `.srt`, `.json`, and `.txt` export.
 
-### Social Auto-Trim, Persistence & Direct-to-Disk 4K Export
-- **IndexedDB Autosave Status & Quota Guard**: Real-time `Saved / Saving / Error` indicator in the top bar plus automatic orphan blob pruning.
-- **WebCodecs Pre-Flight Check & Direct-to-Disk Streaming**: Exports standalone `.mp4`/clip projects as well as master-audio music videos. Probes hardware/software H.264/VP9/AAC/Opus codec support before export, warns when large 4K/long renders exceed safe RAM budgets, and streams MP4/WebM straight to disk via `FileSystemWritableFileStreamTarget` (`showSaveFilePicker`) when supported, with automatic `MediaRecorder` fallback.
-- **Batch Export (`16:9 + 9:16 + 1:1`)**, `.srt` export, `.json` project portability, and `.txt` social description export (set optional `VITE_GITHUB_URL` in `.env` to link a custom fork/repo in the top bar).
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the detailed change log and multi-iteration engineering roadmap.
 
 ## Keyboard Shortcuts
 
@@ -72,7 +72,11 @@ npm install --legacy-peer-deps
 # Start development server at http://localhost:3000
 npm run dev
 
+# Run unit tests (node:test + tsx)
+npm test
+
 # Type-check with strict TypeScript
+npm run typecheck
 npm run lint
 
 # Build production static bundle into dist/

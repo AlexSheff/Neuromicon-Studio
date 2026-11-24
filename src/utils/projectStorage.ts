@@ -9,6 +9,8 @@ import {
 } from '../types/studio';
 import { DEFAULT_CLIP_TRANSFORM } from './presets';
 
+export const PROJECT_SCHEMA_VERSION = 5 as const;
+
 const DB_NAME = 'neuromicon_studio_db';
 const DB_VERSION = 1;
 const STORE_PROJECT = 'project';
@@ -53,7 +55,7 @@ export interface SerializedClip {
 }
 
 export interface SerializedProject {
-  version: 2 | 3 | 4 | 5;
+  version: 2 | 3 | 4 | typeof PROJECT_SCHEMA_VERSION;
   savedAt: string;
   config: StudioConfig;
   mediaBin?: SerializedBinItem[];
@@ -69,6 +71,15 @@ export interface SerializedProject {
 export interface StorageWriteResult {
   ok: boolean;
   error?: string;
+}
+
+function safeCloseDB(db: IDBDatabase | null | undefined): void {
+  if (!db) return;
+  try {
+    db.close();
+  } catch {
+    // Ignore close errors if connection was already closed or invalidated
+  }
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -87,7 +98,13 @@ function openDB(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_BLOBS);
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => {
+        safeCloseDB(db);
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
   });
 }
@@ -103,7 +120,7 @@ async function idbPut(storeName: string, key: string, value: unknown): Promise<v
       tx.onabort = () => reject(tx.error || new Error('IndexedDB write aborted'));
     });
   } finally {
-    db.close();
+    safeCloseDB(db);
   }
 }
 
@@ -117,7 +134,7 @@ async function idbGet<T>(storeName: string, key: string): Promise<T | undefined>
       req.onerror = () => reject(req.error || new Error('IndexedDB read failed'));
     });
   } finally {
-    db.close();
+    safeCloseDB(db);
   }
 }
 
@@ -147,9 +164,28 @@ export async function saveProjectToIDB(project: SerializedProject): Promise<Stor
   }
 }
 
+export function isSupportedProjectRecord(record: unknown): record is SerializedProject {
+  if (!record || typeof record !== 'object') return false;
+  const candidate = record as Partial<SerializedProject>;
+  if (typeof candidate.version !== 'number' || candidate.version < 2) {
+    return false;
+  }
+  if (!candidate.config || typeof candidate.config !== 'object') {
+    return false;
+  }
+  if (!Array.isArray(candidate.clips)) {
+    return false;
+  }
+  return true;
+}
+
 export async function loadProjectFromIDB(): Promise<SerializedProject | undefined> {
   try {
-    return await idbGet<SerializedProject>(STORE_PROJECT, PROJECT_KEY);
+    const raw = await idbGet<unknown>(STORE_PROJECT, PROJECT_KEY);
+    if (!isSupportedProjectRecord(raw)) {
+      return undefined;
+    }
+    return raw;
   } catch {
     return undefined;
   }
@@ -177,7 +213,7 @@ export async function pruneOrphanedBlobs(activeKeys: Set<string>): Promise<void>
         tx.onerror = () => reject(tx.error);
       });
     } finally {
-      db.close();
+      safeCloseDB(db);
     }
   } catch {
     // Best-effort orphan cleanup
@@ -196,11 +232,31 @@ export async function clearProjectIDB(): Promise<void> {
         tx.onerror = () => reject(tx.error);
       });
     } finally {
-      db.close();
+      safeCloseDB(db);
     }
   } catch {
     // ignore
   }
+}
+
+export async function deleteStudioDatabase(): Promise<boolean> {
+  if (typeof indexedDB === 'undefined') return false;
+  return new Promise<boolean>((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      const timeoutId =
+        typeof setTimeout === 'function' ? setTimeout(() => resolve(false), 4000) : undefined;
+      const finish = (ok: boolean) => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        resolve(ok);
+      };
+      req.onsuccess = () => finish(true);
+      req.onerror = () => finish(false);
+      req.onblocked = () => finish(false);
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
 export function serializeStudioState(
@@ -219,7 +275,7 @@ export function serializeStudioState(
   }));
 
   return {
-    version: 5,
+    version: PROJECT_SCHEMA_VERSION,
     savedAt: new Date().toISOString(),
     config: {
       ...config,

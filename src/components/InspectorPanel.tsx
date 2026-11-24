@@ -108,6 +108,7 @@ interface InspectorPanelProps {
   onStartBatchExport: () => void;
   onDownloadMetadataTxt: () => void;
   onUseClipAudioAsMaster?: (clipId: string) => void;
+  onMuteAllClipAudio?: (muted: boolean) => void;
   widthPx?: number;
 }
 
@@ -162,6 +163,7 @@ export function InspectorPanel({
   onStartBatchExport,
   onDownloadMetadataTxt,
   onUseClipAudioAsMaster,
+  onMuteAllClipAudio,
   widthPx,
 }: InspectorPanelProps) {
   const t = tFor(lang);
@@ -721,13 +723,50 @@ export function InspectorPanel({
                           }
                           className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
                         >
-                          {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
+                          {[0.25, 0.35, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
                             <option key={spd} value={spd}>
                               {spd}×
                             </option>
                           ))}
                         </select>
                       </div>
+                    </div>
+
+                    {/* Quick Slow-Mo & Motion Stabilization Pills */}
+                    <div className="flex flex-wrap items-center gap-1">
+                      {[
+                        { rate: 0.25, label: t.slowMoQuarterBtn },
+                        { rate: 0.5, label: t.slowMoHalfBtn },
+                        { rate: 1.0, label: t.normalSpeedBtn },
+                      ].map((preset) => (
+                        <button
+                          key={preset.rate}
+                          type="button"
+                          onClick={() =>
+                            onUpdateClip(selectedClip.id, { playbackRate: preset.rate })
+                          }
+                          className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-pointer transition-colors ${
+                            Math.abs(selectedClip.playbackRate - preset.rate) < 0.02
+                              ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                              : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdateConfig({ stabilizeMotion: !config.stabilizeMotion })
+                        }
+                        className={`ml-auto px-2 py-0.5 rounded border text-[10px] font-medium cursor-pointer transition-colors ${
+                          config.stabilizeMotion
+                            ? 'border-cyan-500/70 bg-cyan-500/15 text-cyan-200'
+                            : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                        }`}
+                      >
+                        {t.stabilizeMotionLabel}
+                      </button>
                     </div>
 
                     <div className="rounded-lg border border-[#262B38] bg-[#141821] p-2.5 space-y-2">
@@ -812,6 +851,23 @@ export function InspectorPanel({
                           className="w-full py-1.5 px-2.5 rounded border border-amber-500/45 bg-amber-500/10 hover:bg-amber-500/20 text-[11px] font-medium text-amber-300 cursor-pointer transition-colors"
                         >
                           {t.useClipAudioAsMasterBtn}
+                        </button>
+                      )}
+
+                      {onMuteAllClipAudio && mediaItems.some((m) => m.kind === 'video') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const allMuted = mediaItems.every(
+                              (m) => m.kind !== 'video' || m.clipAudioMuted
+                            );
+                            onMuteAllClipAudio(!allMuted);
+                          }}
+                          className="w-full py-1 px-2.5 rounded border border-[#262B38] bg-[#0B0D11] hover:border-amber-500/50 text-[11px] text-gray-300 hover:text-amber-200 cursor-pointer transition-colors"
+                        >
+                          {mediaItems.every((m) => m.kind !== 'video' || m.clipAudioMuted)
+                            ? t.unmuteAllClipAudioBtn
+                            : t.muteAllClipAudioBtn}
                         </button>
                       )}
                     </div>
@@ -1581,7 +1637,9 @@ export function InspectorPanel({
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-300">{t.bgPulseLabel}</span>
                   <span className="font-mono tabular-nums text-gray-200">
-                    {Math.round(config.backgroundPulse * 100)}%
+                    {config.disableBeatPulse || config.stabilizeMotion
+                      ? '0%'
+                      : `${Math.round(config.backgroundPulse * 100)}%`}
                   </span>
                 </div>
                 <input
@@ -1589,10 +1647,40 @@ export function InspectorPanel({
                   min={0}
                   max={1}
                   step={0.05}
-                  value={config.backgroundPulse}
+                  disabled={Boolean(config.disableBeatPulse || config.stabilizeMotion)}
+                  value={
+                    config.disableBeatPulse || config.stabilizeMotion ? 0 : config.backgroundPulse
+                  }
                   onChange={(e) => onUpdateConfig({ backgroundPulse: Number(e.target.value) })}
-                  className="w-full studio-slider"
+                  className="w-full studio-slider disabled:opacity-40"
                 />
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <label className="flex items-start justify-between gap-2 text-xs text-gray-200 cursor-pointer">
+                  <div>
+                    <span className="block">{t.disableBeatPulseLabel}</span>
+                    <span className="block text-[10px] text-gray-500 leading-tight mt-0.5">
+                      {t.disableBeatPulseHint}
+                    </span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(config.disableBeatPulse)}
+                    onChange={(e) => onUpdateConfig({ disableBeatPulse: e.target.checked })}
+                    className="accent-amber-500 w-4 h-4 rounded cursor-pointer mt-0.5 shrink-0"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-2 text-xs text-gray-200 cursor-pointer pt-0.5">
+                  <span>{t.stabilizeMotionLabel}</span>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(config.stabilizeMotion)}
+                    onChange={(e) => onUpdateConfig({ stabilizeMotion: e.target.checked })}
+                    className="accent-cyan-500 w-4 h-4 rounded cursor-pointer shrink-0"
+                  />
+                </label>
               </div>
             </div>
 

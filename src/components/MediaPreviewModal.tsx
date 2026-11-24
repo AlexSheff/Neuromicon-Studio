@@ -369,7 +369,7 @@ export function MediaPreviewModal({
                     onChange={(e) => setRate(Number(e.target.value))}
                     className="w-full rounded bg-[#0E1016] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
                   >
-                    {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
+                    {[0.25, 0.35, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
                       <option key={spd} value={spd}>
                         {spd}×
                       </option>

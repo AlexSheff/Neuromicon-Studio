@@ -36,6 +36,9 @@ import {
   shiftHexHue,
 } from '../proceduralShaders';
 import { formatSrtTime, parseSubtitles } from '../subtitleParser';
+import { classifyMediaError } from '../mediaErrors';
+import { isSupportedProjectRecord, PROJECT_SCHEMA_VERSION } from '../projectStorage';
+import { resolveBeatPulseScale } from '../canvasRenderer';
 
 function makeClip(id: string, durationSec: number): VisualMediaState {
   return {
@@ -861,6 +864,130 @@ test('manual NLE insert and resize enforce maxTimelineSec cap cleanly', () => {
 
   const slot = findManualInsertionSlot(clips, 9, 4, 10);
   assert.ok(slot.startSec + slot.durationSec <= 10.02);
+});
+
+test('classifyMediaError classifies container, codec, empty, oversized, and decode errors in RU and EN', () => {
+  const emptyEn = classifyMediaError({
+    lang: 'en',
+    kind: 'video',
+    fileName: 'clip.mp4',
+    fileSize: 0,
+  });
+  assert.equal(emptyEn.code, 'empty_file');
+  assert.ok(emptyEn.formatted.includes('0 bytes'));
+
+  const largeRu = classifyMediaError({
+    lang: 'ru',
+    kind: 'video',
+    fileName: '4k.mp4',
+    fileSize: 2 * 1024 * 1024 * 1024,
+    maxBytes: 1536 * 1024 * 1024,
+  });
+  assert.equal(largeRu.code, 'file_too_large');
+  assert.ok(largeRu.advice.includes('H.264'));
+
+  const containerRu = classifyMediaError({
+    lang: 'ru',
+    kind: 'video',
+    fileName: 'movie.mkv',
+    fileSize: 1024,
+  });
+  assert.equal(containerRu.code, 'unsupported_container');
+  assert.ok(containerRu.advice.includes('H.264 MP4'));
+
+  const codecEn = classifyMediaError({
+    lang: 'en',
+    kind: 'video',
+    fileName: 'iphone.mov',
+    fileSize: 2048,
+    mediaErrorCode: 4,
+  });
+  assert.equal(codecEn.code, 'unsupported_codec');
+  assert.ok(codecEn.advice.includes('H.264'));
+
+  const decodeEn = classifyMediaError({
+    lang: 'en',
+    kind: 'audio',
+    fileName: 'song.mp3',
+    fileSize: 2048,
+    mediaErrorCode: 3,
+  });
+  assert.equal(decodeEn.code, 'decode_failed');
+});
+
+test('projectStorage enforces PROJECT_SCHEMA_VERSION = 5 and safely rejects schema < 2 or malformed records', () => {
+  assert.equal(PROJECT_SCHEMA_VERSION, 5);
+  assert.equal(isSupportedProjectRecord(null), false);
+  assert.equal(isSupportedProjectRecord({ version: 1, config: {}, clips: [] }), false);
+  assert.equal(isSupportedProjectRecord({ version: 5, config: {}, clips: 'not-array' }), false);
+  assert.equal(
+    isSupportedProjectRecord({ version: 5, config: { ...DEFAULT_STUDIO_CONFIG }, clips: [] }),
+    true
+  );
+  assert.equal(
+    isSupportedProjectRecord({ version: 2, config: { ...DEFAULT_STUDIO_CONFIG }, clips: [] }),
+    true
+  );
+});
+
+test('resolveBeatPulseScale disables image pulsing when disableBeatPulse or stabilizeMotion is enabled', () => {
+  const zoomPulseCfg: StudioConfig = {
+    ...DEFAULT_STUDIO_CONFIG,
+    beatPreset: 'beat_zoom',
+    backgroundPulse: 0.9,
+    visualizerScale: 1.2,
+    disableBeatPulse: false,
+    stabilizeMotion: false,
+  };
+  assert.ok(resolveBeatPulseScale(zoomPulseCfg, 1.0) > 1.05);
+
+  assert.equal(
+    resolveBeatPulseScale({ ...zoomPulseCfg, disableBeatPulse: true }, 1.0),
+    1
+  );
+  assert.equal(
+    resolveBeatPulseScale({ ...zoomPulseCfg, stabilizeMotion: true }, 1.0),
+    1
+  );
+  assert.equal(
+    resolveBeatPulseScale({ ...zoomPulseCfg, beatPreset: 'spectrum_bars', backgroundPulse: 0 }, 1.0),
+    1
+  );
+});
+
+test('detectTrackBpmAndBeats preserves fractional BPM without long-track drift and caps beat sync <= clipDuration', () => {
+  const sr = 8000;
+  const dur = 90;
+  // Exact 122.4 BPM => beat period = 60 / 122.4 = 0.490196s
+  const trueBeatSec = 60 / 122.4;
+  const mono = new Float32Array(sr * dur);
+  for (let b = 0; b * trueBeatSec < dur; b++) {
+    const startSample = Math.round(b * trueBeatSec * sr);
+    for (let j = 0; j < 400 && startSample + j < mono.length; j++) {
+      mono[startSample + j] = Math.sin((j / sr) * 2 * Math.PI * 68) * Math.exp(-j / 140);
+    }
+  }
+
+  const grid = detectTrackBpmAndBeats(mono, sr, 0, dur, 1.0);
+  assert.ok(grid.bpm >= 120 && grid.bpm <= 125, `Expected ~122 BPM, got ${grid.bpm}`);
+  // Non-integer beatSec preserves precision so beats near 85s stay tightly locked to true pulses
+  const lateBeats = grid.beats.filter((b) => b >= 80 && b <= 88);
+  assert.ok(lateBeats.length > 5);
+  const nearestErr = Math.min(
+    ...lateBeats.map((b) => Math.abs((b % trueBeatSec) > trueBeatSec / 2 ? trueBeatSec - (b % trueBeatSec) : b % trueBeatSec))
+  );
+  assert.ok(nearestErr < 0.15, `Expected fractional BPM beat grid lock < 0.15s drift at 85s, got ${nearestErr}`);
+
+  // Auto-beat sync across 8-beat & fit_track modes never overflows clipDuration
+  for (const mode of ['beats_8', 'fit_track'] as const) {
+    const plan = computeAutoBeatAlignedClips(6, dur, grid, [], 0, mode, mono, sr);
+    assert.equal(plan.length, 6);
+    const total = plan.reduce((acc, p) => acc + p.durationSec, 0);
+    assert.ok(
+      total <= dur + 0.02,
+      `Mode ${mode} cumulative duration (${total.toFixed(3)}s) exceeded clipDuration (${dur}s)`
+    );
+  }
 });
 
 

@@ -1,14 +1,28 @@
 {
-  "name": "react-example",
+  "name": "neuromicon-studio",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "100% client-side audio-reactive video editor and WebGL2 music visualizer with timeline NLE and WebCodecs 4K export.",
+  "keywords": [
+    "video-editor",
+    "music-visualizer",
+    "webgl2",
+    "webcodecs",
+    "audio-reactive",
+    "timeline",
+    "react",
+    "typescript"
+  ],
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "node --import tsx --test src/utils/__tests__/studioLogic.test.ts"
   },
   "dependencies": {
     "@fontsource/cormorant-garamond": "^5.3.0",
@@ -34,6 +48,7 @@
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }

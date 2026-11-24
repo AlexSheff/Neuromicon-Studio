@@ -247,6 +247,9 @@ export interface StudioConfig {
   mirrorVisualizer: boolean;
   visualizerPlacement: VisualizerPlacement;
   backgroundPulse: number;
+  disableBeatPulse?: boolean;
+  stabilizeMotion?: boolean;
+  showBottomAudioTrack?: boolean;
 
   // Generative visual effects (Fractals, Deep Space, Galaxies, Particles, Aurora, Black Hole, Cyber Grid, Voronoi, Custom GLSL)
   generatorEffect: GeneratorEffectId;

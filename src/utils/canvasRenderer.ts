@@ -788,6 +788,15 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+export function resolveBeatPulseScale(config: StudioConfig, beatPulse: number): number {
+  if (config.disableBeatPulse || config.stabilizeMotion) return 1;
+  if (config.beatPreset === 'beat_zoom') {
+    return config.backgroundPulse <= 0.005 ? 1 : 1 + beatPulse * 0.085 * config.visualizerScale;
+  }
+  if (config.backgroundPulse <= 0.005) return 1;
+  return 1 + beatPulse * 0.032 * config.backgroundPulse;
+}
+
 export function renderStudioFrame(params: RenderFrameParams): void {
   const {
     ctx,
@@ -827,23 +836,18 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     scheme.visualizerSecondary
   );
 
-  const pulseScale =
-    config.beatPreset === 'beat_zoom'
-      ? 1 + metrics.beatPulse * 0.085 * config.visualizerScale
-      : 1 + metrics.beatPulse * 0.032 * config.backgroundPulse;
+  const beatPulseOff = Boolean(
+    config.disableBeatPulse || config.stabilizeMotion || config.backgroundPulse <= 0.005
+  );
+  const pulseScale = resolveBeatPulseScale(config, metrics.beatPulse);
+  const allowKenBurns = Boolean(config.kenBurnsMotion && !reducedMotion && !config.stabilizeMotion);
 
   const progress = clipDuration > 0 ? Math.min(1, localTime / clipDuration) : 0;
-  const kenBurnsScale = config.kenBurnsMotion && !reducedMotion ? 1 + progress * 0.065 : 1;
+  const kenBurnsScale = allowKenBurns ? 1 + progress * 0.065 : 1;
   const totalScale = pulseScale * kenBurnsScale;
 
-  const panX =
-    config.kenBurnsMotion && !reducedMotion
-      ? Math.sin(localTime * 0.18) * width * 0.012
-      : 0;
-  const panY =
-    config.kenBurnsMotion && !reducedMotion
-      ? Math.cos(localTime * 0.14) * height * 0.012
-      : 0;
+  const panX = allowKenBurns ? Math.sin(localTime * 0.18) * width * 0.012 : 0;
+  const panY = allowKenBurns ? Math.cos(localTime * 0.14) * height * 0.012 : 0;
 
   // 2. Multi-Clip Sequence Layer
   if (mediaItems.length > 0) {
@@ -859,11 +863,11 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     const p = slice.transitionProgress;
 
     const slideKenActive =
-      config.kenBurnsMotion && !reducedMotion && activeMedia?.kind === 'image'
+      allowKenBurns && activeMedia?.kind === 'image'
         ? pulseScale * (1 + Math.min(0.055, slice.slideLocalTime * 0.01))
         : pulseScale;
     const slideKenPrev =
-      config.kenBurnsMotion && !reducedMotion && prevMedia?.kind === 'image'
+      allowKenBurns && prevMedia?.kind === 'image'
         ? pulseScale * (1 + Math.min(0.055, slice.prevSlideLocalTime * 0.01))
         : pulseScale;
     const activeClipDur = Math.max(0.2, slice.activeSegmentDuration || activeMedia?.durationSec || clipDuration);
@@ -1276,7 +1280,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     ctx.fillRect(0, 0, width, height);
   }
 
-  if (metrics.beatPulse > 0.08 && (config.backgroundPulse > 0.05 || config.beatPreset === 'beat_zoom')) {
+  if (!beatPulseOff && metrics.beatPulse > 0.08 && (config.backgroundPulse > 0.05 || config.beatPreset === 'beat_zoom')) {
     const vig = ctx.createRadialGradient(
       width * 0.5,
       height * 0.5,
@@ -1633,8 +1637,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     width,
     height,
     config.lutPreset,
-    config.glitchStrength,
-    metrics.beatPulse,
+    config.stabilizeMotion ? 0 : config.glitchStrength,
+    beatPulseOff ? 0 : metrics.beatPulse,
     localTime,
     scheme.accentColor,
     scheme.visualizerSecondary

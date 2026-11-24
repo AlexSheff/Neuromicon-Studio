@@ -777,7 +777,7 @@ export function MediaInputPanel({
                                       }
                                       className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-gray-100"
                                     >
-                                      {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
+                                      {[0.25, 0.35, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((spd) => (
                                         <option key={spd} value={spd}>
                                           {spd}×
                                         </option>
@@ -1648,6 +1648,16 @@ export function MediaInputPanel({
                   checked={config.kenBurnsMotion}
                   onChange={(e) => onUpdateConfig({ kenBurnsMotion: e.target.checked })}
                   className="accent-amber-500 w-4 h-4 rounded cursor-pointer"
+                />
+              </label>
+
+              <label className="flex items-center justify-between text-xs text-gray-300 cursor-pointer py-0.5">
+                <span>{t.stabilizeMotionLabel}</span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.stabilizeMotion)}
+                  onChange={(e) => onUpdateConfig({ stabilizeMotion: e.target.checked })}
+                  className="accent-cyan-500 w-4 h-4 rounded cursor-pointer"
                 />
               </label>
             </section>

@@ -52,6 +52,7 @@ import {
 } from './utils/audioAnalyzer';
 import { renderStudioFrame } from './utils/canvasRenderer';
 import { parseID3Tags } from './utils/id3Parser';
+import { classifyMediaError } from './utils/mediaErrors';
 import {
   DEFAULT_CLIP_TRANSFORM,
   DEFAULT_STUDIO_CONFIG,
@@ -1141,7 +1142,14 @@ export default function App() {
           if (!isSharedUrl && url.startsWith('blob:')) {
             URL.revokeObjectURL(url);
           }
-          showError(`${tFor(lang).errInvalidVisual}: ${fileName}`);
+          const classified = classifyMediaError({
+            fileName,
+            kind: 'image',
+            fileSize: sourceBlob?.size,
+            lang,
+          });
+          console.error('[media] Image decode failed:', classified.code, fileName);
+          showError(classified.formatted);
         };
         img.src = url;
       } else {
@@ -1196,7 +1204,15 @@ export default function App() {
           if (!isSharedUrl && url.startsWith('blob:')) {
             URL.revokeObjectURL(url);
           }
-          showError(`${tFor(lang).errInvalidVisual}: ${fileName}`);
+          const classified = classifyMediaError({
+            fileName,
+            kind: 'video',
+            mediaErrorCode: video.error?.code,
+            fileSize: sourceBlob?.size,
+            lang,
+          });
+          console.error('[media] Video load failed:', classified.code, fileName, video.error);
+          showError(classified.formatted);
         };
         video.src = url;
       }
@@ -1247,22 +1263,44 @@ export default function App() {
       setCurrentTime(0);
 
       if (!preserveRestoredConfig) {
-        setConfig((prev) => {
-          const nextEnd =
-            prev.trimPreset === 'reels_60' || prev.trimPreset === 'tiktok_60'
-              ? Math.min(buffer.duration, 60)
-              : prev.trimPreset === 'shorts_57'
-                ? Math.min(buffer.duration, 57)
-                : buffer.duration;
-          return {
-            ...prev,
-            titleText: meta.title || prev.titleText,
-            artistText: meta.artist || (isSyntheticDemo ? 'Neuromicon' : ''),
-            albumText: meta.album || (meta.year ? `Release · ${meta.year}` : ''),
-            trimStart: 0,
-            trimEnd: Number(nextEnd.toFixed(2)),
-          };
-        });
+        const nextTrimEnd =
+          configRef.current.trimPreset === 'reels_60' ||
+          configRef.current.trimPreset === 'tiktok_60'
+            ? Math.min(buffer.duration, 60)
+            : configRef.current.trimPreset === 'shorts_57'
+              ? Math.min(buffer.duration, 57)
+              : buffer.duration;
+        const maxSpan = Math.max(0.5, Number(nextTrimEnd.toFixed(2)));
+
+        setConfig((prev) => ({
+          ...prev,
+          titleText: meta.title || prev.titleText,
+          artistText: meta.artist || (isSyntheticDemo ? 'Neuromicon' : ''),
+          albumText: meta.album || (meta.year ? `Release · ${meta.year}` : ''),
+          trimStart: 0,
+          trimEnd: Number(nextTrimEnd.toFixed(2)),
+        }));
+
+        // Mute already-placed video clip audio tracks & clamp manual clips within music length
+        if (mediaItemsRef.current.length > 0) {
+          setMediaItems((prev) =>
+            prev
+              .filter((m) => configRef.current.slideshowMode !== 'manual' || (m.startSec ?? 0) < maxSpan - 0.35)
+              .map((m) => {
+                const start = m.startSec ?? 0;
+                const clampedDur =
+                  configRef.current.slideshowMode === 'manual'
+                    ? Number(Math.max(0.4, Math.min(m.durationSec, maxSpan - start)).toFixed(2))
+                    : m.durationSec;
+                return {
+                  ...m,
+                  durationSec: clampedDur,
+                  clipAudioMuted: m.kind === 'video' ? true : m.clipAudioMuted,
+                  clipAudioVolume: m.kind === 'video' ? 0 : m.clipAudioVolume,
+                };
+              })
+          );
+        }
 
         // Add embedded audio cover to Media Library (never auto-inserting onto the timeline)
         if (
@@ -1732,7 +1770,14 @@ export default function App() {
   const handleAudioFile = useCallback(
     async (file: File) => {
       if (!file || file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
-        showError(`${tFor(lang).errUnsupportedFile}: ${file?.name || ''}`);
+        const classified = classifyMediaError({
+          fileName: file?.name || '',
+          kind: 'audio',
+          fileSize: file?.size ?? 0,
+          maxBytes: MAX_UPLOAD_BYTES,
+          lang,
+        });
+        showError(classified.formatted);
         return;
       }
       setIsLoadingAudio(true);
@@ -1765,8 +1810,16 @@ export default function App() {
           false
         );
       } catch (err) {
-        console.error('Failed to decode audio file:', err);
-        showError(tFor(lang).errInvalidAudio);
+        const classified = classifyMediaError({
+          fileName: file.name,
+          kind: 'audio',
+          mimeType: file.type,
+          fileSize: file.size,
+          error: err,
+          lang,
+        });
+        console.error('[media] Failed to decode audio file:', classified.code, err);
+        showError(classified.formatted);
       } finally {
         setIsLoadingAudio(false);
       }
@@ -1830,14 +1883,29 @@ export default function App() {
       let placedFirst = false;
       for (const file of files) {
         if (!file || file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
-          showError(`${tFor(lang).errUnsupportedFile}: ${file?.name || ''}`);
+          const classified = classifyMediaError({
+            fileName: file?.name || '',
+            kind: 'visual',
+            mimeType: file?.type,
+            fileSize: file?.size ?? 0,
+            maxBytes: MAX_UPLOAD_BYTES,
+            lang,
+          });
+          showError(classified.formatted);
           continue;
         }
         const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v)$/i.test(file.name);
         const isImage =
           file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(file.name);
         if (!isVideo && !isImage) {
-          showError(`${tFor(lang).errUnsupportedFile}: ${file.name}`);
+          const classified = classifyMediaError({
+            fileName: file.name,
+            kind: 'visual',
+            mimeType: file.type,
+            fileSize: file.size,
+            lang,
+          });
+          showError(classified.formatted);
           continue;
         }
         const url = URL.createObjectURL(file);
@@ -2141,25 +2209,10 @@ export default function App() {
         builtClips[0].videoElement.preload = 'auto';
       }
 
-      // Auto-adjust timeline zoom cleanly so newly created dense clips never look squished into slivers
-      const lastClip = nextItems[nextItems.length - 1];
-      const totalSpan = Math.max(
-        1,
-        aud ? bounds.clipDuration : (lastClip.startSec ?? 0) + (lastClip.durationSec || 4)
-      );
-      const workspaceSpan = aud
-        ? totalSpan
-        : Math.max(24, Math.ceil((totalSpan + Math.max(12, totalSpan * 0.35)) / 4) * 4);
-      const avgNewDur =
-        builtClips.reduce((acc, c) => acc + Math.max(0.4, c.durationSec || 2), 0) /
-        builtClips.length;
-      const desiredZoom = Math.max(
-        1,
-        Math.min(16, Number((((54 / 760) * workspaceSpan) / Math.max(0.5, avgNewDur)).toFixed(1)))
-      );
+      // Keep timeline fitted cleanly to the viewport at 1× zoom so clips never extend past screen edge
       setAutoTimelineZoomSignal({
         nonce: Date.now(),
-        targetZoom: desiredZoom,
+        targetZoom: 1,
         focusStartSec: focusLocal,
       });
     },
@@ -2783,22 +2836,31 @@ export default function App() {
         trackBeatGrid,
         configRef.current.manualBeatMarkers,
         bounds.trimBase,
-        mode
+        mode,
+        monoDataRef.current,
+        aud.sampleRate
       );
       let cursor = 0;
-      setMediaItems((prev) =>
-        prev.map((clip, i) => {
+      setMediaItems((prev) => {
+        const updated: VisualMediaState[] = [];
+        for (let i = 0; i < prev.length; i++) {
+          const clip = prev[i];
           const p = plan[i];
-          if (!p) return clip;
+          if (!p) continue;
+          const remaining = bounds.clipDuration - cursor;
+          if (remaining < 0.4) break;
+          const clippedDur = Number(Math.min(p.durationSec, remaining).toFixed(2));
           const baseTransform = clip.transform || DEFAULT_CLIP_TRANSFORM;
           const clipStart = Number(cursor.toFixed(2));
-          cursor += p.durationSec;
-          return {
+          cursor += clippedDur;
+          updated.push({
             ...clip,
             startSec: clipStart,
-            durationSec: p.durationSec,
+            durationSec: clippedDur,
             transitionDurationSec: p.transitionDurationSec,
             transitionOut: applyMotionAndTrans ? p.suggestedTransition : clip.transitionOut,
+            clipAudioMuted: true,
+            clipAudioVolume: 0,
             transform: applyMotionAndTrans
               ? {
                   ...baseTransform,
@@ -2807,14 +2869,47 @@ export default function App() {
                   easing: 'ease_in_out',
                 }
               : clip.transform,
-          };
-        })
-      );
+          });
+        }
+        return updated;
+      });
       if (configRef.current.slideshowMode !== 'manual') {
         setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
       }
+      setAutoTimelineZoomSignal({
+        nonce: Date.now(),
+        targetZoom: 1,
+        focusStartSec: 0,
+      });
     },
     [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid]
+  );
+
+  const handleMuteAllClipAudio = useCallback(
+    (muted = true) => {
+      if (mediaItemsRef.current.length === 0 && mediaBinRef.current.length === 0) return;
+      pushImmediateHistory();
+      setMediaItems((prev) =>
+        prev.map((m) =>
+          m.kind === 'video'
+            ? {
+                ...m,
+                clipAudioMuted: muted,
+                clipAudioVolume: muted ? 0 : m.clipAudioVolume > 0.05 ? m.clipAudioVolume : 0.8,
+              }
+            : m
+        )
+      );
+      setMediaBin((prev) =>
+        prev.map((b) =>
+          b.kind === 'video' ? { ...b, defaultClipAudioMuted: muted } : b
+        )
+      );
+      showUndoToast(
+        muted ? tFor(langRef.current).allClipsMutedToast : tFor(langRef.current).allClipsUnmutedToast
+      );
+    },
+    [pushImmediateHistory, showUndoToast]
   );
 
   const handleFitTrimToClips = useCallback(() => {
@@ -3904,36 +3999,58 @@ export default function App() {
     setSaveStatus('saved');
   }, [stopPlayback, syncHistoryFlags]);
 
+  const clampManualClipsToSpan = useCallback((maxSpan: number) => {
+    if (configRef.current.slideshowMode !== 'manual') return;
+    setMediaItems((prev) =>
+      prev
+        .filter((m) => (m.startSec ?? 0) < maxSpan - 0.35)
+        .map((m) => ({
+          ...m,
+          durationSec: Number(
+            Math.max(0.4, Math.min(m.durationSec || 4, maxSpan - (m.startSec ?? 0))).toFixed(2)
+          ),
+        }))
+    );
+  }, []);
+
   const handleSelectTrimPreset = useCallback(
     (preset: TrimPresetId) => {
       pushImmediateHistory();
       const dur = audioRef.current ? audioRef.current.duration : 60;
+      let nextSpan = dur;
       setConfig((prev) => {
         if (preset === 'full') {
-          return { ...prev, trimPreset: preset, trimStart: 0, trimEnd: Number(dur.toFixed(2)) };
+          nextSpan = Number(dur.toFixed(2));
+          return { ...prev, trimPreset: preset, trimStart: 0, trimEnd: nextSpan };
         }
         if (preset === 'reels_60' || preset === 'tiktok_60') {
+          nextSpan = Number(Math.min(dur, 60).toFixed(2));
           return {
             ...prev,
             trimPreset: preset,
             trimStart: 0,
-            trimEnd: Number(Math.min(dur, 60).toFixed(2)),
+            trimEnd: nextSpan,
             fadeOutSec: 3.0,
           };
         }
         if (preset === 'shorts_57') {
+          nextSpan = Number(Math.min(dur, 57).toFixed(2));
           return {
             ...prev,
             trimPreset: preset,
             trimStart: 0,
-            trimEnd: Number(Math.min(dur, 57).toFixed(2)),
+            trimEnd: nextSpan,
             fadeOutSec: 3.0,
           };
         }
+        nextSpan = Math.max(0.5, prev.trimEnd - prev.trimStart);
         return { ...prev, trimPreset: 'custom' };
       });
+      if (audioRef.current) {
+        clampManualClipsToSpan(Math.max(0.5, nextSpan));
+      }
     },
-    [pushImmediateHistory]
+    [clampManualClipsToSpan, pushImmediateHistory]
   );
 
   const handlePreviewFadeOut = useCallback(() => {
@@ -3949,16 +4066,16 @@ export default function App() {
     (sec: number) => {
       if (!audioRef.current) return;
       queueDebouncedHistory();
-      setConfig((prev) => {
-        const clamped = Math.max(0, Math.min(prev.trimEnd - 0.5, sec));
-        return {
-          ...prev,
-          trimPreset: 'custom',
-          trimStart: Number(clamped.toFixed(2)),
-        };
-      });
+      const prevCfg = configRef.current;
+      const clamped = Number(Math.max(0, Math.min(prevCfg.trimEnd - 0.5, sec)).toFixed(2));
+      setConfig((prev) => ({
+        ...prev,
+        trimPreset: 'custom',
+        trimStart: clamped,
+      }));
+      clampManualClipsToSpan(Math.max(0.5, prevCfg.trimEnd - clamped));
     },
-    [queueDebouncedHistory]
+    [clampManualClipsToSpan, queueDebouncedHistory]
   );
 
   const handleSetTrimEnd = useCallback(
@@ -3966,16 +4083,16 @@ export default function App() {
       const aud = audioRef.current;
       if (!aud) return;
       queueDebouncedHistory();
-      setConfig((prev) => {
-        const clamped = Math.min(aud.duration, Math.max(prev.trimStart + 0.5, sec));
-        return {
-          ...prev,
-          trimPreset: 'custom',
-          trimEnd: Number(clamped.toFixed(2)),
-        };
-      });
+      const prevCfg = configRef.current;
+      const clamped = Number(Math.min(aud.duration, Math.max(prevCfg.trimStart + 0.5, sec)).toFixed(2));
+      setConfig((prev) => ({
+        ...prev,
+        trimPreset: 'custom',
+        trimEnd: clamped,
+      }));
+      clampManualClipsToSpan(Math.max(0.5, clamped - prevCfg.trimStart));
     },
-    [queueDebouncedHistory]
+    [clampManualClipsToSpan, queueDebouncedHistory]
   );
 
   const handleSeekAbsolute = useCallback(
@@ -4861,6 +4978,7 @@ export default function App() {
               onStartBatchExport={handleStartBatchExport}
               onDownloadMetadataTxt={handleDownloadMetadataTxt}
               onUseClipAudioAsMaster={handleUseClipAudioAsMaster}
+              onMuteAllClipAudio={handleMuteAllClipAudio}
             />
           </>
         )}
@@ -4913,6 +5031,8 @@ export default function App() {
         onSetTrimStart={handleSetTrimStart}
         onSetTrimEnd={handleSetTrimEnd}
         onChangeSlideshowMode={(mode) => handleUpdateConfig({ slideshowMode: mode })}
+        onMuteAllClipAudio={handleMuteAllClipAudio}
+        onToggleBottomAudioTrack={(show) => handleUpdateConfig({ showBottomAudioTrack: show })}
         autoZoomSignal={autoTimelineZoomSignal}
       />
 

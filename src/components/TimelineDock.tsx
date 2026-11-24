@@ -20,6 +20,8 @@ import {
   Sparkles,
   Trash2,
   Volume2,
+  VolumeX,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -112,6 +114,8 @@ interface TimelineDockProps {
   onSetTrimStart: (sec: number) => void;
   onSetTrimEnd: (sec: number) => void;
   onChangeSlideshowMode?: (mode: SlideshowMode) => void;
+  onMuteAllClipAudio?: (muted: boolean) => void;
+  onToggleBottomAudioTrack?: (show: boolean) => void;
   autoZoomSignal?: { nonce: number; targetZoom: number; focusStartSec?: number } | null;
 }
 
@@ -306,6 +310,8 @@ export function TimelineDock({
   onSetTrimStart,
   onSetTrimEnd,
   onChangeSlideshowMode,
+  onMuteAllClipAudio,
+  onToggleBottomAudioTrack,
   autoZoomSignal,
 }: TimelineDockProps) {
   const t = tFor(lang);
@@ -558,12 +564,20 @@ export function TimelineDock({
         heightPx: Math.max(28, packedOverlays.laneCount * 22 + 4),
       });
     }
-    tracks.push({ id: 'audio', heightPx: 32 });
+    if (config.showBottomAudioTrack !== false) {
+      tracks.push({ id: 'audio', heightPx: 32 });
+    }
     if (config.subtitles.length > 0) {
       tracks.push({ id: 'subtitles', heightPx: 22 });
     }
     return tracks;
-  }, [config.overlays.length, config.subtitles.length, packedFx.laneCount, packedOverlays.laneCount]);
+  }, [
+    config.overlays.length,
+    config.showBottomAudioTrack,
+    config.subtitles.length,
+    packedFx.laneCount,
+    packedOverlays.laneCount,
+  ]);
 
   const absBeatPoints = useMemo(() => {
     const autoAbs = beatCutTimestamps.map((b) => trimBase + b);
@@ -884,7 +898,7 @@ export function TimelineDock({
   return (
     <section
       aria-label="Timeline"
-      className="shrink-0 border-t border-[#262B38] bg-[#0E1016] px-3 lg:px-4 pb-2 pt-0.5 space-y-1.5 relative z-20"
+      className="w-full max-w-full min-w-0 overflow-x-hidden shrink-0 border-t border-[#262B38] bg-[#0E1016] px-3 lg:px-4 pb-2 pt-0.5 space-y-1.5 relative z-20"
     >
       <input
         ref={fileInputRef}
@@ -1548,13 +1562,48 @@ export function TimelineDock({
                   );
                 }
                 if (tr.id === 'audio') {
+                  const hasVideoClips = mediaItems.some((m) => m.kind === 'video');
+                  const allVideoMuted =
+                    hasVideoClips && mediaItems.every((m) => m.kind !== 'video' || m.clipAudioMuted);
                   return (
                     <div
                       key={tr.id}
                       style={{ height: `${tr.heightPx}px` }}
-                      className="flex items-center text-[10px] font-medium text-gray-400 truncate border-t border-[#1E2330]"
+                      className="flex items-center justify-between gap-1 text-[10px] font-medium text-gray-400 border-t border-[#1E2330] pr-0.5"
                     >
-                      {t.timelineAudioTrackLabel}
+                      <span className="truncate">{t.timelineAudioTrackLabel}</span>
+                      <div className="flex items-center gap-0.5 shrink-0">
+                        {hasVideoClips && onMuteAllClipAudio && (
+                          <button
+                            type="button"
+                            onClick={() => onMuteAllClipAudio(!allVideoMuted)}
+                            title={allVideoMuted ? t.unmuteAllClipAudioBtn : t.muteAllClipAudioBtn}
+                            aria-label={allVideoMuted ? t.unmuteAllClipAudioBtn : t.muteAllClipAudioBtn}
+                            className={`p-0.5 rounded border cursor-pointer ${
+                              allVideoMuted
+                                ? 'border-[#262B38] bg-[#141821] text-gray-400 hover:text-amber-300'
+                                : 'border-amber-500/60 bg-amber-500/15 text-amber-300'
+                            }`}
+                          >
+                            {allVideoMuted ? (
+                              <VolumeX className="w-2.5 h-2.5" />
+                            ) : (
+                              <Volume2 className="w-2.5 h-2.5" />
+                            )}
+                          </button>
+                        )}
+                        {onToggleBottomAudioTrack && (
+                          <button
+                            type="button"
+                            onClick={() => onToggleBottomAudioTrack(false)}
+                            title={t.hideBottomAudioTrackBtn}
+                            aria-label={t.hideBottomAudioTrackBtn}
+                            className="p-0.5 rounded border border-[#262B38] bg-[#141821] hover:border-rose-500/60 text-gray-400 hover:text-rose-300 cursor-pointer"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 }
@@ -3041,6 +3090,49 @@ export function TimelineDock({
                   >
                     <ChevronRight className="w-3 h-3" />
                     <span>{t.clipMoveRightBtn}</span>
+                  </button>
+                )}
+              </>
+            )}
+            {(onToggleBottomAudioTrack ||
+              (mediaItems.some((m) => m.kind === 'video') && onMuteAllClipAudio)) && (
+              <>
+                <div className="h-px bg-[#262B38] my-0.5" />
+                {onToggleBottomAudioTrack && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onToggleBottomAudioTrack(config.showBottomAudioTrack === false);
+                      setMoreMenuOpen(false);
+                    }}
+                    className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-[#1E2330] text-[11px] text-gray-200 cursor-pointer"
+                  >
+                    <Volume2 className="w-3 h-3 text-gray-400" />
+                    <span>
+                      {config.showBottomAudioTrack === false
+                        ? t.showBottomAudioTrackBtn
+                        : t.hideBottomAudioTrackBtn}
+                    </span>
+                  </button>
+                )}
+                {mediaItems.some((m) => m.kind === 'video') && onMuteAllClipAudio && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allMuted = mediaItems.every(
+                        (m) => m.kind !== 'video' || m.clipAudioMuted
+                      );
+                      onMuteAllClipAudio(!allMuted);
+                      setMoreMenuOpen(false);
+                    }}
+                    className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-[#1E2330] text-[11px] text-amber-200 cursor-pointer"
+                  >
+                    <VolumeX className="w-3 h-3 text-amber-400" />
+                    <span>
+                      {mediaItems.every((m) => m.kind !== 'video' || m.clipAudioMuted)
+                        ? t.unmuteAllClipAudioBtn
+                        : t.muteAllClipAudioBtn}
+                    </span>
                   </button>
                 )}
               </>
