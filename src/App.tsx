@@ -115,6 +115,20 @@ function createItemId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function detachClipVideoElement(video?: HTMLVideoElement): void {
+  if (!video) return;
+  try {
+    video.pause();
+    video.muted = true;
+    if (video.hasAttribute('src') || video.src) {
+      video.removeAttribute('src');
+      video.load();
+    }
+  } catch {
+    // ignore cleanup error on detached media element
+  }
+}
+
 function cloneSnapshot(
   config: StudioConfig,
   mediaBin: MediaBinItem[],
@@ -270,6 +284,9 @@ export default function App() {
   const reducedMotionRef = useRef(false);
   const pendingVideoSeekRef = useRef<WeakMap<HTMLVideoElement, number>>(new WeakMap());
   const pendingSeekHookedRef = useRef<WeakSet<HTMLVideoElement>>(new WeakSet());
+  const seekRedrawHookedRef = useRef<WeakSet<HTMLVideoElement>>(new WeakSet());
+  const drawOnceRef = useRef<() => void>(() => {});
+  const isPlayingRef = useRef(false);
 
   const configRef = useRef<StudioConfig>(config);
   const mediaBinRef = useRef<MediaBinItem[]>(mediaBin);
@@ -677,34 +694,60 @@ export default function App() {
         activeIds.add(items[slice.prevIndex].id);
       }
 
-      // Rolling lookahead window: promote only active/transitioning + next 2 upcoming clips (within 2.4s)
-      // to preload='auto' so bulk sliced timelines never exhaust GPU/decoder slots.
+      // Rolling lookahead window: promote active/transitioning + upcoming clips (within 3.2s)
+      // to preload='auto' and prewarm next 2 upcoming clips so beat cuts fire cleanly with zero seek lag,
+      // while keeping total live WebMediaPlayer instances bounded on long auto-generated timelines.
       const preloadWindowIds = new Set<string>(activeIds);
-      let prewarmClipId: string | null = null;
-      let prewarmTargetSec = 0;
+      const keepAttachedIds = new Set<string>(activeIds);
+      const prewarmTargets = new Map<string, number>();
       let upcomingVideoCount = 0;
+
       for (const s of segments) {
         const dt = s.startSec - localTime;
-        if (dt <= 0) continue;
-        if (dt > 2.6 && upcomingVideoCount >= 2) break;
+        if (dt <= 0) {
+          if (Math.abs(s.endSec - localTime) <= 6) {
+            const recent = items[s.clipIndex];
+            if (recent?.kind === 'video') keepAttachedIds.add(recent.id);
+          }
+          continue;
+        }
         const upcoming = items[s.clipIndex];
-        if (!upcoming || upcoming.kind !== 'video' || activeIds.has(upcoming.id)) continue;
-        if (dt <= 2.6 || upcomingVideoCount < 2) {
+        if (!upcoming || upcoming.kind !== 'video') continue;
+        if (dt <= 3.2 || upcomingVideoCount < 3) {
           preloadWindowIds.add(upcoming.id);
-          upcomingVideoCount++;
-          if (!prewarmClipId && dt <= 1.65) {
-            prewarmClipId = upcoming.id;
+          keepAttachedIds.add(upcoming.id);
+          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 2 && dt <= 2.4) {
             const vDur = upcoming.videoDuration || 1;
             const maxSafe = Math.max(0, vDur - 0.04);
-            prewarmTargetSec = Math.min(maxSafe, Math.max(0, upcoming.sourceStartSec % vDur));
+            prewarmTargets.set(
+              upcoming.id,
+              Math.min(maxSafe, Math.max(0, upcoming.sourceStartSec % vDur))
+            );
           }
+          upcomingVideoCount++;
+        } else if (dt <= 10 && keepAttachedIds.size < 16) {
+          keepAttachedIds.add(upcoming.id);
         }
-        if (upcomingVideoCount >= 2 && dt > 2.6) break;
+        if (keepAttachedIds.size >= 16 && dt > 10) break;
       }
+
+      const totalVideoCount = items.reduce((acc, it) => acc + (it.kind === 'video' ? 1 : 0), 0);
+      const enforceDecoderBudget = totalVideoCount > 18;
 
       items.forEach((item) => {
         if (item.kind !== 'video' || !item.videoElement) return;
         const v = item.videoElement;
+        const shouldAttach = !enforceDecoderBudget || keepAttachedIds.has(item.id);
+
+        if (!shouldAttach) {
+          detachClipVideoElement(v);
+          return;
+        }
+
+        if (!v.getAttribute('src') && !v.src && item.url) {
+          v.src = item.url;
+        }
+
         const vDur = item.videoDuration || 1;
         const maxSafe = Math.max(0, vDur - 0.04);
         const rate = item.playbackRate || 1;
@@ -720,6 +763,17 @@ export default function App() {
 
         if (Math.abs(v.playbackRate - rate) > 0.01) {
           v.playbackRate = rate;
+        }
+
+        if (!seekRedrawHookedRef.current.has(v)) {
+          seekRedrawHookedRef.current.add(v);
+          const triggerPausedRedraw = () => {
+            if (!isPlayingRef.current) {
+              drawOnceRef.current();
+            }
+          };
+          v.addEventListener('seeked', triggerPausedRedraw);
+          v.addEventListener('loadeddata', triggerPausedRedraw);
         }
 
         const applySafeSeek = (sec: number) => {
@@ -750,6 +804,7 @@ export default function App() {
           }
         };
 
+        const prewarmSec = prewarmTargets.get(item.id);
         if (activeIds.has(item.id)) {
           if (shouldPlay) {
             v.muted = !isActive || item.clipAudioMuted || item.clipAudioVolume <= 0.01;
@@ -776,11 +831,11 @@ export default function App() {
               applySafeSeek(targetSec);
             }
           }
-        } else if (item.id === prewarmClipId) {
+        } else if (prewarmSec !== undefined) {
           v.muted = true;
           if (!v.paused) v.pause();
-          if (v.readyState < 1 || (!v.seeking && Math.abs(v.currentTime - prewarmTargetSec) > 0.08)) {
-            applySafeSeek(prewarmTargetSec);
+          if (v.readyState < 1 || (!v.seeking && Math.abs(v.currentTime - prewarmSec) > 0.08)) {
+            applySafeSeek(prewarmSec);
           }
         } else {
           v.muted = true;
@@ -947,8 +1002,13 @@ export default function App() {
       video.muted = true;
       video.loop = true;
       video.playsInline = true;
-      video.preload = 'metadata';
-      video.src = binItem.url;
+      video.preload = 'none';
+      // Attach src immediately only for manual single placements or early clips;
+      // syncVideosAtLocalTime hydrates rolling window decoders on demand so bulk generations stay light.
+      if (placement.startSec === undefined || placement.startSec <= 6) {
+        video.preload = 'metadata';
+        video.src = binItem.url;
+      }
       const vDur = binItem.videoDuration || 10;
       const resolvedMuted =
         placement.clipAudioMuted ?? binItem.defaultClipAudioMuted ?? Boolean(audioRef.current);
@@ -2104,7 +2164,7 @@ export default function App() {
         startOffsetSec =
           prevIntervals.length > 0 ? prevIntervals[prevIntervals.length - 1].endSec : 0;
         if (aud && startOffsetSec >= bounds.clipDuration - 0.45) {
-          showUndoToast(tFor(langRef.current).errTimelineFullMusic);
+          showError(tFor(langRef.current).errTimelineFullMusic);
           return;
         }
         for (const c of normalizedPrev) {
@@ -2146,15 +2206,16 @@ export default function App() {
           sampleRate: aud?.sampleRate,
         }
       );
-      if (placements.length === 0) return;
+      if (placements.length === 0) {
+        showError(tFor(langRef.current).errAutoClipEmpty);
+        return;
+      }
 
       pushImmediateHistory();
       if (!isAppend) {
         for (const prevClip of prevItems) {
-          if (prevClip.kind === 'video' && prevClip.videoElement) {
-            prevClip.videoElement.pause();
-            prevClip.videoElement.muted = true;
-            prevClip.videoElement.preload = 'metadata';
+          if (prevClip.kind === 'video') {
+            detachClipVideoElement(prevClip.videoElement);
           }
         }
       }
@@ -2191,7 +2252,10 @@ export default function App() {
         });
       }
 
-      if (builtClips.length === 0) return;
+      if (builtClips.length === 0) {
+        showError(tFor(langRef.current).errAutoClipEmpty);
+        return;
+      }
       const nextItems = isAppend ? [...normalizedPrev, ...builtClips] : builtClips;
       setMediaItems(nextItems);
       setSelectedClipId(builtClips[0].id);
@@ -2206,6 +2270,9 @@ export default function App() {
 
       // Pre-warm only the first slice of the new auto-clip block
       if (builtClips[0].kind === 'video' && builtClips[0].videoElement) {
+        if (!builtClips[0].videoElement.getAttribute('src') && builtClips[0].url) {
+          builtClips[0].videoElement.src = builtClips[0].url;
+        }
         builtClips[0].videoElement.preload = 'auto';
       }
 
@@ -2221,7 +2288,7 @@ export default function App() {
       buildClipFromBinItem,
       getEffectiveTimelineBounds,
       pushImmediateHistory,
-      showUndoToast,
+      showError,
       stopPlayback,
       trackBeatGrid,
     ]
@@ -3270,8 +3337,8 @@ export default function App() {
       const target = prev.find((item) => item.id === id);
       if (!target) return;
       pushImmediateHistory();
-      if (target.kind === 'video' && target.videoElement) {
-        target.videoElement.pause();
+      if (target.kind === 'video') {
+        detachClipVideoElement(target.videoElement);
       }
       const remaining = prev.filter((item) => item.id !== id);
       setMediaItems(remaining);
@@ -3298,8 +3365,8 @@ export default function App() {
     if (mediaItemsRef.current.length === 0) return;
     pushImmediateHistory();
     for (const item of mediaItemsRef.current) {
-      if (item.kind === 'video' && item.videoElement) {
-        item.videoElement.pause();
+      if (item.kind === 'video') {
+        detachClipVideoElement(item.videoElement);
       }
     }
     setMediaItems([]);
@@ -4272,6 +4339,9 @@ export default function App() {
     [audio, beatCutTimestamps, config, getEffectiveTimelineBounds, isPlaying, mediaItems]
   );
 
+  drawOnceRef.current = drawOnce;
+  isPlayingRef.current = isPlaying;
+
   useEffect(() => {
     document.fonts
       .load(`${config.fontWeight} 48px "${config.fontFamily}"`)
@@ -4342,9 +4412,12 @@ export default function App() {
 
   useEffect(() => {
     if (!isPlaying) {
+      const bounds = getEffectiveTimelineBounds(config, mediaItems, audio);
+      const localTime = Math.max(0, Math.min(bounds.clipDuration, currentTime - bounds.trimBase));
+      syncVideosAtLocalTime(localTime, false);
       drawOnce();
     }
-  }, [currentTime, drawOnce, isPlaying]);
+  }, [audio, config, currentTime, drawOnce, getEffectiveTimelineBounds, isPlaying, mediaItems, syncVideosAtLocalTime]);
 
   // Global Keyboard Shortcuts (ignoring text inputs & interactive controls)
   useEffect(() => {

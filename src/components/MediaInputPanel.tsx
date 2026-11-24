@@ -46,6 +46,7 @@ import {
   AutoClipTargetMode,
   AutoClipTransitionStyle,
   DEFAULT_AUTO_CLIP_CONFIG,
+  getNormalizedManualClipIntervals,
   getTimelineSpanSec,
 } from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
@@ -177,12 +178,24 @@ export function MediaInputPanel({
   const [syncWithMotion, setSyncWithMotion] = useState(true);
   const [srtDraft, setSrtDraft] = useState('');
 
+  const isTimelineFullMusic = useMemo(() => {
+    if (!audio || mediaItems.length === 0) return false;
+    const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+    if (config.slideshowMode === 'manual') {
+      const ivs = getNormalizedManualClipIntervals(mediaItems);
+      const endSec = ivs.length > 0 ? ivs[ivs.length - 1].endSec : 0;
+      return endSec >= clipDuration - 0.45;
+    }
+    return getTimelineSpanSec(mediaItems, config) >= clipDuration - 0.45;
+  }, [audio, config, mediaItems]);
+
   const applyAutoClipPreset = (presetId: AutoClipPresetId) => {
     const found = AUTO_CLIP_PRESETS.find((p) => p.id === presetId);
     if (!found) return;
     setAutoClipCfg((prev) => ({
       ...prev,
       ...found.config,
+      targetMode: isTimelineFullMusic && prev.targetMode === 'append' ? 'replace' : prev.targetMode,
       presetId,
     }));
   };
@@ -1157,6 +1170,23 @@ export function MediaInputPanel({
                             className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
                           />
                         </label>
+                      </div>
+                    )}
+
+                    {isTimelineFullMusic && autoClipCfg.targetMode === 'append' && (
+                      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-amber-200 leading-snug">
+                          {t.autoClipFullSwitchHint}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAutoClipCfg((prev) => ({ ...prev, targetMode: 'replace' }))
+                          }
+                          className="px-2 py-0.5 rounded border border-emerald-500/60 bg-emerald-500/15 hover:bg-emerald-500/25 text-[9.5px] font-semibold text-emerald-200 whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          {t.autoClipSwitchReplaceBtn}
+                        </button>
                       </div>
                     )}
 

@@ -990,6 +990,71 @@ test('detectTrackBpmAndBeats preserves fractional BPM without long-track drift a
   }
 });
 
+test('generateAutoClipPlan maintains zero-gap exact beat boundaries and handles short clips & repeated presets', () => {
+  const shortAssets: MediaBinItem[] = [
+    {
+      id: 'sv1',
+      kind: 'video',
+      fileName: 'short1.mp4',
+      url: 'blob:sv1',
+      width: 1080,
+      height: 1920,
+      videoDuration: 1.2,
+      defaultDurationSec: 1.2,
+      // Simulate saving Preview Modal where defaultTransitionOut was stored as 'crossfade'
+      defaultTransitionOut: 'crossfade',
+    },
+    {
+      id: 'sv2',
+      kind: 'video',
+      fileName: 'short2.mp4',
+      url: 'blob:sv2',
+      width: 1080,
+      height: 1920,
+      videoDuration: 1.5,
+      defaultDurationSec: 1.5,
+      defaultTransitionOut: 'crossfade',
+    },
+  ];
 
+  // Phase-shifted 120 BPM grid (+0.18s downbeat offset)
+  const beats = Array.from({ length: 80 }, (_, i) => Number((0.18 + i * 0.5).toFixed(3)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
 
+  // 1. Even with Cinema Flow (minClipSec = 2.2) on 1.2s-1.5s short videos, must NEVER return []
+  const cinemaShort = generateAutoClipPlan(shortAssets, beatGrid, [], 0, 24, {
+    ...AUTO_CLIP_PRESETS.find((p) => p.id === 'cinema_flow')!.config,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+  assert.ok(cinemaShort.length >= 4, `Expected non-empty Cinema Flow on short clips, got ${cinemaShort.length}`);
+  for (let i = 1; i < cinemaShort.length; i++) {
+    const prevEnd = Number((cinemaShort[i - 1].startSec + cinemaShort[i - 1].durationSec).toFixed(2));
+    assert.equal(
+      cinemaShort[i].startSec,
+      prevEnd,
+      `Expected zero gap between clip ${i - 1} (${prevEnd}) and clip ${i} (${cinemaShort[i].startSec})`
+    );
+  }
 
+  // 2. Explicit cuts_only preset (beat_flash) must override binItem.defaultTransitionOut === 'crossfade'
+  const beatFlash = generateAutoClipPlan(shortAssets, beatGrid, [], 0, 24, {
+    ...AUTO_CLIP_PRESETS.find((p) => p.id === 'beat_flash')!.config,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+  assert.ok(beatFlash.length >= 10);
+  assert.ok(beatFlash.every((p) => p.transitionOut === 'cut' && p.transitionDurationSec === 0));
+
+  // 3. Running all 6 presets repeatedly across 6 consecutive generations always produces full contiguous timelines
+  for (const preset of AUTO_CLIP_PRESETS) {
+    const run = generateAutoClipPlan(shortAssets, beatGrid, [], 0, 24, {
+      ...preset.config,
+      fillToTargetEnd: true,
+      hasAudio: true,
+    });
+    assert.ok(run.length >= 3, `Preset ${preset.id} returned empty/short plan on short clips`);
+    const end = Number((run[run.length - 1].startSec + run[run.length - 1].durationSec).toFixed(2));
+    assert.ok(Math.abs(end - 24) <= 0.1, `Expected preset ${preset.id} to reach 24s cleanly, got ${end}s`);
+  }
+});

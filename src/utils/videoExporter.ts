@@ -286,7 +286,14 @@ type VideoWithFrameCallback = HTMLVideoElement & {
   cancelVideoFrameCallback?: (id: number) => void;
 };
 
-async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Promise<void> {
+async function seekVideoToTime(
+  video: HTMLVideoElement,
+  targetSec: number,
+  sourceUrl?: string
+): Promise<void> {
+  if (!video.getAttribute('src') && !video.src && sourceUrl) {
+    video.src = sourceUrl;
+  }
   if (video.preload !== 'auto') {
     video.preload = 'auto';
   }
@@ -813,14 +820,37 @@ async function exportWithWebCodecs(params: {
         if (activeItem?.kind === 'video' && activeItem.videoElement) {
           const vidTime =
             activeItem.sourceStartSec + slice.slideLocalTime * (activeItem.playbackRate || 1);
-          await seekVideoToTime(activeItem.videoElement, vidTime);
+          await seekVideoToTime(activeItem.videoElement, vidTime, activeItem.url);
         }
         if (slice.prevIndex !== null) {
           const prevItem = mediaItems[slice.prevIndex];
           if (prevItem?.kind === 'video' && prevItem.videoElement) {
             const prevVidTime =
               prevItem.sourceStartSec + slice.prevSlideLocalTime * (prevItem.playbackRate || 1);
-            await seekVideoToTime(prevItem.videoElement, prevVidTime);
+            await seekVideoToTime(prevItem.videoElement, prevVidTime, prevItem.url);
+          }
+        }
+        // Detach older video decoders far behind the export cursor on long auto-sliced timelines
+        if (mediaItems.length > 24 && slice.activeIndex !== null && frameIdx % 30 === 0) {
+          const keepFloor = slice.activeIndex - 3;
+          const keepCeil = slice.activeIndex + 8;
+          for (let k = 0; k < mediaItems.length; k++) {
+            if (k >= keepFloor && k <= keepCeil) continue;
+            const far = mediaItems[k];
+            if (
+              far?.kind === 'video' &&
+              far.videoElement &&
+              k !== slice.prevIndex &&
+              far.videoElement.hasAttribute('src')
+            ) {
+              far.videoElement.pause();
+              far.videoElement.removeAttribute('src');
+              try {
+                far.videoElement.load();
+              } catch {
+                // ignore
+              }
+            }
           }
         }
       }
@@ -1185,10 +1215,14 @@ async function exportWithMediaRecorder(params: {
       const syncVid = (item: VisualMediaState | undefined, slideT: number) => {
         if (!item || item.kind !== 'video' || !item.videoElement) return;
         const vid = item.videoElement;
+        if (!vid.getAttribute('src') && !vid.src && item.url) {
+          vid.preload = 'auto';
+          vid.src = item.url;
+        }
         const dur = vid.duration || 1;
         const target =
           Math.max(0, (item.sourceStartSec + slideT * (item.playbackRate || 1)) % dur);
-        if (!vid.seeking && Math.abs(vid.currentTime - target) > 0.08) {
+        if (vid.readyState >= 1 && !vid.seeking && Math.abs(vid.currentTime - target) > 0.08) {
           vid.currentTime = Math.min(Math.max(0, dur - 0.04), target);
         }
       };
