@@ -928,6 +928,7 @@ export function MediaInputPanel({
                             setAutoClipCfg((prev) => ({
                               ...prev,
                               mode: m.id,
+                              shuffleOrder: m.id !== 'sequential',
                               presetId: undefined,
                             }))
                           }
@@ -941,6 +942,23 @@ export function MediaInputPanel({
                         </button>
                       ))}
                     </div>
+
+                    {/* Optional Timeline Slice Shuffle Toggle (Sequential vs Shuffled on Timeline) */}
+                    <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer px-0.5 pt-0.5">
+                      <span>{t.autoClipShuffleOrderLabel}</span>
+                      <input
+                        type="checkbox"
+                        checked={autoClipCfg.shuffleOrder}
+                        onChange={(e) =>
+                          setAutoClipCfg((prev) => ({
+                            ...prev,
+                            shuffleOrder: e.target.checked,
+                            presetId: undefined,
+                          }))
+                        }
+                        className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                      />
+                    </label>
 
                     {/* Pacing Options */}
                     <div className="grid grid-cols-5 gap-1">

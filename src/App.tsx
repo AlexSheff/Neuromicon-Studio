@@ -2198,6 +2198,7 @@ export default function App() {
           targetDurationSec: autoCfg.targetDurationSec,
           startOffsetSec,
           avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
+          shuffleOrder: autoCfg.shuffleOrder,
           excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
           excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
           fillToTargetEnd: Boolean(aud),

@@ -1140,3 +1140,106 @@ test('generateAutoClipPlan never leaves untrimmed full-length clips on long trac
   );
 });
 
+test('generateAutoClipPlan guarantees zero duplicate video slices with surplus footage across sequential and shuffled modes', () => {
+  // 6 videos x 25s = 150s of surplus unique video for a 90s track
+  const surplusBin: MediaBinItem[] = Array.from({ length: 6 }, (_, idx) => ({
+    id: `surplus-v${idx + 1}`,
+    kind: 'video' as const,
+    fileName: `clip_${idx + 1}.mp4`,
+    url: `blob:surplus-v${idx + 1}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: 25,
+    defaultDurationSec: 25,
+  }));
+
+  // Synthetic 90s track @ 8 kHz with calm verse [0..24s], energetic melodic drop [24..56s], calm bridge/outro [56..90s]
+  const sr = 8000;
+  const totalSec = 90;
+  const mono = new Float32Array(sr * totalSec);
+  const chordFreqs = [220, 261.63, 293.66, 349.23, 392, 440];
+  for (let i = 0; i < mono.length; i++) {
+    const t = i / sr;
+    const isDrop = t >= 24 && t < 56;
+    const freq = chordFreqs[Math.floor(t / 4) % chordFreqs.length];
+    const beatMod = t % 0.5;
+    const kick = isDrop && beatMod < 0.09 ? Math.sin(2 * Math.PI * 65 * beatMod) * Math.exp(-beatMod * 30) * 0.75 : 0;
+    const body = Math.sin(2 * Math.PI * freq * t) * (isDrop ? 0.45 : 0.06);
+    mono[i] = kick + body;
+  }
+
+  const beats = Array.from({ length: 185 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const assertZeroOverlapsAndMixedIntervals = (plan: ReturnType<typeof generateAutoClipPlan>, label: string) => {
+    assert.ok(plan.length >= 25, `${label}: expected rich montage of >=25 cuts, got ${plan.length}`);
+    const end = Number((plan[plan.length - 1].startSec + plan[plan.length - 1].durationSec).toFixed(2));
+    assert.ok(Math.abs(end - totalSec) <= 0.1, `${label}: expected end ~${totalSec}s, got ${end}s`);
+
+    // Verify both short rhythmic cuts and longer melodic/calm holds exist
+    const hasShort = plan.some((p) => p.durationSec <= 1.25);
+    const hasLong = plan.some((p) => p.durationSec >= 2.0);
+    assert.ok(hasShort && hasLong, `${label}: expected mixed short and long audio-driven intervals`);
+
+    // Strictly verify ZERO overlapping/duplicate intervals per source video URL and no adjacent repeats
+    const slicesByUrl = new Map<string, Array<[number, number]>>();
+    for (let i = 0; i < plan.length; i++) {
+      const p = plan[i];
+      if (i > 0) {
+        assert.notEqual(
+          p.binItemId,
+          plan[i - 1].binItemId,
+          `${label}: unexpected adjacent duplicate binItemId at index ${i}`
+        );
+      }
+      const s0 = p.sourceStartSec;
+      const s1 = Number((p.sourceStartSec + p.durationSec * p.playbackRate).toFixed(2));
+      const existing = slicesByUrl.get(p.binItemId) ?? [];
+      for (const [es, ee] of existing) {
+        const overlaps = Math.min(s1, ee) - Math.max(s0, es) > 0.02;
+        assert.equal(
+          overlaps,
+          false,
+          `${label}: duplicate/overlapping video slice on ${p.binItemId}: [${s0}..${s1}] overlaps [${es}..${ee}]`
+        );
+      }
+      existing.push([s0, s1]);
+      slicesByUrl.set(p.binItemId, existing);
+    }
+    assert.ok(slicesByUrl.size >= 4, `${label}: expected >=4 unique source videos used, got ${slicesByUrl.size}`);
+  };
+
+  let seed = 1337;
+  const detRng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  for (const cfg of [
+    { name: 'auto_rhythm+shuffled', mode: 'auto_rhythm' as const, rhythm: 'auto' as const, shuffleOrder: true },
+    { name: 'auto_rhythm+sequential', mode: 'auto_rhythm' as const, rhythm: 'auto' as const, shuffleOrder: false },
+    { name: 'sequential+autoRhythm', mode: 'sequential' as const, rhythm: 'auto' as const, shuffleOrder: false },
+    { name: 'random+autoRhythm', mode: 'random' as const, rhythm: 'auto' as const, shuffleOrder: true },
+  ]) {
+    const plan = generateAutoClipPlan(surplusBin, beatGrid, [], 0, totalSec, {
+      mode: cfg.mode,
+      rhythm: cfg.rhythm,
+      shuffleOrder: cfg.shuffleOrder,
+      fillToTargetEnd: true,
+      hasAudio: true,
+      monoData: mono,
+      sampleRate: sr,
+      rng: detRng,
+    });
+    assertZeroOverlapsAndMixedIntervals(plan, cfg.name);
+
+    if (!cfg.shuffleOrder) {
+      // Sequential modes strictly place initial library items in order 1 -> 2 -> 3 -> 4 -> 5 -> 6
+      for (let k = 0; k < 6; k++) {
+        assert.equal(plan[k].binItemId, `surplus-v${k + 1}`, `${cfg.name}: expected sequential order at ${k}`);
+      }
+    }
+  }
+});
+
+
