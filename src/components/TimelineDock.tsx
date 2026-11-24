@@ -105,6 +105,7 @@ interface TimelineDockProps {
   onSplitClipAtPlayhead: () => void;
   onRippleDeleteSelected: () => void;
   onToggleSnapToBeats: () => void;
+  onToggleStretchMode?: () => void;
   onAddBeatMarker: () => void;
   onToggleBeatMarkerAt: (absSec: number) => void;
   onClearBeatMarkers: () => void;
@@ -301,6 +302,7 @@ export function TimelineDock({
   onSplitClipAtPlayhead,
   onRippleDeleteSelected,
   onToggleSnapToBeats,
+  onToggleStretchMode,
   onAddBeatMarker,
   onToggleBeatMarkerAt,
   onClearBeatMarkers,
@@ -1314,6 +1316,27 @@ export function TimelineDock({
             <span className="hidden lg:inline">{t.snapBeatsLabel}</span>
           </button>
 
+          {onToggleStretchMode && config.slideshowMode === 'manual' && (
+            <button
+              type="button"
+              onClick={onToggleStretchMode}
+              title={t.timelineStretchModeTitle}
+              aria-label={t.timelineStretchModeTitle}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium cursor-pointer transition-colors ${
+                config.timelineStretchMode === 'overlap'
+                  ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-200'
+                  : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-amber-500/50'
+              }`}
+            >
+              <ArrowLeftRight className="w-3 h-3" aria-hidden="true" />
+              <span className="hidden xl:inline">
+                {config.timelineStretchMode === 'overlap'
+                  ? t.timelineStretchOverlapLabel
+                  : t.timelineStretchPushLabel}
+              </span>
+            </button>
+          )}
+
           {/* Zoom + Follow Controls */}
           {!collapsed && (
             <div className="flex items-center gap-1 pl-1 border-l border-[#262B38]">
@@ -1965,7 +1988,9 @@ export function TimelineDock({
                                     minWidth: widthPct > 0.05 && leftPct < 99.6 ? '3px' : undefined,
                                   }}
                                   title={`${clip.fileName} · ${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s (${segDur.toFixed(1)}s)`}
-                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-1.5 flex items-center gap-1 overflow-hidden text-left transition-colors group ${
+                                  className={`absolute top-0 bottom-0 border-x border-[#262B38] px-1.5 flex items-center text-left transition-colors group ${
+                                    isSelected ? 'overflow-visible' : 'overflow-hidden'
+                                  } ${
                                     isManualMode
                                       ? 'cursor-grab active:cursor-grabbing'
                                       : 'cursor-pointer'
@@ -1975,50 +2000,52 @@ export function TimelineDock({
                                       : isDragOver
                                         ? 'ring-2 ring-inset ring-amber-400 bg-amber-500/25'
                                         : isSelected
-                                          ? 'bg-amber-500/20 text-amber-100 ring-1 ring-inset ring-amber-400 z-[5]'
+                                          ? 'bg-amber-500/20 text-amber-100 ring-1 ring-inset ring-amber-400 z-[22]'
                                           : isPlayheadInside
                                             ? 'bg-[#1D2434] text-gray-100'
                                             : 'bg-[#141821] hover:bg-[#191E2A] text-gray-300'
                                   }`}
                                 >
-                                  <span className="text-[9px] font-mono text-gray-500 shrink-0 pointer-events-none">
-                                    #{seg.clipIndex + 1}
-                                  </span>
-                                  {clip.kind === 'image' ? (
-                                    <img
-                                      src={clip.url}
-                                      alt=""
-                                      referrerPolicy="no-referrer"
-                                      className="w-6 h-6 rounded-xs object-cover shrink-0 pointer-events-none"
-                                    />
-                                  ) : clip.kind === 'generator' ? (
-                                    <Orbit
-                                      className="w-3.5 h-3.5 text-amber-400 shrink-0 pointer-events-none"
-                                      aria-hidden="true"
-                                    />
-                                  ) : null}
-                                  <span className="text-[10px] font-medium truncate pointer-events-none">
-                                    {clip.fileName}
-                                  </span>
-                                  {seg.isLoopRepeat && (
-                                    <span className="px-1 py-0.2 rounded bg-[#0B0D11]/90 border border-[#262B38] text-[8px] font-mono text-amber-300/90 shrink-0 pointer-events-none">
-                                      {t.loopRepeatBadge}
+                                  <div className="flex items-center gap-1 overflow-hidden w-full h-full pointer-events-none">
+                                    <span className="text-[9px] font-mono text-gray-500 shrink-0">
+                                      #{seg.clipIndex + 1}
                                     </span>
-                                  )}
-                                  {clip.overlayEffect && (
-                                    <span
-                                      title={`${t.clipOverlayTitle}: ${clip.overlayEffect.effect}`}
-                                      className="px-1 py-0.2 rounded bg-cyan-500/20 border border-cyan-500/50 text-[8px] font-mono text-cyan-200 shrink-0 pointer-events-none"
-                                    >
-                                      FX
+                                    {clip.kind === 'image' ? (
+                                      <img
+                                        src={clip.url}
+                                        alt=""
+                                        referrerPolicy="no-referrer"
+                                        className="w-6 h-6 rounded-xs object-cover shrink-0"
+                                      />
+                                    ) : clip.kind === 'generator' ? (
+                                      <Orbit
+                                        className="w-3.5 h-3.5 text-amber-400 shrink-0"
+                                        aria-hidden="true"
+                                      />
+                                    ) : null}
+                                    <span className="text-[10px] font-medium truncate">
+                                      {clip.fileName}
                                     </span>
-                                  )}
-                                  {clip.kind === 'video' && !clip.clipAudioMuted && (
-                                    <Volume2 className="w-2.5 h-2.5 text-amber-300 shrink-0 pointer-events-none" />
-                                  )}
-                                  <span className="ml-auto mr-1.5 px-1 py-0.5 rounded bg-[#0B0D11]/80 border border-[#262B38] text-[9px] font-mono tabular-nums text-amber-300 shrink-0 pointer-events-none">
-                                    {segDur.toFixed(1)}s
-                                  </span>
+                                    {seg.isLoopRepeat && (
+                                      <span className="px-1 py-0.2 rounded bg-[#0B0D11]/90 border border-[#262B38] text-[8px] font-mono text-amber-300/90 shrink-0">
+                                        {t.loopRepeatBadge}
+                                      </span>
+                                    )}
+                                    {clip.overlayEffect && (
+                                      <span
+                                        title={`${t.clipOverlayTitle}: ${clip.overlayEffect.effect}`}
+                                        className="px-1 py-0.2 rounded bg-cyan-500/20 border border-cyan-500/50 text-[8px] font-mono text-cyan-200 shrink-0"
+                                      >
+                                        FX
+                                      </span>
+                                    )}
+                                    {clip.kind === 'video' && !clip.clipAudioMuted && (
+                                      <Volume2 className="w-2.5 h-2.5 text-amber-300 shrink-0" />
+                                    )}
+                                    <span className="ml-auto mr-1.5 px-1 py-0.5 rounded bg-[#0B0D11]/80 border border-[#262B38] text-[9px] font-mono tabular-nums text-amber-300 shrink-0">
+                                      {segDur.toFixed(1)}s
+                                    </span>
+                                  </div>
 
                                   {/* Live Edge Trim / Move Readout */}
                                   {activeHud && (
@@ -2031,7 +2058,7 @@ export function TimelineDock({
                                     </span>
                                   )}
 
-                                  {/* Left-Edge Trim Handle (Hover edge to trim start & video in-point) */}
+                                  {/* Left-Edge Trim Handle */}
                                   {isManualMode && !seg.isLoopRepeat && (
                                     <div
                                       onPointerDown={(e) => {
@@ -2063,18 +2090,32 @@ export function TimelineDock({
                                         const deltaSec =
                                           ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
                                         const fixedEnd = drag.segStartSec + drag.startDur;
+                                        const minBound =
+                                          config.timelineStretchMode === 'overlap'
+                                            ? 0
+                                            : drag.prevLimitSec;
                                         let nextStart = Math.max(
-                                          drag.prevLimitSec,
+                                          minBound,
                                           Math.min(fixedEnd - 0.5, drag.segStartSec + deltaSec)
                                         );
-                                        if (config.snapToBeats && relSnapPoints.length > 0) {
+                                        if (config.snapToBeats && beatGridPoints.length > 0) {
+                                          const snapThresh = Math.min(
+                                            0.16,
+                                            Math.max(0.05, (8 / seqW) * drag.trackScaleSec)
+                                          );
+                                          const snapPool = [
+                                            0,
+                                            ...beatGridPoints,
+                                            ...beatCutTimestamps,
+                                            drag.prevLimitSec,
+                                          ];
                                           const snapped = snapTimeToBeat(
                                             nextStart,
-                                            [...relSnapPoints, drag.prevLimitSec],
-                                            0.22
+                                            snapPool,
+                                            snapThresh
                                           );
                                           nextStart = Math.max(
-                                            drag.prevLimitSec,
+                                            minBound,
                                             Math.min(fixedEnd - 0.5, snapped)
                                           );
                                         }
@@ -2130,19 +2171,23 @@ export function TimelineDock({
                                       }}
                                       onClick={(e) => e.stopPropagation()}
                                       title={t.trimStartHandleAria}
-                                      className="group/trim-l absolute top-0 left-0 bottom-0 w-3 max-w-[28%] z-20 cursor-ew-resize flex items-center justify-start pl-0.5 hover:bg-amber-400/35 transition-colors"
+                                      className={`group/trim-l absolute top-0 bottom-0 cursor-ew-resize flex items-center justify-start hover:bg-amber-400/35 transition-colors ${
+                                        isSelected
+                                          ? '-left-1 w-3 z-30 pl-1'
+                                          : 'left-0 w-2 min-w-[5px] z-20 pl-0.5'
+                                      }`}
                                     >
                                       <span
                                         className={`w-0.5 h-5 rounded-full transition-all ${
                                           isSelected
-                                            ? 'bg-amber-300/90 group-hover/trim-l:w-1 group-hover/trim-l:bg-amber-200 group-hover/trim-l:shadow-[0_0_6px_rgba(245,158,11,0.9)]'
+                                            ? 'bg-amber-300/95 group-hover/trim-l:w-1 group-hover/trim-l:bg-amber-200 group-hover/trim-l:shadow-[0_0_6px_rgba(245,158,11,0.9)]'
                                             : 'bg-gray-500/45 group-hover:bg-amber-400/80 group-hover/trim-l:w-1 group-hover/trim-l:bg-amber-300'
                                         }`}
                                       />
                                     </div>
                                   )}
 
-                                  {/* Right-Edge Duration Resize Handle (Hover edge to trim end) */}
+                                  {/* Right-Edge Duration Resize Handle (Push/Shift or Overlap downstream clips) */}
                                   {!seg.isLoopRepeat && (
                                     <div
                                       onPointerDown={(e) => {
@@ -2173,19 +2218,32 @@ export function TimelineDock({
                                           seqInnerRef.current?.getBoundingClientRect().width || 600;
                                         const deltaSec =
                                           ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
-                                        const maxDur = Math.max(600, drag.trackScaleSec);
+                                        const maxDur = audio
+                                          ? Math.max(0.5, clipDuration - drag.segStartSec)
+                                          : Math.max(600, drag.trackScaleSec);
                                         let nextDur = Math.max(
                                           0.5,
                                           Math.min(maxDur, drag.startDur + deltaSec)
                                         );
-                                        if (config.snapToBeats && relSnapPoints.length > 0) {
+                                        if (config.snapToBeats) {
+                                          const snapThresh = Math.min(
+                                            0.16,
+                                            Math.max(0.05, (8 / seqW) * drag.trackScaleSec)
+                                          );
                                           const proposedEnd = drag.segStartSec + nextDur;
+                                          const manRel = config.manualBeatMarkers
+                                            .map((m) => Number((m - trimBase).toFixed(3)))
+                                            .filter((r) => r >= 0 && r <= clipDuration);
+                                          const snapPool = [
+                                            ...beatGridPoints,
+                                            ...beatCutTimestamps,
+                                            ...manRel,
+                                            clipDuration,
+                                          ];
                                           const snappedEnd = snapTimeToBeat(
                                             proposedEnd,
-                                            isManualMode
-                                              ? [...relSnapPoints, drag.nextLimitSec]
-                                              : relSnapPoints,
-                                            0.22
+                                            snapPool,
+                                            snapThresh
                                           );
                                           nextDur = Math.max(
                                             0.5,
@@ -2215,12 +2273,16 @@ export function TimelineDock({
                                       }}
                                       onClick={(e) => e.stopPropagation()}
                                       title={t.trimEndHandleAria}
-                                      className="group/trim-r absolute top-0 right-0 bottom-0 w-3 max-w-[28%] z-20 cursor-ew-resize flex items-center justify-end pr-0.5 hover:bg-amber-400/35 transition-colors"
+                                      className={`group/trim-r absolute top-0 bottom-0 cursor-ew-resize flex items-center justify-end hover:bg-amber-400/35 transition-colors ${
+                                        isSelected
+                                          ? '-right-1 w-3 z-30 pr-1'
+                                          : 'right-0 w-2 min-w-[5px] z-20 pr-0.5'
+                                      }`}
                                     >
                                       <span
                                         className={`w-0.5 h-5 rounded-full transition-all ${
                                           isSelected
-                                            ? 'bg-amber-300/90 group-hover/trim-r:w-1 group-hover/trim-r:bg-amber-200 group-hover/trim-r:shadow-[0_0_6px_rgba(245,158,11,0.9)]'
+                                            ? 'bg-amber-300/95 group-hover/trim-r:w-1 group-hover/trim-r:bg-amber-200 group-hover/trim-r:shadow-[0_0_6px_rgba(245,158,11,0.9)]'
                                             : 'bg-gray-500/45 group-hover:bg-amber-400/80 group-hover/trim-r:w-1 group-hover/trim-r:bg-amber-300'
                                         }`}
                                       />
@@ -2228,7 +2290,7 @@ export function TimelineDock({
                                   )}
                                 </div>
 
-                                {/* Boundary Transition Pill positioned cleanly on top seam so trim edges remain unobstructed */}
+                                {/* Boundary Transition Pill positioned cleanly on top seam so trim handles remain accessible */}
                                 {isTouchingNext && mediaItems.length > 1 && (
                                   <button
                                     type="button"
@@ -2245,7 +2307,7 @@ export function TimelineDock({
                                     }}
                                     style={{ left: `${segLeftPct}%` }}
                                     title={`${t.clipTransitionLabel}: ${clip.transitionOut}`}
-                                    className={`absolute top-0.5 -translate-x-1/2 z-30 px-1 py-0 rounded border text-[7.5px] leading-[13px] font-mono cursor-pointer shadow ${
+                                    className={`absolute top-0.5 -translate-x-1/2 z-20 px-1 py-0 rounded border text-[7.5px] leading-[13px] font-mono cursor-pointer shadow ${
                                       transMenu?.clipId === clip.id
                                         ? 'bg-amber-500 text-zinc-950 border-amber-300 font-bold'
                                         : 'bg-[#0E1016]/95 border-[#323849] hover:border-amber-400 text-amber-300'

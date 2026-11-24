@@ -250,6 +250,7 @@ export interface StudioConfig {
   disableBeatPulse?: boolean;
   stabilizeMotion?: boolean;
   showBottomAudioTrack?: boolean;
+  timelineStretchMode?: 'push' | 'overlap';
 
   // Generative visual effects (Fractals, Deep Space, Galaxies, Particles, Aurora, Black Hole, Cyber Grid, Voronoi, Custom GLSL)
   generatorEffect: GeneratorEffectId;

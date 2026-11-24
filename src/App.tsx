@@ -2416,7 +2416,13 @@ export default function App() {
           const maxTimeline = audioRef.current
             ? getEffectiveTimelineBounds(cfg, withExtra, audioRef.current).clipDuration
             : 3600;
-          return resizeManualClipDuration(withExtra, id, durationSec, maxTimeline);
+          return resizeManualClipDuration(
+            withExtra,
+            id,
+            durationSec,
+            maxTimeline,
+            cfg.timelineStretchMode ?? 'push'
+          );
         }
         return base.map((item) => (item.id === id ? { ...item, ...patch } : item));
       });
@@ -2467,31 +2473,49 @@ export default function App() {
       const maxTimeline = hasAud
         ? getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current).clipDuration
         : 3600;
-      setMediaItems((prev) =>
-        prev.map((m) => {
-          if (m.id !== clipId) return m;
-          const clampedStart = Math.max(
-            0,
-            Math.min(hasAud ? Math.max(0, maxTimeline - 0.4) : 3600, Number(nextStartSec.toFixed(2)))
-          );
-          const clampedDur = Math.max(
-            0.4,
-            Math.min(
-              hasAud ? Math.max(0.4, maxTimeline - clampedStart) : 600,
-              Number(nextDurSec.toFixed(2))
-            )
-          );
-          return {
-            ...m,
-            startSec: clampedStart,
-            durationSec: clampedDur,
-            sourceStartSec:
-              nextSourceStartSec !== undefined
-                ? Math.max(0, Number(nextSourceStartSec.toFixed(2)))
-                : m.sourceStartSec,
-          };
-        })
-      );
+      const stretchMode = cfg.timelineStretchMode ?? 'push';
+      setMediaItems((prev) => {
+        const clampedStart = Math.max(
+          0,
+          Math.min(hasAud ? Math.max(0, maxTimeline - 0.4) : 3600, Number(nextStartSec.toFixed(2)))
+        );
+        const clampedDur = Math.max(
+          0.4,
+          Math.min(
+            hasAud ? Math.max(0.4, maxTimeline - clampedStart) : 600,
+            Number(nextDurSec.toFixed(2))
+          )
+        );
+        const targetEnd = Number((clampedStart + clampedDur).toFixed(2));
+        return prev
+          .map((m) => {
+            if (m.id === clipId) {
+              return {
+                ...m,
+                startSec: clampedStart,
+                durationSec: clampedDur,
+                sourceStartSec:
+                  nextSourceStartSec !== undefined
+                    ? Math.max(0, Number(nextSourceStartSec.toFixed(2)))
+                    : m.sourceStartSec,
+              };
+            }
+            if (stretchMode === 'overlap') {
+              const mStart = Math.max(0, m.startSec ?? 0);
+              const mEnd = mStart + Math.max(0.4, m.durationSec || 4);
+              if (mStart >= clampedStart - 0.005 && mEnd <= targetEnd + 0.01) {
+                return null;
+              }
+              if (mStart < clampedStart && mEnd > clampedStart + 0.01) {
+                const remDur = Number((clampedStart - mStart).toFixed(2));
+                if (remDur < 0.4) return null;
+                return { ...m, durationSec: remDur };
+              }
+            }
+            return m;
+          })
+          .filter((m): m is VisualMediaState => m !== null);
+      });
     },
     [getEffectiveTimelineBounds, queueDebouncedHistory]
   );
@@ -5096,6 +5120,11 @@ export default function App() {
         onSplitClipAtPlayhead={handleSplitClipAtPlayhead}
         onRippleDeleteSelected={handleRippleDeleteSelected}
         onToggleSnapToBeats={() => handleUpdateConfig({ snapToBeats: !config.snapToBeats })}
+        onToggleStretchMode={() =>
+          handleUpdateConfig({
+            timelineStretchMode: config.timelineStretchMode === 'overlap' ? 'push' : 'overlap',
+          })
+        }
         onAddBeatMarker={handleAddBeatMarker}
         onToggleBeatMarkerAt={handleToggleBeatMarkerAt}
         onClearBeatMarkers={handleClearBeatMarkers}

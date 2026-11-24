@@ -512,7 +512,8 @@ export function resizeManualClipDuration(
   mediaItems: VisualMediaState[],
   clipId: string,
   desiredDurationSec: number,
-  maxTimelineSec = 3600
+  maxTimelineSec = 3600,
+  stretchMode: 'push' | 'overlap' = 'push'
 ): VisualMediaState[] {
   const intervals = getNormalizedManualClipIntervals(mediaItems);
   const idx = intervals.findIndex((iv) => iv.id === clipId);
@@ -520,44 +521,89 @@ export function resizeManualClipDuration(
 
   const target = intervals[idx];
   const maxAllowedDur = Math.max(0.4, Math.min(600, maxTimelineSec - target.startSec));
-  let nextDur = Number(Math.max(0.4, Math.min(maxAllowedDur, desiredDurationSec)).toFixed(2));
+  const nextDur = Number(Math.max(0.4, Math.min(maxAllowedDur, desiredDurationSec)).toFixed(2));
+  const targetStart = Number(target.startSec.toFixed(2));
+  const newEnd = Number((targetStart + nextDur).toFixed(2));
 
-  const simulatePush = (durCandidate: number) => {
-    const startMap = new Map<string, number>();
-    let cursor = Number((target.startSec + durCandidate).toFixed(2));
+  if (stretchMode === 'overlap') {
+    const coverDropIds = new Set<string>();
+    const trimPatch = new Map<string, { startSec: number; durationSec: number; sourceShiftSec: number }>();
+
     for (let i = idx + 1; i < intervals.length; i++) {
-      const item = intervals[i];
-      if (item.startSec < cursor - 0.001) {
-        startMap.set(item.id, cursor);
-        cursor = Number((cursor + item.durationSec).toFixed(2));
+      const iv = intervals[i];
+      if (iv.startSec >= newEnd - 0.005) break;
+      if (iv.endSec <= newEnd + 0.39) {
+        coverDropIds.add(iv.id);
       } else {
-        cursor = Number(Math.max(cursor, item.endSec).toFixed(2));
+        const shift = Number((newEnd - iv.startSec).toFixed(2));
+        const remDur = Number(Math.max(0.4, iv.endSec - newEnd).toFixed(2));
+        trimPatch.set(iv.id, {
+          startSec: newEnd,
+          durationSec: remDur,
+          sourceShiftSec: shift,
+        });
       }
     }
-    return { startMap, finalEnd: cursor };
-  };
 
-  let sim = simulatePush(nextDur);
-  // If extending overlaps downstream clips past maxTimelineSec, shrink expansion to stay inside music track
-  if (sim.finalEnd > maxTimelineSec + 0.005) {
-    const excess = sim.finalEnd - maxTimelineSec;
-    nextDur = Number(Math.max(0.4, nextDur - excess).toFixed(2));
-    sim = simulatePush(nextDur);
+    return mediaItems
+      .map((m) => {
+        if (m.id === clipId) {
+          return {
+            ...m,
+            startSec: targetStart,
+            durationSec: nextDur,
+          };
+        }
+        if (coverDropIds.has(m.id)) return null;
+        const patch = trimPatch.get(m.id);
+        if (patch) {
+          const avail = Math.max(0.4, maxTimelineSec - patch.startSec);
+          const nextSourceStart =
+            m.kind === 'video'
+              ? Number(
+                  Math.max(
+                    0,
+                    (m.sourceStartSec || 0) + patch.sourceShiftSec * Math.max(0.25, m.playbackRate || 1)
+                  ).toFixed(2)
+                )
+              : m.sourceStartSec;
+          return {
+            ...m,
+            startSec: patch.startSec,
+            durationSec: Number(Math.min(patch.durationSec, avail).toFixed(2)),
+            sourceStartSec: nextSourceStart,
+          };
+        }
+        return m;
+      })
+      .filter((m): m is VisualMediaState => m !== null);
+  }
+
+  // Push / Ripple mode: fill downstream gaps first, then smoothly push downstream clips right.
+  // Never block stretching of the dragged clip even when the timeline is already full to music end;
+  // trailing clips pushed past maxTimelineSec are trimmed/dropped at the end cleanly.
+  const startMap = new Map<string, number>();
+  let cursor = newEnd;
+  for (let i = idx + 1; i < intervals.length; i++) {
+    const item = intervals[i];
+    if (item.startSec < cursor - 0.001) {
+      startMap.set(item.id, cursor);
+      cursor = Number((cursor + item.durationSec).toFixed(2));
+    } else {
+      cursor = Number(Math.max(cursor, item.endSec).toFixed(2));
+    }
   }
 
   return mediaItems
     .map((m) => {
       if (m.id === clipId) {
-        const clampedDur = Number(
-          Math.max(0.4, Math.min(nextDur, Math.max(0.4, maxTimelineSec - target.startSec))).toFixed(2)
-        );
         return {
           ...m,
-          startSec: Number(target.startSec.toFixed(2)),
-          durationSec: clampedDur,
+          startSec: targetStart,
+          durationSec: nextDur,
         };
       }
-      const shiftedStart = sim.startMap.get(m.id);
+      const shiftedStart = startMap.get(m.id);
       if (shiftedStart !== undefined) {
         if (shiftedStart >= maxTimelineSec - 0.4) {
           return null;
@@ -1740,7 +1786,17 @@ export function computePhraseEnergyCurve(
   const highRef = sorted[Math.floor(sorted.length * 0.9)] ?? lowRef + 0.01;
   const span = Math.max(0.008, highRef - lowRef);
 
-  const normalized = rawEnergy.map((v) => Math.max(0, Math.min(1, (v - lowRef) / span)));
+  const linearNorm = rawEnergy.map((v) => Math.max(0, Math.min(1, (v - lowRef) / span)));
+  // Blend percentile rank so loudness-mastered tracks still distinguish verses, bridges, and peaks
+  const indexedRanks = rawEnergy
+    .map((v, i) => ({ v, i }))
+    .sort((a, b) => a.v - b.v);
+  const rankNorm = new Array<number>(count).fill(0.5);
+  const denom = Math.max(1, count - 1);
+  for (let r = 0; r < indexedRanks.length; r++) {
+    rankNorm[indexedRanks[r].i] = r / denom;
+  }
+  const normalized = linearNorm.map((lin, i) => Math.max(0, Math.min(1, lin * 0.58 + rankNorm[i] * 0.42)));
 
   // Smooth over +-2 beats (~1 bar) so pacing changes smoothly with musical phrases
   return normalized.map((_, idx) => {
@@ -2078,6 +2134,8 @@ export function generateAutoClipPlan(
     options.sampleRate
   );
 
+  const recentSteps: number[] = [];
+
   const getBeatStepsForIndex = (
     bIdx: number
   ): { steps: number[]; energy: number; hitStrength: number } => {
@@ -2090,19 +2148,19 @@ export function generateAutoClipPlan(
     if (rhythm === 'beats_1') {
       preferredOrder = beatSec < 0.44 ? [2, 1] : [1, 2];
     } else if (rhythm === 'beats_2') {
-      preferredOrder = beatSec < 0.48 ? [2, 4, 3, 1] : [2, 4, 1];
+      preferredOrder = beatSec < 0.48 ? [2, 4, 3, 1] : [2, 4, 1, 3];
     } else if (rhythm === 'beats_4') {
-      preferredOrder = [4, 2, 8, 1];
+      preferredOrder = [4, 2, 6, 8, 1];
     } else if (rhythm === 'smooth') {
-      preferredOrder = energy > 0.72 ? [4, 6, 2] : [6, 8, 4, 2];
+      preferredOrder = energy > 0.72 ? [4, 6, 8, 2] : [6, 8, 4, 10, 2];
     } else {
-      // 'auto': analyze phrase energy + beats + melodic transitions across ALL modes
-      if (energy < 0.36) {
-        preferredOrder = [4, 6, 8, 2];
+      // 'auto': expressive mix of long lyrical holds and punchy beat cuts across energy & melody turns
+      if (energy < 0.38) {
+        preferredOrder = [6, 4, 8, 10, 3, 2];
       } else if (energy < 0.66) {
-        preferredOrder = [2, 4, 3, 1];
+        preferredOrder = [2, 4, 3, 6, 1];
       } else {
-        preferredOrder = beatSec < 0.42 ? [2, 1, 4] : [1, 2, 4];
+        preferredOrder = beatSec < 0.42 ? [2, 1, 3, 4] : [1, 2, 3, 4];
       }
     }
 
@@ -2118,7 +2176,11 @@ export function generateAutoClipPlan(
     }
 
     const candidates = Array.from(candSet);
+    const isRigidBeatFlash = rhythm === 'beats_1';
     const hasCustomBarMode = rhythm !== 'auto' && rhythm !== 'smooth';
+    const prevStep1 = recentSteps.length > 0 ? recentSteps[recentSteps.length - 1] : -1;
+    const prevStep2 = recentSteps.length > 1 ? recentSteps[recentSteps.length - 2] : -1;
+
     candidates.sort((a, b) => {
       const idxA = Math.min(beatTimes.length - 1, bIdx + a);
       const idxB = Math.min(beatTimes.length - 1, bIdx + b);
@@ -2132,34 +2194,51 @@ export function generateAutoClipPlan(
         for (let m = bIdx + minSteps; m < Math.min(beatTimes.length - 1, bIdx + stepLen); m++) {
           const dE = (phraseEnergy[m] ?? energy) - energy;
           const mPeak = (onsetAccent[m] ?? 0) * 0.45 + (melodicNovelty[m] ?? 0) * 0.55;
-          if (dE >= 0.22 || mPeak >= 0.86) {
-            maxDropJump = Math.max(maxDropJump, 0.32);
+          if (dE >= 0.2 || mPeak >= 0.82) {
+            maxDropJump = Math.max(maxDropJump, 0.34);
           }
         }
         return maxDropJump;
       };
 
+      // Anti-monotony cadence penalty prevents endless identical beat rectangles
+      const monotonyPenalty = (stepLen: number): number => {
+        if (isRigidBeatFlash || candidates.length <= 1) return 0;
+        if (stepLen === prevStep1 && stepLen === prevStep2) return hasCustomBarMode ? 0.14 : 0.24;
+        if (stepLen === prevStep1) return hasCustomBarMode ? 0.04 : 0.1;
+        return 0;
+      };
+
       const rankA = clampedPreferred.indexOf(a);
       const rankB = clampedPreferred.indexOf(b);
-      const prefA = rankA >= 0 ? Math.max(0.1, 1 - rankA * 0.22) : 0.05;
-      const prefB = rankB >= 0 ? Math.max(0.1, 1 - rankB * 0.22) : 0.05;
+      const decay = hasCustomBarMode ? 0.14 : 0.09;
+      const prefA = rankA >= 0 ? Math.max(0.2, 1 - rankA * decay) : 0.12;
+      const prefB = rankB >= 0 ? Math.max(0.2, 1 - rankB * decay) : 0.12;
       const barA =
         ((idxA - barAnchorIdx) % 4 + 4) % 4 === 0
-          ? 0.14
+          ? 0.16
           : ((idxA - barAnchorIdx) % 2 + 2) % 2 === 0
-            ? 0.05
+            ? 0.06
             : 0;
       const barB =
         ((idxB - barAnchorIdx) % 4 + 4) % 4 === 0
-          ? 0.14
+          ? 0.16
           : ((idxB - barAnchorIdx) % 2 + 2) % 2 === 0
-            ? 0.05
+            ? 0.06
             : 0;
 
-      const weightMusical = hasCustomBarMode ? 0.24 : 0.44;
-      const weightPref = hasCustomBarMode ? 0.76 : 0.56;
-      const scoreA = musicalA * weightMusical + (prefA + barA) * weightPref - skipPenalty(a);
-      const scoreB = musicalB * weightMusical + (prefB + barB) * weightPref - skipPenalty(b);
+      const weightMusical = isRigidBeatFlash ? 0.26 : hasCustomBarMode ? 0.44 : 0.62;
+      const weightPref = 1 - weightMusical;
+      const scoreA =
+        musicalA * weightMusical +
+        (prefA + barA) * weightPref -
+        skipPenalty(a) -
+        monotonyPenalty(a);
+      const scoreB =
+        musicalB * weightMusical +
+        (prefB + barB) * weightPref -
+        skipPenalty(b) -
+        monotonyPenalty(b);
       return scoreB - scoreA;
     });
 
@@ -2246,6 +2325,9 @@ export function generateAutoClipPlan(
       }
     }
 
+    const stepSpan = Math.max(1, chosenSlot.beatEndIdx - chosenSlot.beatStartIdx);
+    recentSteps.push(stepSpan);
+    if (recentSteps.length > 4) recentSteps.shift();
     workingSlots.push(chosenSlot);
     beatIdx = chosenSlot.beatEndIdx;
   }
@@ -2451,11 +2533,49 @@ export function generateAutoClipPlan(
       const [rs, re] =
         fitting.length > 0 ? fitting[Math.floor(rng() * fitting.length)] : ranges[0];
       const clampedNeed = Math.min(mediaNeed, Math.max(0.25, re - rs));
-      // Edge-slice (randomly choosing start or end edge of the free interval)
-      // to keep remaining unused spans maximally contiguous and avoid mid-range fragmentation
-      const takeFromEnd = re - rs > clampedNeed + 0.15 && rng() >= 0.5;
-      srcStart = takeFromEnd ? Number((re - clampedNeed).toFixed(2)) : Number(rs.toFixed(2));
-      srcEnd = Number((srcStart + clampedNeed).toFixed(2));
+      const slack = Math.max(0, re - rs - clampedNeed);
+      if (slack >= Math.max(2.5, clampedNeed * 0.9)) {
+        // Long video range (e.g. 34s): sample genuinely diverse non-sequential parts across the entire span,
+        // maximizing distance from previously picked slices while leaving clean >=1s sub-ranges on both sides.
+        const prior = usedSlicesByUrl.get(entry.binItem.url) ?? [];
+        const minEdgeBuf = Math.max(0.9, minSliceKeep + slicePad);
+        let bestOffset = Number((rs + rng() * slack).toFixed(2));
+        let bestScore = -Infinity;
+        for (let k = 0; k < 7; k++) {
+          let cand: number;
+          if (k === 0 && rng() < 0.25) {
+            cand = rs;
+          } else if (k === 1 && rng() < 0.25) {
+            cand = re - clampedNeed;
+          } else {
+            const innerLo = rs + minEdgeBuf;
+            const innerHi = re - clampedNeed - minEdgeBuf;
+            cand =
+              innerHi > innerLo
+                ? innerLo + ((k + rng()) / 7) * (innerHi - innerLo)
+                : rs + rng() * slack;
+          }
+          cand = Number(Math.max(rs, Math.min(re - clampedNeed, cand)).toFixed(2));
+          const candEnd = cand + clampedNeed;
+          let minDist = prior.length === 0 ? slack : Infinity;
+          for (const [ps, pe] of prior) {
+            const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
+            if (d < minDist) minDist = d;
+          }
+          const score = minDist + rng() * 0.6;
+          if (score > bestScore) {
+            bestScore = score;
+            bestOffset = cand;
+          }
+        }
+        srcStart = bestOffset;
+        srcEnd = Number((srcStart + clampedNeed).toFixed(2));
+      } else {
+        // Smaller range: slice cleanly from an edge to prevent sliver waste
+        const takeFromEnd = slack > 0.15 && rng() >= 0.5;
+        srcStart = takeFromEnd ? Number((re - clampedNeed).toFixed(2)) : Number(rs.toFixed(2));
+        srcEnd = Number((srcStart + clampedNeed).toFixed(2));
+      }
     }
 
     const updated = subtractUsedIntervals(
@@ -2681,21 +2801,16 @@ export function generateAutoClipPlan(
     while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
       const slot = workingSlots[sIdx];
       let matchedIdx = -1;
-      let preferTrimmed = true;
-      for (const pt of [true, false]) {
-        for (let off = 0; off < pool.length; off++) {
-          const idx = (seqPoolPointer + off) % pool.length;
-          if (canAssetFitUnused(pool[idx], slot.dur, pt, true)) {
-            matchedIdx = idx;
-            preferTrimmed = pt;
-            break;
-          }
+      for (let off = 0; off < pool.length; off++) {
+        const idx = (seqPoolPointer + off) % pool.length;
+        if (canAssetFitUnused(pool[idx], slot.dur, true, true)) {
+          matchedIdx = idx;
+          break;
         }
-        if (matchedIdx >= 0) break;
       }
 
       if (matchedIdx < 0) {
-        if (hasAnyUnusedFootage(0.45) && splitGuard < 200) {
+        if (hasAnyUnusedFootage(0.45) && splitGuard < Math.max(400, workingSlots.length)) {
           const pair = splitSlotAtBeat(slot);
           if (pair) {
             splitGuard++;
@@ -2703,6 +2818,16 @@ export function generateAutoClipPlan(
             continue;
           }
         }
+        for (let off = 0; off < pool.length; off++) {
+          const idx = (seqPoolPointer + off) % pool.length;
+          if (canAssetFitUnused(pool[idx], slot.dur, false, true)) {
+            matchedIdx = idx;
+            break;
+          }
+        }
+      }
+
+      if (matchedIdx < 0) {
         if (!fillToTargetEnd) {
           break;
         }
@@ -2744,7 +2869,6 @@ export function generateAutoClipPlan(
           rate
         )
       );
-      void preferTrimmed;
       lastBinId = chosen.binItem.id;
       sIdx++;
     }
@@ -2801,10 +2925,7 @@ export function generateAutoClipPlan(
       const slot = workingSlots[sIdx];
       let eligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
       if (eligible.length === 0) {
-        eligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
-      }
-      if (eligible.length === 0) {
-        if (hasAnyUnusedFootage(0.45) && splitGuard < 160) {
+        if (hasAnyUnusedFootage(0.45) && splitGuard < Math.max(300, workingSlots.length)) {
           const pair = splitSlotAtBeat(slot);
           if (pair) {
             splitGuard++;
@@ -2812,6 +2933,9 @@ export function generateAutoClipPlan(
             continue;
           }
         }
+        eligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
+      }
+      if (eligible.length === 0) {
         break;
       }
       const chosen = pickShuffledAsset(eligible, slot, lastBinId, null);
@@ -2823,56 +2947,58 @@ export function generateAutoClipPlan(
     return placements;
   }
 
-  // Pass A (fillToTargetEnd === true): Longest-first zero-duplicate assignment
+  // Pass A (fillToTargetEnd === true): Longest-first zero-duplicate assignment,
+  // preferring trimmed slices and splitting long slots on beat boundaries before accepting untrimmed fits.
   const assigned: Array<AutoBeatSlicePlacement | null> = new Array(workingSlots.length).fill(null);
   let splitGuard = 0;
-  let madeProgress = true;
-  while (madeProgress) {
-    madeProgress = false;
-    const unassignedIndices: number[] = [];
-    for (let i = 0; i < workingSlots.length; i++) {
-      if (assigned[i] === null) unassignedIndices.push(i);
-    }
-    if (unassignedIndices.length === 0) break;
-
-    unassignedIndices.sort((a, b) => {
-      const diff = workingSlots[b].dur - workingSlots[a].dur;
-      if (Math.abs(diff) > 0.05) return diff;
-      return rng() - 0.5;
-    });
-
-    for (const idx of unassignedIndices) {
-      const slot = workingSlots[idx];
-      let eligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
-      if (eligible.length === 0) {
-        eligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
-      }
-      if (eligible.length > 0) {
-        const prevId = idx > 0 ? assigned[idx - 1]?.binItemId ?? null : null;
-        const nextId = idx + 1 < assigned.length ? assigned[idx + 1]?.binItemId ?? null : null;
-        const chosen = pickShuffledAsset(eligible, slot, prevId, nextId);
-        const { sourceStartSec, rate } = takeUnusedSlice(chosen, slot.dur, false);
-        assigned[idx] = buildPlacementForSlot(slot, idx, chosen, sourceStartSec, rate);
-        madeProgress = true;
-      }
-    }
-
-    // Subdivide one unassigned long slot if unused shorter video slices/images still remain
-    if (hasAnyUnusedFootage(0.45) && splitGuard < 220) {
-      let splitHappened = false;
+  const maxSplitBudget = Math.max(400, workingSlots.length * 2);
+  for (const allowUntrimmed of [false, true]) {
+    let madeProgress = true;
+    while (madeProgress) {
+      madeProgress = false;
+      const unassignedIndices: number[] = [];
       for (let i = 0; i < workingSlots.length; i++) {
-        if (assigned[i] !== null) continue;
-        const pair = splitSlotAtBeat(workingSlots[i]);
-        if (pair) {
-          workingSlots.splice(i, 1, pair[0], pair[1]);
-          assigned.splice(i, 1, null, null);
-          splitGuard++;
-          splitHappened = true;
+        if (assigned[i] === null) unassignedIndices.push(i);
+      }
+      if (unassignedIndices.length === 0) break;
+
+      unassignedIndices.sort((a, b) => {
+        const diff = workingSlots[b].dur - workingSlots[a].dur;
+        if (Math.abs(diff) > 0.05) return diff;
+        return rng() - 0.5;
+      });
+
+      for (const idx of unassignedIndices) {
+        const slot = workingSlots[idx];
+        const eligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, !allowUntrimmed, false));
+        if (eligible.length > 0) {
+          const prevId = idx > 0 ? assigned[idx - 1]?.binItemId ?? null : null;
+          const nextId = idx + 1 < assigned.length ? assigned[idx + 1]?.binItemId ?? null : null;
+          const chosen = pickShuffledAsset(eligible, slot, prevId, nextId);
+          const { sourceStartSec, rate } = takeUnusedSlice(chosen, slot.dur, false);
+          assigned[idx] = buildPlacementForSlot(slot, idx, chosen, sourceStartSec, rate);
           madeProgress = true;
-          break;
         }
       }
-      if (splitHappened) continue;
+
+      if (!madeProgress && !allowUntrimmed && hasAnyUnusedFootage(0.45) && splitGuard < maxSplitBudget) {
+        // Subdivide unassigned slots whose duration exceeds remaining trimmed footage spans
+        let splitAny = false;
+        for (let i = 0; i < workingSlots.length && splitGuard < maxSplitBudget; i++) {
+          if (assigned[i] !== null) continue;
+          const pair = splitSlotAtBeat(workingSlots[i]);
+          if (pair) {
+            workingSlots.splice(i, 1, pair[0], pair[1]);
+            assigned.splice(i, 1, null, null);
+            splitGuard++;
+            splitAny = true;
+            i++; // skip newly inserted second half in this sweep so split distributes evenly
+          }
+        }
+        if (splitAny) {
+          madeProgress = true;
+        }
+      }
     }
   }
 

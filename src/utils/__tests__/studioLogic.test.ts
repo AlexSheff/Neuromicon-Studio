@@ -1242,4 +1242,112 @@ test('generateAutoClipPlan guarantees zero duplicate video slices with surplus f
   }
 });
 
+test('resizeManualClipDuration supports push & overlap on full timelines, and Auto-Clip extracts varied parts & varied lengths', () => {
+  // 1. Full 12s timeline [a(0..2), b(2..4), c(4..7), d(7..12)] on maxTimelineSec = 12
+  const fullClips: VisualMediaState[] = [
+    { ...makeClip('a', 2), id: 'a', startSec: 0 },
+    { ...makeClip('b', 2), id: 'b', startSec: 2 },
+    { ...makeClip('c', 3), id: 'c', startSec: 4, kind: 'video', sourceStartSec: 1.5, playbackRate: 1 },
+    { ...makeClip('d', 5), id: 'd', startSec: 7 },
+  ];
+
+  // Push mode: stretching `a` from 2s to 5s actually extends `a` to 5s, shifts `b` & `c` right, and trims tail at 12s
+  const pushedFull = resizeManualClipDuration(fullClips, 'a', 5, 12, 'push');
+  assert.equal(pushedFull[0].id, 'a');
+  assert.equal(pushedFull[0].durationSec, 5);
+  assert.equal(pushedFull[1].id, 'b');
+  assert.equal(pushedFull[1].startSec, 5);
+  assert.equal(pushedFull[2].id, 'c');
+  assert.equal(pushedFull[2].startSec, 7);
+  const pushMaxEnd = Math.max(...pushedFull.map((c) => (c.startSec ?? 0) + c.durationSec));
+  assert.ok(pushMaxEnd <= 12.02, `Push resize exceeded 12s cap: ${pushMaxEnd}`);
+
+  // Overlap mode: stretching `a` from 2s to 5s covers `b` (2..4), trims `c` to [5..7] advancing sourceStartSec, leaves `d` at 7s
+  const overlapped = resizeManualClipDuration(fullClips, 'a', 5, 12, 'overlap');
+  assert.equal(overlapped.some((c) => c.id === 'b'), false, 'Expected completely overlapped clip b to be covered');
+  assert.equal(overlapped[0].durationSec, 5);
+  const trimmedC = overlapped.find((c) => c.id === 'c');
+  assert.ok(trimmedC);
+  assert.equal(trimmedC.startSec, 5);
+  assert.equal(trimmedC.durationSec, 2);
+  assert.equal(trimmedC.sourceStartSec, 2.5);
+  const untouchedD = overlapped.find((c) => c.id === 'd');
+  assert.ok(untouchedD);
+  assert.equal(untouchedD.startSec, 7);
+  assert.equal(untouchedD.durationSec, 5);
+
+  // 2. Diverse non-sequential sampling from a 34s video + varied musical durations across steady loudness track
+  const longBin: MediaBinItem[] = [
+    {
+      id: 'v34',
+      kind: 'video',
+      fileName: 'long34.mp4',
+      url: 'blob:v34',
+      width: 1920,
+      height: 1080,
+      videoDuration: 34,
+      defaultDurationSec: 34,
+    },
+    {
+      id: 'v20',
+      kind: 'video',
+      fileName: 'broll20.mp4',
+      url: 'blob:v20',
+      width: 1920,
+      height: 1080,
+      videoDuration: 20,
+      defaultDurationSec: 20,
+    },
+  ];
+
+  // 48s loudness-compressed song with alternating calm chord holds and rhythmic percussion bars
+  const sr = 8000;
+  const totalSec = 48;
+  const mono = new Float32Array(sr * totalSec);
+  const chords = [196, 246.94, 293.66, 220, 261.63, 329.63];
+  for (let i = 0; i < mono.length; i++) {
+    const t = i / sr;
+    const bar = Math.floor(t / 8);
+    const activeBeat = bar % 2 === 1;
+    const beatMod = t % 0.5;
+    const kick = activeBeat && beatMod < 0.08 ? Math.sin(2 * Math.PI * 62 * beatMod) * Math.exp(-beatMod * 30) * 0.45 : 0;
+    const pad = Math.sin(2 * Math.PI * chords[Math.floor(t / 4) % chords.length] * t) * (activeBeat ? 0.35 : 0.18);
+    mono[i] = kick + pad;
+  }
+  const beats = Array.from({ length: 100 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  let seed = 4242;
+  const rng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const plan = generateAutoClipPlan(longBin, beatGrid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    shuffleOrder: true,
+    fillToTargetEnd: true,
+    hasAudio: true,
+    monoData: mono,
+    sampleRate: sr,
+    rng,
+  });
+
+  // Must produce multiple distinct clip durations (not uniform lengths)
+  const distinctDurs = new Set(plan.map((p) => Number(p.durationSec.toFixed(1))));
+  assert.ok(
+    distinctDurs.size >= 3,
+    `Expected >=3 distinct musical clip lengths, got ${Array.from(distinctDurs).join(', ')}`
+  );
+
+  // Slices from the 34s video must sample diverse non-sequential interior & outer sections
+  const v34Starts = plan.filter((p) => p.binItemId === 'v34').map((p) => p.sourceStartSec);
+  assert.ok(v34Starts.length >= 4);
+  const hasMid = v34Starts.some((s) => s >= 6 && s <= 25);
+  assert.ok(hasMid, `Expected diverse interior slices in [6..25s] from 34s video, got [${v34Starts.join(', ')}]`);
+  const isMonotonicAsc = v34Starts.every((s, idx) => idx === 0 || s > v34Starts[idx - 1]);
+  assert.equal(isMonotonicAsc, false, `Expected non-sequential jumps across 34s video, got [${v34Starts.join(', ')}]`);
+});
+
+
 
