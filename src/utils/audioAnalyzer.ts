@@ -1517,13 +1517,21 @@ export function computeAutoBeatAlignedClips(
     };
   };
 
+  // Prefer manual markers if >=2 exist inside trim range, otherwise use detected beat grid
+  const manualRel = manualMarkersAbs
+    .map((m) => Number((m - trimStart).toFixed(3)))
+    .filter((t) => t > 0.15 && t < clipDuration - 0.15)
+    .sort((a, b) => a - b);
+
   if (mode !== 'fit_track') {
     const beatMult =
       mode === 'beats_1' ? 1 : mode === 'beats_2' ? 2 : mode === 'beats_8' ? 8 : 4;
     const detectedGrid =
-      beatGrid.beats.length >= 2
-        ? [0, ...beatGrid.beats.filter((b) => b > 0.2 && b < clipDuration - 0.15)]
-        : null;
+      manualRel.length >= 2
+        ? [0, ...manualRel]
+        : beatGrid.beats.length >= 2
+          ? [0, ...beatGrid.beats.filter((b) => b > 0.2 && b < clipDuration - 0.15)]
+          : null;
     const plans: BeatAlignedClipPlan[] = [];
     let cursor = 0;
     let gridIdx = 0;
@@ -1543,12 +1551,6 @@ export function computeAutoBeatAlignedClips(
     }
     return plans;
   }
-
-  // Prefer manual markers if >=clipCount exist inside trim range, otherwise use detected beat grid
-  const manualRel = manualMarkersAbs
-    .map((m) => Number((m - trimStart).toFixed(3)))
-    .filter((t) => t > 0.15 && t < clipDuration - 0.15)
-    .sort((a, b) => a - b);
 
   const grid =
     manualRel.length >= clipCount
@@ -2010,9 +2012,30 @@ export type AutoClipPresetId =
   | 'music_story'
   | 'cinema_flow'
   | 'dynamic_drop'
+  | 'cinema_trailer'
   | 'story_order'
   | 'remix_shuffle'
+  | 'slow_dream'
   | 'beat_flash';
+
+export function getDefaultBoundsForAutoClipRhythm(
+  rhythm: AutoClipRhythm
+): { minClipSec: number; maxClipSec: number } {
+  switch (rhythm) {
+    case 'beats_1':
+      return { minClipSec: 0.5, maxClipSec: 2.0 };
+    case 'beats_2':
+      return { minClipSec: 1.0, maxClipSec: 4.0 };
+    case 'beats_4':
+      return { minClipSec: 2.0, maxClipSec: 10.0 };
+    case 'smooth':
+      return { minClipSec: 4.0, maxClipSec: 16.0 };
+    case 'auto':
+    case 'mixed':
+    default:
+      return { minClipSec: 2.0, maxClipSec: 12.0 };
+  }
+}
 
 export interface AutoClipGenerateConfig {
   presetId?: AutoClipPresetId;
@@ -2078,6 +2101,20 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
     },
   },
   {
+    id: 'cinema_trailer',
+    config: {
+      mode: 'auto_rhythm',
+      rhythm: 'auto',
+      transitionStyle: 'punchy',
+      motionLevel: 'dynamic',
+      minClipSec: 2.0,
+      maxClipSec: 10.0,
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 5,
+    },
+  },
+  {
     id: 'story_order',
     config: {
       mode: 'sequential',
@@ -2100,6 +2137,20 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
       motionLevel: 'gentle',
       minClipSec: 2.0,
       maxClipSec: 12.0,
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 5,
+    },
+  },
+  {
+    id: 'slow_dream',
+    config: {
+      mode: 'auto_rhythm',
+      rhythm: 'smooth',
+      transitionStyle: 'dissolve',
+      motionLevel: 'gentle',
+      minClipSec: 6.0,
+      maxClipSec: 18.0,
       avoidAdjacentRepeat: true,
       shuffleOrder: true,
       excludeEdgeSec: 5,
@@ -2450,10 +2501,26 @@ export function generateAutoClipPlan(
     beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
   const startOffsetSec = Math.max(0, Number((options.startOffsetSec ?? 0).toFixed(2)));
 
-  const baseLimit = hasAudio ? Math.max(0.5, maxTimelineSec) : Math.max(60, maxTimelineSec);
+  const estimateNoAudioBinSpan = (): number => {
+    let total = 0;
+    for (const b of binItems) {
+      if (b.kind === 'image') {
+        total += Math.max(0.5, b.defaultDurationSec || 4);
+      } else {
+        const safe = resolveSafeVideoSourceRange(b, excludeEdgeSec);
+        const rate = Math.max(0.25, Math.min(4, b.defaultPlaybackRate ?? 1.0));
+        total += safe.usableSpanSec / rate;
+      }
+    }
+    return Math.max(12, Math.min(Math.max(12, maxTimelineSec), Math.min(600, total + 12)));
+  };
+
+  const baseLimit = hasAudio
+    ? Math.max(0.5, maxTimelineSec)
+    : Math.max(12, Math.min(maxTimelineSec, estimateNoAudioBinSpan()));
   const targetLimit =
     options.targetDurationSec && options.targetDurationSec > 0.5
-      ? Math.min(baseLimit, startOffsetSec + options.targetDurationSec)
+      ? Math.min(hasAudio ? Math.max(0.5, maxTimelineSec) : Math.max(12, maxTimelineSec), startOffsetSec + options.targetDurationSec)
       : baseLimit;
   if (startOffsetSec >= targetLimit - 0.45) return [];
 
@@ -2833,21 +2900,68 @@ export function generateAutoClipPlan(
         const tailEnd = Number((tail.startSec + tail.dur).toFixed(2));
         if (tailEnd >= targetLimit - 0.02) break;
         const rem = Number((targetLimit - tailEnd).toFixed(2));
-        if (rem <= Math.min(beatSec * 3.5, Math.max(1.2, minClipBound * 0.9)) && tail.dur + rem <= hardMaxDur + 1.5) {
+        if (
+          rem <= Math.min(beatSec * 3.5, Math.max(1.2, minClipBound * 0.9)) &&
+          tail.dur + rem <= hardMaxDur + 1.5
+        ) {
           tail.dur = Number((targetLimit - tail.startSec).toFixed(2));
           break;
         }
-        const sliceDur =
-          rem <= hardMaxDur
-            ? rem
-            : Number(Math.min(targetSliceDur, rem - minClipBound >= minClipBound ? targetSliceDur : rem).toFixed(2));
-        const endBeat = Math.min(beatTimes.length - 1, tail.beatEndIdx + 1);
+
+        let startBeatIdx = Math.min(beatTimes.length - 1, tail.beatEndIdx);
+        while (startBeatIdx < beatTimes.length - 2 && beatTimes[startBeatIdx] < tailEnd - 0.04) {
+          startBeatIdx++;
+        }
+
+        let sliceDur: number;
+        let endBeat = startBeatIdx;
+        if (rem <= hardMaxDur) {
+          sliceDur = rem;
+          while (endBeat < beatTimes.length - 1 && beatTimes[endBeat] < targetLimit - 0.04) {
+            endBeat++;
+          }
+        } else {
+          const desiredEnd = tailEnd + targetSliceDur;
+          let bestBeat = -1;
+          let bestDiff = Infinity;
+          for (let b = startBeatIdx + 1; b < beatTimes.length; b++) {
+            const candEnd = beatTimes[b];
+            const candDur = candEnd - tailEnd;
+            if (candDur < minClipBound * 0.85) continue;
+            if (candDur > hardMaxDur || candEnd > targetLimit - 0.4) break;
+            const diff = Math.abs(candEnd - desiredEnd);
+            if (diff < bestDiff) {
+              bestDiff = diff;
+              bestBeat = b;
+            }
+          }
+          if (bestBeat > startBeatIdx) {
+            endBeat = bestBeat;
+            sliceDur = Number((beatTimes[bestBeat] - tailEnd).toFixed(2));
+          } else {
+            sliceDur = Number(
+              Math.min(
+                targetSliceDur,
+                rem - minClipBound >= minClipBound ? targetSliceDur : rem
+              ).toFixed(2)
+            );
+            while (
+              endBeat < beatTimes.length - 1 &&
+              beatTimes[endBeat] < tailEnd + sliceDur - 0.04
+            ) {
+              endBeat++;
+            }
+          }
+        }
+        if (endBeat === startBeatIdx && startBeatIdx < beatTimes.length - 1) {
+          endBeat = startBeatIdx + 1;
+        }
         workingSlots.push({
           startSec: tailEnd,
           dur: Math.max(0.4, sliceDur),
-          beatStartIdx: tail.beatEndIdx,
+          beatStartIdx: startBeatIdx,
           beatEndIdx: endBeat,
-          energy: phraseEnergy[tail.beatEndIdx] ?? 0.5,
+          energy: phraseEnergy[startBeatIdx] ?? 0.5,
           cutImpact: (onsetAccent[endBeat] ?? 0.5) * 0.55 + (melodicNovelty[endBeat] ?? 0.4) * 0.45,
         });
       }

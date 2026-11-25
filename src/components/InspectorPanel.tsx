@@ -260,7 +260,19 @@ export function InspectorPanel({
     { id: 'cyber_magenta', label: t.lutCyberMagenta },
     { id: 'vintage_gold', label: t.lutVintageGold },
     { id: 'deep_ocean', label: t.lutDeepOcean },
+    { id: 'bleach_bypass', label: t.lutBleachBypass },
+    { id: 'crimson_noir', label: t.lutCrimsonNoir },
+    { id: 'sunset_amber', label: t.lutSunsetAmber },
   ];
+
+  const isCinemaPresetActive = (patch: Partial<StudioConfig>): boolean =>
+    Object.entries(patch).every(([key, val]) => {
+      const cur = config[key as keyof StudioConfig];
+      if (typeof val === 'number' && typeof cur === 'number') {
+        return Math.abs(cur - val) < 0.015;
+      }
+      return cur === val;
+    });
 
   return (
     <aside
@@ -1279,9 +1291,7 @@ export function InspectorPanel({
               </div>
               <div className="grid grid-cols-2 gap-1.5">
                 {STUDIO_CINEMA_PRESETS.map((preset) => {
-                  const isActive =
-                    config.lutPreset === preset.patch.lutPreset &&
-                    config.mediaFilter === preset.patch.mediaFilter;
+                  const isActive = isCinemaPresetActive(preset.patch);
                   return (
                     <button
                       key={preset.id}
@@ -1326,9 +1336,7 @@ export function InspectorPanel({
               </div>
               <div className="grid grid-cols-2 gap-1.5">
                 {STUDIO_CINEMA_PRESETS.map((preset) => {
-                  const isActive =
-                    config.lutPreset === preset.patch.lutPreset &&
-                    config.mediaFilter === preset.patch.mediaFilter;
+                  const isActive = isCinemaPresetActive(preset.patch);
                   return (
                     <button
                       key={preset.id}
@@ -1899,18 +1907,15 @@ export function InspectorPanel({
                 <div className="grid grid-cols-2 gap-2">
                   <label className="space-y-0.5 block">
                     <span className="text-[10px] text-gray-400 block">{t.overlayStartLabel}</span>
-                    <input
-                      type="number"
+                    <NumericDraftInput
+                      value={selectedFx.startSec}
                       min={0}
                       max={Math.max(0, clipDuration - 0.4)}
                       step={0.1}
-                      value={Number(selectedFx.startSec.toFixed(2))}
-                      onChange={(e) =>
+                      decimals={2}
+                      onCommit={(val) =>
                         onUpdateFxOverlay(selectedFx.id, {
-                          startSec: Math.max(
-                            0,
-                            Math.min(clipDuration - 0.4, Number(e.target.value) || 0)
-                          ),
+                          startSec: Math.max(0, Math.min(Math.max(0, clipDuration - 0.4), val)),
                         })
                       }
                       className="w-full rounded bg-[#0B0D11] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
@@ -1918,17 +1923,17 @@ export function InspectorPanel({
                   </label>
                   <label className="space-y-0.5 block">
                     <span className="text-[10px] text-gray-400 block">{t.clipDurationLabel}</span>
-                    <input
-                      type="number"
+                    <NumericDraftInput
+                      value={selectedFx.durationSec}
                       min={0.4}
-                      max={clipDuration}
+                      max={Math.max(0.4, clipDuration - selectedFx.startSec)}
                       step={0.1}
-                      value={Number(selectedFx.durationSec.toFixed(2))}
-                      onChange={(e) =>
+                      decimals={2}
+                      onCommit={(val) =>
                         onUpdateFxOverlay(selectedFx.id, {
                           durationSec: Math.max(
                             0.4,
-                            Math.min(clipDuration - selectedFx.startSec, Number(e.target.value) || 1)
+                            Math.min(Math.max(0.4, clipDuration - selectedFx.startSec), val)
                           ),
                         })
                       }
@@ -2792,29 +2797,31 @@ export function InspectorPanel({
                 <div className="grid grid-cols-2 gap-2.5 pt-1">
                   <label className="space-y-1 block">
                     <span className="text-[11px] text-gray-400 block">{t.customWidthLabel}</span>
-                    <input
-                      type="number"
+                    <NumericDraftInput
+                      value={config.customWidth}
                       min={320}
                       max={4096}
                       step={2}
-                      value={config.customWidth}
-                      onChange={(e) =>
-                        onUpdateConfig({ customWidth: Math.max(320, Number(e.target.value) || 1920) })
-                      }
+                      decimals={0}
+                      onCommit={(val) => {
+                        const rounded = Math.max(320, Math.min(4096, Math.round(val)));
+                        onUpdateConfig({ customWidth: rounded - (rounded % 2) });
+                      }}
                       className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs font-mono tabular-nums text-gray-100"
                     />
                   </label>
                   <label className="space-y-1 block">
                     <span className="text-[11px] text-gray-400 block">{t.customHeightLabel}</span>
-                    <input
-                      type="number"
+                    <NumericDraftInput
+                      value={config.customHeight}
                       min={320}
                       max={4096}
                       step={2}
-                      value={config.customHeight}
-                      onChange={(e) =>
-                        onUpdateConfig({ customHeight: Math.max(320, Number(e.target.value) || 1080) })
-                      }
+                      decimals={0}
+                      onCommit={(val) => {
+                        const rounded = Math.max(320, Math.min(4096, Math.round(val)));
+                        onUpdateConfig({ customHeight: rounded - (rounded % 2) });
+                      }}
                       className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2.5 py-1.5 text-xs font-mono tabular-nums text-gray-100"
                     />
                   </label>

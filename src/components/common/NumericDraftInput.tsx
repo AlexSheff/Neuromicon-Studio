@@ -1,19 +1,29 @@
 import { useEffect, useState } from 'react';
 
 interface NumericDraftInputProps {
-  value: number;
+  value: number | undefined;
   min: number;
   max: number;
   step?: number;
   decimals?: number;
+  allowEmpty?: boolean;
+  placeholder?: string;
   onCommit: (next: number) => void;
+  onCommitEmpty?: () => void;
   className?: string;
   ariaLabel?: string;
   disabled?: boolean;
 }
 
-function formatNumericValue(value: number, decimals: number): string {
-  if (!Number.isFinite(value)) return '0';
+function formatNumericValue(
+  value: number | undefined,
+  decimals: number,
+  allowEmpty: boolean,
+  fallbackMin: number
+): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return allowEmpty ? '' : formatNumericValue(fallbackMin, decimals, false, fallbackMin);
+  }
   return Number(value.toFixed(decimals)).toString();
 }
 
@@ -23,19 +33,22 @@ export function NumericDraftInput({
   max,
   step = 0.1,
   decimals = 1,
+  allowEmpty = false,
+  placeholder,
   onCommit,
+  onCommitEmpty,
   className = '',
   ariaLabel,
   disabled = false,
 }: NumericDraftInputProps) {
   const [focused, setFocused] = useState(false);
-  const [draft, setDraft] = useState(() => formatNumericValue(value, decimals));
+  const [draft, setDraft] = useState(() => formatNumericValue(value, decimals, allowEmpty, min));
 
   useEffect(() => {
     if (!focused) {
-      setDraft(formatNumericValue(value, decimals));
+      setDraft(formatNumericValue(value, decimals, allowEmpty, min));
     }
-  }, [value, decimals, focused]);
+  }, [value, decimals, allowEmpty, min, focused]);
 
   const clampAndRound = (rawNum: number): number => {
     const safeMin = Math.min(min, max);
@@ -46,17 +59,30 @@ export function NumericDraftInput({
 
   const commitDraft = (rawText: string) => {
     const normalized = rawText.replace(',', '.').trim();
+    if (!normalized && allowEmpty) {
+      setDraft('');
+      if (value !== undefined) {
+        onCommitEmpty?.();
+      }
+      return;
+    }
     const parsed = Number(normalized);
     if (!normalized || !Number.isFinite(parsed)) {
-      const fallback = clampAndRound(value);
-      setDraft(formatNumericValue(fallback, decimals));
+      if (allowEmpty && value === undefined) {
+        setDraft('');
+      } else {
+        const fallback = clampAndRound(value ?? min);
+        setDraft(formatNumericValue(fallback, decimals, false, min));
+      }
       return;
     }
     const next = clampAndRound(parsed);
-    setDraft(formatNumericValue(next, decimals));
-    if (Math.abs(next - value) >= Math.pow(10, -(decimals + 1))) {
-      onCommit(next);
-    } else if (next !== value) {
+    setDraft(formatNumericValue(next, decimals, false, min));
+    if (
+      value === undefined ||
+      Math.abs(next - value) >= Math.pow(10, -(decimals + 1)) ||
+      next !== value
+    ) {
       onCommit(next);
     }
   };
@@ -68,6 +94,7 @@ export function NumericDraftInput({
       max={max}
       step={step}
       disabled={disabled}
+      placeholder={placeholder}
       aria-label={ariaLabel}
       value={draft}
       onFocus={(e) => {
@@ -104,7 +131,7 @@ export function NumericDraftInput({
           commitDraft(e.currentTarget.value);
           e.currentTarget.blur();
         } else if (e.key === 'Escape') {
-          setDraft(formatNumericValue(value, decimals));
+          setDraft(formatNumericValue(value, decimals, allowEmpty, min));
           e.currentTarget.blur();
         }
       }}

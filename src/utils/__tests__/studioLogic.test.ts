@@ -16,6 +16,7 @@ import {
   findManualInsertionSlot,
   generateAutoClipPlan,
   generateRandomBeatAutoClips,
+  getDefaultBoundsForAutoClipRhythm,
   getTimelineSpanSec,
   insertManualClipAtAnchor,
   moveManualClipGroup,
@@ -31,6 +32,7 @@ import {
   DEFAULT_CLIP_TRANSFORM,
   DEFAULT_STUDIO_CONFIG,
   STUDIO_CINEMA_PRESETS,
+  STUDIO_MOOD_PRESETS,
 } from '../presets';
 import {
   hexToHueDeg,
@@ -42,7 +44,12 @@ import {
 } from '../proceduralShaders';
 import { formatSrtTime, parseSubtitles } from '../subtitleParser';
 import { classifyMediaError } from '../mediaErrors';
-import { isSupportedProjectRecord, PROJECT_SCHEMA_VERSION } from '../projectStorage';
+import { DONATE_URL, resolveDonateUrl, resolveGitHubUrl } from '../../config/links';
+import {
+  isSupportedProjectRecord,
+  PROJECT_SCHEMA_VERSION,
+  serializeStudioState,
+} from '../projectStorage';
 import { resolveBeatPulseScale } from '../canvasRenderer';
 
 function makeClip(id: string, durationSec: number): VisualMediaState {
@@ -662,7 +669,7 @@ test('generateAutoClipPlan supports auto_rhythm energy phrasing, sequential slic
 });
 
 test('AUTO_CLIP_PRESETS, append startOffsetSec, transition/motion styles, and duration caps behave accurately', () => {
-  assert.equal(AUTO_CLIP_PRESETS.length, 6);
+  assert.equal(AUTO_CLIP_PRESETS.length, 8);
   const binItems: MediaBinItem[] = [
     {
       id: 'v1',
@@ -746,13 +753,20 @@ test('AUTO_CLIP_PRESETS, append startOffsetSec, transition/motion styles, and du
   }
 });
 
-test('STUDIO_CINEMA_PRESETS provide valid film color grading presets', () => {
-  assert.ok(STUDIO_CINEMA_PRESETS.length >= 5);
+test('STUDIO_CINEMA_PRESETS and STUDIO_MOOD_PRESETS provide valid distinct film grading presets', () => {
+  assert.ok(STUDIO_CINEMA_PRESETS.length >= 10);
+  const seenIds = new Set<string>();
   for (const preset of STUDIO_CINEMA_PRESETS) {
+    assert.ok(!seenIds.has(preset.id), `Duplicate cinema preset id: ${preset.id}`);
+    seenIds.add(preset.id);
     assert.ok(preset.nameEn.length > 0 && preset.nameRu.length > 0);
     assert.equal(preset.swatch.length, 2);
     assert.ok(preset.patch.lutPreset !== undefined);
     assert.ok(preset.patch.mediaFilter !== undefined);
+  }
+  assert.ok(STUDIO_MOOD_PRESETS.length >= 6);
+  for (const mood of STUDIO_MOOD_PRESETS) {
+    assert.ok(mood.nameEn.length > 0 && mood.nameRu.length > 0);
   }
 });
 
@@ -1537,3 +1551,115 @@ test('dropBinItemIntoManualGap handles narrow 0.3s gaps & edges, and clampManual
   assert.equal(singleSegs[0].startSec, 0);
   assert.equal(singleSegs[0].endSec, 4.5);
 });
+
+test('serializeStudioState preserves imageBlobKey for duplicated image overlays and link resolvers have no placeholder URLs', () => {
+  const cfg: StudioConfig = {
+    ...DEFAULT_STUDIO_CONFIG,
+    overlays: [
+      {
+        id: 'ov-original',
+        kind: 'image',
+        label: 'logo.png',
+        imageUrl: 'blob:logo-1',
+        xPct: 0.8,
+        yPct: 0.2,
+        scale: 1,
+        opacity: 0.9,
+      },
+      {
+        id: 'ov-dup',
+        kind: 'image',
+        label: 'logo.png',
+        imageUrl: 'blob:logo-1',
+        imageBlobKey: 'overlay-ov-original',
+        xPct: 0.84,
+        yPct: 0.24,
+        scale: 1,
+        opacity: 0.9,
+      },
+      {
+        id: 'ov-text',
+        kind: 'text',
+        label: 'Title',
+        text: 'Hello',
+        xPct: 0.5,
+        yPct: 0.5,
+        scale: 1,
+        opacity: 1,
+      },
+    ],
+  };
+
+  const blobMap = new Map<string, string>([['blob:logo-1', 'overlay-ov-original']]);
+  const serialized = serializeStudioState(cfg, [], blobMap);
+
+  assert.equal(serialized.version, PROJECT_SCHEMA_VERSION);
+  assert.equal(serialized.config.overlays[0].imageBlobKey, 'overlay-ov-original');
+  assert.equal(serialized.config.overlays[1].imageBlobKey, 'overlay-ov-original');
+  assert.equal(serialized.config.overlays[2].imageBlobKey, undefined);
+  assert.equal(serialized.config.overlays[0].imageElement, undefined);
+
+  assert.equal(resolveDonateUrl(), DONATE_URL);
+  assert.equal(resolveDonateUrl(), 'https://paypal.me/GoodProject');
+  assert.equal(resolveGitHubUrl(), 'https://github.com');
+});
+
+test('getDefaultBoundsForAutoClipRhythm unlocks 1-beat and 2-beat pacing and caps no-audio auto-clip spans cleanly', () => {
+  const b1 = getDefaultBoundsForAutoClipRhythm('beats_1');
+  const b2 = getDefaultBoundsForAutoClipRhythm('beats_2');
+  const bSmooth = getDefaultBoundsForAutoClipRhythm('smooth');
+  assert.ok(b1.minClipSec <= 0.5 && b1.maxClipSec <= 2.0);
+  assert.ok(b2.minClipSec <= 1.0 && b2.maxClipSec <= 4.0);
+  assert.ok(bSmooth.minClipSec >= 4.0);
+
+  const items: MediaBinItem[] = [
+    {
+      id: 'v1',
+      kind: 'video',
+      fileName: 'clip1.mp4',
+      url: 'blob:v1',
+      width: 1920,
+      height: 1080,
+      videoDuration: 24,
+      defaultDurationSec: 24,
+    },
+    {
+      id: 'v2',
+      kind: 'video',
+      fileName: 'clip2.mp4',
+      url: 'blob:v2',
+      width: 1920,
+      height: 1080,
+      videoDuration: 24,
+      defaultDurationSec: 24,
+    },
+  ];
+  const beats = Array.from({ length: 48 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats };
+
+  const oneBeatPlan = generateAutoClipPlan(items, grid, [], 0, 24, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_1',
+    minClipSec: b1.minClipSec,
+    maxClipSec: b1.maxClipSec,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+  assert.ok(oneBeatPlan.length >= 24, `Expected fast 1-beat cuts, got ${oneBeatPlan.length}`);
+  assert.ok(
+    oneBeatPlan.slice(0, -1).every((p) => p.durationSec <= 1.1),
+    '1-beat cuts must stay compact under ~1s'
+  );
+
+  const noAudioPlan = generateAutoClipPlan(items, { bpm: 120, beatSec: 0.5, beats: [] }, [], 0, 3600, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    hasAudio: false,
+    fillToTargetEnd: false,
+  });
+  assert.ok(noAudioPlan.length >= 2);
+  const noAudioEnd = noAudioPlan[noAudioPlan.length - 1].startSec + noAudioPlan[noAudioPlan.length - 1].durationSec;
+  assert.ok(noAudioEnd <= 45, `Expected no-audio plan bounded by usable footage span, got ${noAudioEnd}s`);
+});
+
+

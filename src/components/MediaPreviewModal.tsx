@@ -368,16 +368,7 @@ export function MediaPreviewModal({
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        const nextOut = Number(
-                          Math.max(
-                            Math.min(maxVideoDur, sourceStart + 0.4),
-                            Math.min(maxVideoDur, previewTime)
-                          ).toFixed(2)
-                        );
-                        setSourceEnd(nextOut);
-                        setDur(Number(Math.max(0.4, nextOut - sourceStart).toFixed(1)));
-                      }}
+                      onClick={() => applySourceEnd(previewTime, false)}
                       className="px-2 py-1 rounded border border-cyan-500/50 bg-cyan-500/10 hover:bg-cyan-500/20 text-[11px] font-medium text-cyan-200 cursor-pointer"
                     >
                       {t.previewSetRangeEndBtn} ({previewTime.toFixed(1)}s)

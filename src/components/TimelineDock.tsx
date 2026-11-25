@@ -28,6 +28,7 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { tFor } from '../i18n';
+import { NumericDraftInput } from './common/NumericDraftInput';
 import {
   AudioTrackState,
   BeatSyncMode,
@@ -1157,17 +1158,14 @@ export function TimelineDock({
                   >
                     <Minus className="w-3 h-3" />
                   </button>
-                  <input
-                    type="number"
+                  <NumericDraftInput
+                    value={selectedClip.durationSec}
                     min={0.5}
                     max={120}
                     step={0.5}
-                    value={Number(selectedClip.durationSec.toFixed(1))}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!Number.isNaN(val)) setClipDuration(selectedClip.id, val);
-                    }}
-                    aria-label={t.clipDurationLabel}
+                    decimals={1}
+                    onCommit={(val) => setClipDuration(selectedClip.id, val)}
+                    ariaLabel={t.clipDurationLabel}
                     className="w-11 bg-[#0B0D11] border border-[#262B38] focus:border-amber-500 rounded px-1 py-0.5 text-center text-[11px] font-mono tabular-nums text-amber-300 focus:outline-none"
                   />
                   <span className="text-[10px] font-mono text-gray-500">s</span>

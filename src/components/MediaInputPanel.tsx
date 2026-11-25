@@ -47,6 +47,7 @@ import {
   AutoClipTargetMode,
   AutoClipTransitionStyle,
   DEFAULT_AUTO_CLIP_CONFIG,
+  getDefaultBoundsForAutoClipRhythm,
   getNormalizedManualClipIntervals,
   getTimelineSpanSec,
 } from '../utils/audioAnalyzer';
@@ -64,6 +65,7 @@ interface MediaInputPanelProps {
   config: StudioConfig;
   isLoadingAudio: boolean;
   onAudioFile: (file: File) => void;
+  onRemoveAudio: () => void;
   onLoadDemoBeat: () => void;
   onVisualFiles: (files: File[]) => void;
   onAddBinItemToTimeline: (
@@ -126,6 +128,7 @@ export function MediaInputPanel({
   config,
   isLoadingAudio,
   onAudioFile,
+  onRemoveAudio,
   onLoadDemoBeat,
   onVisualFiles,
   onAddBinItemToTimeline,
@@ -215,10 +218,14 @@ export function MediaInputPanel({
         return t.autoPresetCinemaFlow;
       case 'dynamic_drop':
         return t.autoPresetDynamicDrop;
+      case 'cinema_trailer':
+        return t.autoPresetCinemaTrailer;
       case 'story_order':
         return t.autoPresetStoryOrder;
       case 'remix_shuffle':
         return t.autoPresetRemixShuffle;
+      case 'slow_dream':
+        return t.autoPresetSlowDream;
       case 'beat_flash':
         return t.autoPresetBeatFlash;
     }
@@ -397,13 +404,24 @@ export function MediaInputPanel({
                   <span>{t.audioSectionTitle}</span>
                 </h2>
                 {audio && (
-                  <button
-                    type="button"
-                    onClick={() => audioInputRef.current?.click()}
-                    className="text-[11px] font-medium text-amber-400 hover:text-amber-300 transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    {t.replaceAudio}
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => audioInputRef.current?.click()}
+                      className="text-[11px] font-medium text-amber-400 hover:text-amber-300 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {t.replaceAudio}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onRemoveAudio}
+                      title={t.removeAudio}
+                      aria-label={t.removeAudio}
+                      className="p-1 rounded text-gray-400 hover:text-rose-400 transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1024,7 +1042,7 @@ export function MediaInputPanel({
                       <span className="text-[9.5px] uppercase tracking-wider text-gray-500 font-medium block">
                         {t.autoClipPresetsLabel}
                       </span>
-                      <div className="grid grid-cols-3 gap-1">
+                      <div className="grid grid-cols-4 gap-1">
                         {AUTO_CLIP_PRESETS.map((preset) => (
                           <button
                             key={preset.id}
@@ -1104,13 +1122,16 @@ export function MediaInputPanel({
                         <button
                           key={r.id}
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
+                            const nextBounds = getDefaultBoundsForAutoClipRhythm(r.id);
                             setAutoClipCfg((prev) => ({
                               ...prev,
                               rhythm: r.id,
+                              minClipSec: nextBounds.minClipSec,
+                              maxClipSec: nextBounds.maxClipSec,
                               presetId: undefined,
-                            }))
-                          }
+                            }));
+                          }}
                           className={`py-1 px-0.5 rounded border text-[9.5px] font-medium cursor-pointer truncate ${
                             autoClipCfg.rhythm === r.id
                               ? 'border-cyan-500/80 bg-cyan-500/15 text-cyan-200'
@@ -1553,14 +1574,13 @@ export function MediaInputPanel({
                         </button>
                       </div>
                       <div className="flex items-center gap-1.5 text-[10px] font-mono tabular-nums text-amber-400/90">
-                        <input
-                          type="number"
+                        <NumericDraftInput
+                          value={cue.startSec}
                           min={0}
                           max={3600}
                           step={0.1}
-                          value={Number(cue.startSec.toFixed(2))}
-                          onChange={(e) => {
-                            const nextStart = Math.max(0, Number(e.target.value) || 0);
+                          decimals={2}
+                          onCommit={(nextStart) => {
                             const nextEnd = Math.max(nextStart + 0.2, cue.endSec);
                             onUpdateSubtitleCue(cue.id, {
                               startSec: Number(nextStart.toFixed(2)),
@@ -1570,16 +1590,16 @@ export function MediaInputPanel({
                           className="w-14 rounded bg-[#0E1016] border border-[#262B38] px-1 py-0.5 text-amber-300"
                         />
                         <span className="text-gray-500">→</span>
-                        <input
-                          type="number"
-                          min={0.2}
+                        <NumericDraftInput
+                          value={cue.endSec}
+                          min={Number((cue.startSec + 0.2).toFixed(2))}
                           max={3600}
                           step={0.1}
-                          value={Number(cue.endSec.toFixed(2))}
-                          onChange={(e) => {
-                            const nextEnd = Math.max(cue.startSec + 0.2, Number(e.target.value) || 0.2);
+                          decimals={2}
+                          onCommit={(nextEnd) => {
+                            const clampedEnd = Math.max(cue.startSec + 0.2, nextEnd);
                             onUpdateSubtitleCue(cue.id, {
-                              endSec: Number(nextEnd.toFixed(2)),
+                              endSec: Number(clampedEnd.toFixed(2)),
                             });
                           }}
                           className="w-14 rounded bg-[#0E1016] border border-[#262B38] px-1 py-0.5 text-amber-300"
@@ -1672,6 +1692,10 @@ export function MediaInputPanel({
                         const copy: OverlayLayer = {
                           ...ov,
                           id: `ov-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+                          imageBlobKey:
+                            ov.kind === 'image'
+                              ? ov.imageBlobKey || `overlay-${ov.id}`
+                              : ov.imageBlobKey,
                           xPct: Math.min(0.92, ov.xPct + 0.04),
                           yPct: Math.min(0.92, ov.yPct + 0.04),
                         };
@@ -1764,23 +1788,16 @@ export function MediaInputPanel({
                   <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[#262B38]/60">
                     <label className="space-y-0.5 block">
                       <span className="text-[10px] text-gray-400">{t.overlayStartSecLabel}</span>
-                      <input
-                        type="number"
+                      <NumericDraftInput
+                        value={ov.startSec}
                         min={0}
                         max={600}
                         step={0.2}
+                        decimals={1}
+                        allowEmpty
                         placeholder="0"
-                        value={ov.startSec ?? ''}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          if (raw === '') {
-                            onUpdateOverlay(ov.id, { startSec: undefined });
-                          } else {
-                            onUpdateOverlay(ov.id, {
-                              startSec: Math.max(0, Number(raw) || 0),
-                            });
-                          }
-                        }}
+                        onCommitEmpty={() => onUpdateOverlay(ov.id, { startSec: undefined })}
+                        onCommit={(val) => onUpdateOverlay(ov.id, { startSec: Math.max(0, val) })}
                         className="w-full rounded bg-[#0E1016] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono tabular-nums text-gray-200"
                       />
                     </label>
@@ -1788,22 +1805,22 @@ export function MediaInputPanel({
                       <span className="text-[10px] text-gray-400">
                         {t.overlayDurSecLabel}
                       </span>
-                      <input
-                        type="number"
+                      <NumericDraftInput
+                        value={ov.durationSec}
                         min={0}
                         max={600}
                         step={0.2}
+                        decimals={1}
+                        allowEmpty
                         placeholder={t.overlayWholeVideoHint}
-                        value={ov.durationSec ?? ''}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          const num = Number(raw);
-                          if (raw === '' || Number.isNaN(num) || num <= 0) {
+                        onCommitEmpty={() => onUpdateOverlay(ov.id, { durationSec: undefined })}
+                        onCommit={(val) => {
+                          if (val <= 0) {
                             onUpdateOverlay(ov.id, { durationSec: undefined });
                           } else {
                             onUpdateOverlay(ov.id, {
                               startSec: ov.startSec ?? 0,
-                              durationSec: Math.max(0.4, num),
+                              durationSec: Math.max(0.4, val),
                             });
                           }
                         }}
@@ -2102,64 +2119,70 @@ export function MediaInputPanel({
                   <Scissors className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
                   <span>{t.trimSectionTitle}</span>
                 </h2>
-                <span className="text-[11px] font-mono tabular-nums text-gray-400">
-                  {formatSec(Math.max(0, config.trimEnd - config.trimStart))}
-                </span>
+                {audio && (
+                  <span className="text-[11px] font-mono tabular-nums text-gray-400">
+                    {formatSec(Math.max(0, config.trimEnd - config.trimStart))}
+                  </span>
+                )}
               </div>
 
-              <div className="grid grid-cols-3 gap-1">
-                {trimPresets.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => onSelectTrimPreset(p.id)}
-                    className={`px-2 py-1 rounded-md text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap truncate ${
-                      config.trimPreset === p.id
-                        ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
-                        : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
-                    }`}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
+              {audio && (
+                <>
+                  <div className="grid grid-cols-3 gap-1">
+                    {trimPresets.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => onSelectTrimPreset(p.id)}
+                        className={`px-2 py-1 rounded-md text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap truncate ${
+                          config.trimPreset === p.id
+                            ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                            : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
 
-              <div className="grid grid-cols-2 gap-2.5 pt-1">
-                <label className="block space-y-1">
-                  <span className="text-[11px] text-gray-400 block">{t.trimStartLabel}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={Math.max(0, config.trimEnd - 1)}
-                    step={0.5}
-                    value={Number(config.trimStart.toFixed(1))}
-                    onChange={(e) => {
-                      const val = Math.max(
-                        0,
-                        Math.min(config.trimEnd - 1, Number(e.target.value) || 0)
-                      );
-                      onUpdateConfig({ trimStart: val, trimPreset: 'custom' });
-                    }}
-                    className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100 focus:border-amber-500 focus:outline-none"
-                  />
-                </label>
-                <label className="block space-y-1">
-                  <span className="text-[11px] text-gray-400 block">{t.trimEndLabel}</span>
-                  <input
-                    type="number"
-                    min={config.trimStart + 1}
-                    max={maxDur}
-                    step={0.5}
-                    value={Number(config.trimEnd.toFixed(1))}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value) || maxDur;
-                      const val = Math.max(config.trimStart + 1, Math.min(maxDur, raw));
-                      onUpdateConfig({ trimEnd: val, trimPreset: 'custom' });
-                    }}
-                    className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100 focus:border-amber-500 focus:outline-none"
-                  />
-                </label>
-              </div>
+                  <div className="grid grid-cols-2 gap-2.5 pt-1">
+                    <label className="block space-y-1">
+                      <span className="text-[11px] text-gray-400 block">{t.trimStartLabel}</span>
+                      <NumericDraftInput
+                        value={config.trimStart}
+                        min={0}
+                        max={Math.max(0, config.trimEnd - 1)}
+                        step={0.5}
+                        decimals={1}
+                        onCommit={(val) =>
+                          onUpdateConfig({
+                            trimStart: Math.max(0, Math.min(config.trimEnd - 1, val)),
+                            trimPreset: 'custom',
+                          })
+                        }
+                        className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100 focus:border-amber-500 focus:outline-none"
+                      />
+                    </label>
+                    <label className="block space-y-1">
+                      <span className="text-[11px] text-gray-400 block">{t.trimEndLabel}</span>
+                      <NumericDraftInput
+                        value={config.trimEnd}
+                        min={Math.min(maxDur, config.trimStart + 1)}
+                        max={maxDur}
+                        step={0.5}
+                        decimals={1}
+                        onCommit={(val) =>
+                          onUpdateConfig({
+                            trimEnd: Math.max(config.trimStart + 1, Math.min(maxDur, val)),
+                            trimPreset: 'custom',
+                          })
+                        }
+                        className="w-full rounded-md bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100 focus:border-amber-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                </>
+              )}
 
               <div className="space-y-2">
                 <div className="space-y-1">
@@ -2227,6 +2250,7 @@ export function MediaInputPanel({
 
       {previewAsset && (
         <MediaPreviewModal
+          key={previewAsset.id}
           lang={lang}
           asset={previewAsset}
           placedCount={(timelineClipsByUrl.get(previewAsset.url) || []).length}

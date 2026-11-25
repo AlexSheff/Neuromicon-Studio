@@ -113,6 +113,7 @@ interface HistorySnapshot {
   mediaBin: MediaBinItem[];
   mediaItems: VisualMediaState[];
   selectedClipId: string | null;
+  selectedClipIds: string[];
   selectedFxId: string | null;
 }
 
@@ -139,6 +140,7 @@ function cloneSnapshot(
   mediaBin: MediaBinItem[],
   mediaItems: VisualMediaState[],
   selectedClipId: string | null,
+  selectedClipIds: string[],
   selectedFxId: string | null
 ): HistorySnapshot {
   return {
@@ -165,6 +167,7 @@ function cloneSnapshot(
         : undefined,
     })),
     selectedClipId,
+    selectedClipIds: [...selectedClipIds],
     selectedFxId,
   };
 }
@@ -376,6 +379,7 @@ export default function App() {
         mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
+        selectedClipIdsRef.current,
         selectedFxIdRef.current
       )
     );
@@ -393,6 +397,7 @@ export default function App() {
         mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
+        selectedClipIdsRef.current,
         selectedFxIdRef.current
       );
     }
@@ -430,6 +435,7 @@ export default function App() {
         mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
+        selectedClipIdsRef.current,
         selectedFxIdRef.current
       )
     );
@@ -437,6 +443,7 @@ export default function App() {
     setMediaBin(prev.mediaBin);
     setMediaItems(prev.mediaItems);
     setSelectedClipId(prev.selectedClipId);
+    setSelectedClipIds(prev.selectedClipIds);
     setSelectedFxId(prev.selectedFxId);
     syncHistoryFlags();
   }, [syncHistoryFlags]);
@@ -450,6 +457,7 @@ export default function App() {
         mediaBinRef.current,
         mediaItemsRef.current,
         selectedClipIdRef.current,
+        selectedClipIdsRef.current,
         selectedFxIdRef.current
       )
     );
@@ -457,6 +465,7 @@ export default function App() {
     setMediaBin(next.mediaBin);
     setMediaItems(next.mediaItems);
     setSelectedClipId(next.selectedClipId);
+    setSelectedClipIds(next.selectedClipIds);
     setSelectedFxId(next.selectedFxId);
     syncHistoryFlags();
   }, [syncHistoryFlags]);
@@ -1450,6 +1459,31 @@ export default function App() {
   const applyAudioBufferRef = useRef(applyAudioBuffer);
   applyAudioBufferRef.current = applyAudioBuffer;
 
+  const handleRemoveAudio = useCallback(() => {
+    stopPlayback();
+    const prevCover = audioRef.current?.metadata.embeddedCoverUrl;
+    if (
+      prevCover &&
+      prevCover.startsWith('blob:') &&
+      !mediaItemsRef.current.some((m) => m.url === prevCover) &&
+      !mediaBinRef.current.some((b) => b.url === prevCover)
+    ) {
+      URL.revokeObjectURL(prevCover);
+    }
+    pushImmediateHistory();
+    audioBlobKeyRef.current = undefined;
+    monoDataRef.current = new Float32Array(0);
+    setAudio(null);
+    setConfig((prev) => ({
+      ...prev,
+      trimStart: 0,
+      trimEnd: 60,
+      trimPreset: 'full',
+    }));
+    currentTimeRef.current = 0;
+    setCurrentTime(0);
+  }, [pushImmediateHistory, stopPlayback]);
+
   // Restore autosaved project from IndexedDB strictly once on initial mount
   useEffect(() => {
     let cancelled = false;
@@ -1478,13 +1512,19 @@ export default function App() {
         const restoredOverlays: OverlayLayer[] = [];
         for (const ov of saved.config.overlays || []) {
           if (ov.kind === 'image') {
-            const blob = await loadBlobFromIDB(`overlay-${ov.id}`);
+            const blobKey = ov.imageBlobKey || `overlay-${ov.id}`;
+            const blob = await loadBlobFromIDB(blobKey);
             if (blob) {
               const url = URL.createObjectURL(blob);
-              blobKeyMapRef.current.set(url, `overlay-${ov.id}`);
+              blobKeyMapRef.current.set(url, blobKey);
               const img = new Image();
               img.src = url;
-              restoredOverlays.push({ ...ov, imageUrl: url, imageElement: img });
+              restoredOverlays.push({
+                ...ov,
+                imageUrl: url,
+                imageBlobKey: blobKey,
+                imageElement: img,
+              });
             }
           } else {
             restoredOverlays.push({ ...ov });
@@ -1874,7 +1914,13 @@ export default function App() {
             if (key) activeKeys.add(key);
           }
           for (const ov of config.overlays) {
-            if (ov.kind === 'image') activeKeys.add(`overlay-${ov.id}`);
+            if (ov.kind === 'image') {
+              const key =
+                (ov.imageUrl ? blobKeyMapRef.current.get(ov.imageUrl) : undefined) ||
+                ov.imageBlobKey ||
+                `overlay-${ov.id}`;
+              activeKeys.add(key);
+            }
           }
           await pruneOrphanedBlobs(activeKeys);
           setSaveStatus('saved');
@@ -3171,12 +3217,25 @@ export default function App() {
           const baseTransform = clip.transform || DEFAULT_CLIP_TRANSFORM;
           const clipStart = Number(cursor.toFixed(2));
           cursor += clippedDur;
+          const nextTransitionOut = applyMotionAndTrans
+            ? p.suggestedTransition
+            : clip.transitionOut;
+          const nextTransitionDur = applyMotionAndTrans
+            ? p.transitionDurationSec
+            : nextTransitionOut === 'cut'
+              ? 0
+              : Number(
+                  Math.max(
+                    0.14,
+                    Math.min(clip.transitionDurationSec || 0.45, Math.max(0.14, clippedDur * 0.85))
+                  ).toFixed(2)
+                );
           updated.push({
             ...clip,
             startSec: clipStart,
             durationSec: clippedDur,
-            transitionDurationSec: p.transitionDurationSec,
-            transitionOut: applyMotionAndTrans ? p.suggestedTransition : clip.transitionOut,
+            transitionDurationSec: nextTransitionDur,
+            transitionOut: nextTransitionOut,
             clipAudioMuted: true,
             clipAudioVolume: 0,
             transform: applyMotionAndTrans
@@ -3862,6 +3921,7 @@ export default function App() {
           kind: 'image',
           label: file.name,
           imageUrl: url,
+          imageBlobKey: `overlay-${ovId}`,
           imageElement: img,
           xPct: 0.86,
           yPct: 0.12,
@@ -3871,6 +3931,7 @@ export default function App() {
         setConfig((prev) => ({ ...prev, overlays: [...prev.overlays, layer] }));
       };
       img.onerror = () => {
+        blobKeyMapRef.current.delete(url);
         URL.revokeObjectURL(url);
         showError(`${tFor(lang).errInvalidVisual}: ${file.name}`);
       };
@@ -3933,16 +3994,18 @@ export default function App() {
         if (!parsed || typeof parsed !== 'object' || !parsed.config) {
           throw new Error('Invalid project JSON');
         }
+        stopPlayback();
         pushImmediateHistory();
         let missingBinaryMedia = false;
 
         const restoredOverlays: OverlayLayer[] = [];
         for (const ov of parsed.config.overlays || []) {
           if (ov.kind === 'image') {
-            const blob = await loadBlobFromIDB(`overlay-${ov.id}`);
+            const blobKey = ov.imageBlobKey || `overlay-${ov.id}`;
+            const blob = await loadBlobFromIDB(blobKey);
             if (blob) {
               const url = URL.createObjectURL(blob);
-              blobKeyMapRef.current.set(url, `overlay-${ov.id}`);
+              blobKeyMapRef.current.set(url, blobKey);
               const img = await new Promise<HTMLImageElement | null>((resolve) => {
                 const el = new Image();
                 el.onload = () => resolve(el);
@@ -3950,8 +4013,14 @@ export default function App() {
                 el.src = url;
               });
               if (img) {
-                restoredOverlays.push({ ...ov, imageUrl: url, imageElement: img });
+                restoredOverlays.push({
+                  ...ov,
+                  imageUrl: url,
+                  imageBlobKey: blobKey,
+                  imageElement: img,
+                });
               } else {
+                blobKeyMapRef.current.delete(url);
                 URL.revokeObjectURL(url);
                 missingBinaryMedia = true;
               }
@@ -3983,7 +4052,24 @@ export default function App() {
           setGlslError(res.error);
         }
 
-        // Rehydrate audio track if demo or matching local IDB blob exists
+        // Rehydrate audio track if demo or matching local IDB blob exists; otherwise clear stale audio
+        const clearPreviousAudio = () => {
+          const prevCover = audioRef.current?.metadata.embeddedCoverUrl;
+          if (
+            prevCover &&
+            prevCover.startsWith('blob:') &&
+            !mediaItemsRef.current.some((m) => m.url === prevCover) &&
+            !mediaBinRef.current.some((b) => b.url === prevCover)
+          ) {
+            URL.revokeObjectURL(prevCover);
+          }
+          audioBlobKeyRef.current = undefined;
+          monoDataRef.current = new Float32Array(0);
+          setAudio(null);
+          currentTimeRef.current = 0;
+          setCurrentTime(0);
+        };
+
         if (parsed.audioMeta) {
           if (parsed.audioMeta.isSyntheticDemo) {
             const demoBuf = await generateDemoAudioBuffer();
@@ -4025,14 +4111,19 @@ export default function App() {
                   true
                 );
               } catch {
+                clearPreviousAudio();
                 missingBinaryMedia = true;
               }
             } else {
+              clearPreviousAudio();
               missingBinaryMedia = true;
             }
           } else {
+            clearPreviousAudio();
             missingBinaryMedia = true;
           }
+        } else {
+          clearPreviousAudio();
         }
 
         // Restore Media Library + generator/image/video clips whose IDB blobs exist locally
@@ -4293,9 +4384,11 @@ export default function App() {
           }
           setMediaItems(finalClips);
           setSelectedClipId(finalClips[0].id);
+          setSelectedClipIds([finalClips[0].id]);
         } else {
           setMediaItems([]);
           setSelectedClipId(null);
+          setSelectedClipIds([]);
         }
         if (missingBinaryMedia) {
           showError(tFor(langRef.current).noticeJsonPartialRestore);
@@ -4304,7 +4397,7 @@ export default function App() {
         showError(err instanceof Error ? err.message : tFor(langRef.current).errUnsupportedFile);
       }
     },
-    [applyAudioBuffer, getAudioContext, pushImmediateHistory, showError]
+    [applyAudioBuffer, getAudioContext, pushImmediateHistory, showError, stopPlayback]
   );
 
   const handleResetAutosave = useCallback(async () => {
@@ -5231,6 +5324,7 @@ export default function App() {
               isLoadingAudio={isLoadingAudio}
               widthPx={leftWidth}
               onAudioFile={handleAudioFile}
+              onRemoveAudio={handleRemoveAudio}
               onLoadDemoBeat={handleLoadDemoBeat}
               onVisualFiles={handleVisualFiles}
               onAddBinItemToTimeline={handleAddBinItemToTimeline}

@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import React, { useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { DONATE_URL, resolveGitHubUrl } from '../config/links';
+import { resolveDonateUrl, resolveGitHubUrl } from '../config/links';
 import { tFor } from '../i18n';
 import { InspectorTab, Language } from '../types/studio';
 
@@ -63,6 +63,7 @@ export function TopBar({
   const jsonInputRef = useRef<HTMLInputElement>(null);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   const githubUrl = useMemo(() => resolveGitHubUrl(), []);
+  const donateUrl = useMemo(() => resolveDonateUrl(), []);
 
   const navTabs: { id: InspectorTab; label: string }[] = [
     { id: 'clip', label: t.tabClip },
@@ -238,7 +239,7 @@ export function TopBar({
         </a>
 
         <a
-          href={DONATE_URL}
+          href={donateUrl}
           target="_blank"
           rel="noopener noreferrer"
           title={t.donateLinkTitle}

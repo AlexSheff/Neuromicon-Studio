@@ -272,6 +272,12 @@ export function serializeStudioState(
 ): SerializedProject {
   const cleanOverlays = config.overlays.map((ov) => ({
     ...ov,
+    imageBlobKey:
+      ov.kind === 'image'
+        ? (ov.imageUrl ? blobKeyMap.get(ov.imageUrl) : undefined) ||
+          ov.imageBlobKey ||
+          `overlay-${ov.id}`
+        : ov.imageBlobKey,
     imageElement: undefined,
   }));
 

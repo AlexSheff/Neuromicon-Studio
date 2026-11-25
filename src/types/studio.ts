@@ -77,7 +77,15 @@ export type SlideTransitionType =
 
 export type MediaColorFilter = 'none' | 'bw' | 'warm_film' | 'cool_noir' | 'high_contrast';
 
-export type LutPresetId = 'none' | 'teal_orange' | 'cyber_magenta' | 'vintage_gold' | 'deep_ocean';
+export type LutPresetId =
+  | 'none'
+  | 'teal_orange'
+  | 'cyber_magenta'
+  | 'vintage_gold'
+  | 'deep_ocean'
+  | 'bleach_bypass'
+  | 'crimson_noir'
+  | 'sunset_amber';
 
 export type TrimPresetId = 'full' | 'reels_60' | 'tiktok_60' | 'shorts_57' | 'custom';
 
@@ -149,6 +157,7 @@ export interface OverlayLayer {
   label: string;
   text?: string;
   imageUrl?: string;
+  imageBlobKey?: string;
   imageElement?: HTMLImageElement;
   xPct: number; // 0.05 .. 0.95
   yPct: number; // 0.05 .. 0.95

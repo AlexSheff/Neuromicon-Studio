@@ -692,6 +692,36 @@ function drawLutAndGlitch(
       ctx.globalCompositeOperation = 'overlay';
       ctx.fillStyle = 'rgba(15, 76, 129, 0.32)';
       ctx.fillRect(0, 0, width, height);
+    } else if (lutPreset === 'bleach_bypass') {
+      ctx.globalCompositeOperation = 'saturation';
+      ctx.fillStyle = 'rgba(128, 128, 128, 0.42)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.globalCompositeOperation = 'soft-light';
+      const g = ctx.createLinearGradient(0, 0, 0, height);
+      g.addColorStop(0, 'rgba(203, 213, 225, 0.24)');
+      g.addColorStop(1, 'rgba(15, 23, 42, 0.36)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
+    } else if (lutPreset === 'crimson_noir') {
+      ctx.globalCompositeOperation = 'overlay';
+      const g = ctx.createLinearGradient(0, 0, width, height);
+      g.addColorStop(0, 'rgba(190, 18, 60, 0.30)');
+      g.addColorStop(1, 'rgba(17, 12, 24, 0.44)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
+    } else if (lutPreset === 'sunset_amber') {
+      ctx.globalCompositeOperation = 'screen';
+      const flare = ctx.createRadialGradient(width * 0.18, height * 0.15, 0, width * 0.25, height * 0.2, Math.max(width, height) * 0.7);
+      flare.addColorStop(0, 'rgba(251, 146, 60, 0.22)');
+      flare.addColorStop(1, 'rgba(251, 146, 60, 0)');
+      ctx.fillStyle = flare;
+      ctx.fillRect(0, 0, width, height);
+      ctx.globalCompositeOperation = 'soft-light';
+      const g = ctx.createLinearGradient(0, 0, width, height);
+      g.addColorStop(0, 'rgba(245, 158, 11, 0.28)');
+      g.addColorStop(1, 'rgba(124, 45, 18, 0.28)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
     }
     ctx.restore();
   }
