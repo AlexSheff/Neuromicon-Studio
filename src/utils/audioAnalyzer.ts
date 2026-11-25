@@ -448,7 +448,8 @@ export function clampManualClipMove(
   desiredStartSec: number,
   maxTimelineSec = 3600,
   beatSnapPoints: number[] = [],
-  snapEnabled = false
+  snapEnabled = false,
+  allowMagneticSnap = true
 ): number {
   const target = mediaItems.find((m) => m.id === movingClipId);
   if (!target) return Math.max(0, desiredStartSec);
@@ -488,7 +489,7 @@ export function clampManualClipMove(
   const combinedSnaps = snapEnabled
     ? [...beatSnapPoints, ...edgeSnapPoints]
     : edgeSnapPoints;
-  if (combinedSnaps.length > 0) {
+  if (allowMagneticSnap && combinedSnaps.length > 0) {
     const thresh = snapEnabled ? 0.22 : 0.12;
     const snappedLeft = snapTimeToBeat(nextStart, combinedSnaps, thresh);
     const snappedRight = snapTimeToBeat(nextStart + clipDur, combinedSnaps, thresh) - clipDur;
@@ -674,13 +675,13 @@ export function dropBinItemIntoManualGap(
   desiredDurSec: number,
   maxTimelineSec = 3600
 ): { startSec: number; durationSec: number; filledGap: boolean } {
-  const dur = Math.max(0.4, desiredDurSec || 4);
+  const dur = Math.max(0.25, desiredDurSec || 4);
   const others = getNormalizedManualClipIntervals(mediaItems);
   if (others.length === 0) {
-    const start = Math.max(0, Math.min(Math.max(0, maxTimelineSec - 0.4), desiredStartSec));
+    const start = Math.max(0, Math.min(Math.max(0, maxTimelineSec - 0.25), desiredStartSec));
     return {
       startSec: Number(start.toFixed(2)),
-      durationSec: Number(Math.min(dur, Math.max(0.4, maxTimelineSec - start)).toFixed(2)),
+      durationSec: Number(Math.min(dur, Math.max(0.25, maxTimelineSec - start)).toFixed(2)),
       filledGap: false,
     };
   }
@@ -701,20 +702,29 @@ export function dropBinItemIntoManualGap(
     gaps.push({ start: cursor, end: maxTimelineSec, boundedRight: false });
   }
 
-  const clampedDesired = Math.max(0, Math.min(Math.max(0, maxTimelineSec - 0.4), desiredStartSec));
-  const targetGap = gaps.find(
-    (g) => clampedDesired >= g.start - 0.04 && clampedDesired <= g.end + 0.04 && g.end - g.start >= 0.4
+  const clampedDesired = Math.max(0, Math.min(Math.max(0, maxTimelineSec - 0.25), desiredStartSec));
+  const boundedMatch = gaps.find(
+    (g) =>
+      g.boundedRight &&
+      clampedDesired >= g.start - 0.06 &&
+      clampedDesired <= g.end + 0.06 &&
+      g.end - g.start >= 0.25
   );
+  const targetGap =
+    boundedMatch ||
+    gaps.find(
+      (g) => clampedDesired >= g.start - 0.04 && clampedDesired <= g.end + 0.04 && g.end - g.start >= 0.25
+    );
 
   if (targetGap) {
     const gapLen = Number((targetGap.end - targetGap.start).toFixed(2));
     if (targetGap.boundedRight) {
-      // Bounded gap between existing clips: never overflow neighbor clips; fill edge-to-edge when
+      // Bounded gap between existing clips: never overflow neighbor clips; trim to gap width when
       // clip length >= gap, or place custom shorter duration inside the gap cleanly.
       if (dur >= gapLen - 0.05) {
         return {
           startSec: Number(targetGap.start.toFixed(2)),
-          durationSec: Math.max(0.4, gapLen),
+          durationSec: Math.max(0.25, gapLen),
           filledGap: true,
         };
       }
@@ -724,14 +734,14 @@ export function dropBinItemIntoManualGap(
       );
       return {
         startSec: Number(start.toFixed(2)),
-        durationSec: Number(Math.max(0.4, Math.min(dur, targetGap.end - start)).toFixed(2)),
+        durationSec: Number(Math.max(0.25, Math.min(dur, targetGap.end - start)).toFixed(2)),
         filledGap: true,
       };
     }
-    const start = Math.max(targetGap.start, Math.min(targetGap.end - 0.4, clampedDesired));
+    const start = Math.max(targetGap.start, Math.min(targetGap.end - 0.25, clampedDesired));
     return {
       startSec: Number(start.toFixed(2)),
-      durationSec: Number(Math.max(0.4, Math.min(dur, targetGap.end - start)).toFixed(2)),
+      durationSec: Number(Math.max(0.25, Math.min(dur, targetGap.end - start)).toFixed(2)),
       filledGap: false,
     };
   }

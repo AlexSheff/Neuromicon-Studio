@@ -68,7 +68,7 @@ interface TimelineDockProps {
   onInspectClip: (id: string) => void;
   onInspectFx: (id: string) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
-  onMoveClipPosition?: (clipId: string, rawStartSec: number) => void;
+  onMoveClipPosition?: (clipId: string, rawStartSec: number, disableSnap?: boolean) => void;
   onMoveClipGroup?: (clipIds: string[], rawTargetStartSec: number) => void;
   onCloseTimelineGap?: (gapStartSec: number, gapEndSec: number) => void;
   onCloseAllGaps?: (fitBeatsAndMusic?: boolean) => void;
@@ -1751,18 +1751,9 @@ export function TimelineDock({
                   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                   const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
                   const isManual = config.slideshowMode === 'manual';
-                  const overExisting =
-                    isManual &&
-                    clipSegments.some(
-                      (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
-                    );
-                  if (overExisting) {
-                    setClipDropPreview({ pct: playheadPct, anchoredToPlayhead: true });
-                    return;
-                  }
                   const gapHit = isManual
                     ? manualGaps.find(
-                        (g) => rawSec >= g.startSec - 0.04 && rawSec <= g.endSec + 0.04
+                        (g) => rawSec >= g.startSec - 0.06 && rawSec <= g.endSec + 0.06
                       )
                     : undefined;
                   if (gapHit) {
@@ -1773,6 +1764,15 @@ export function TimelineDock({
                       gapWidthPct: (gapHit.durSec / clipDuration) * 100,
                       gapDurSec: gapHit.durSec,
                     });
+                    return;
+                  }
+                  const overExisting =
+                    isManual &&
+                    clipSegments.some(
+                      (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
+                    );
+                  if (overExisting) {
+                    setClipDropPreview({ pct: playheadPct, anchoredToPlayhead: true });
                     return;
                   }
                   let snappedSec = rawSec;
@@ -1807,7 +1807,7 @@ export function TimelineDock({
                     const isManual = config.slideshowMode === 'manual';
                     const gapHit = isManual
                       ? manualGaps.find(
-                          (g) => rawSec >= g.startSec - 0.04 && rawSec <= g.endSec + 0.04
+                          (g) => rawSec >= g.startSec - 0.06 && rawSec <= g.endSec + 0.06
                         )
                       : undefined;
                     if (gapHit) {
@@ -1816,10 +1816,19 @@ export function TimelineDock({
                         Math.min(Math.max(gapHit.startSec, gapHit.endSec - 0.02), rawSec)
                       );
                     } else {
-                      finalSec =
-                        config.snapToBeats && relSnapPoints.length > 0
-                          ? Math.max(0, Number(snapTimeToBeat(rawSec, relSnapPoints, 0.22).toFixed(2)))
-                          : rawSec;
+                      const overExisting =
+                        isManual &&
+                        clipSegments.some(
+                          (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
+                        );
+                      if (overExisting) {
+                        finalSec = rawSec;
+                      } else {
+                        finalSec =
+                          config.snapToBeats && relSnapPoints.length > 0
+                            ? Math.max(0, Number(snapTimeToBeat(rawSec, relSnapPoints, 0.22).toFixed(2)))
+                            : rawSec;
+                      }
                     }
                   }
                   if (binId && onDropBinItemToTimeline) {
@@ -1877,21 +1886,9 @@ export function TimelineDock({
                       }
                       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
                       const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
-                      const overExisting =
-                        isManualMode &&
-                        clipSegments.some(
-                          (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
-                        );
-                      if (overExisting) {
-                        return {
-                          dropSec: rawSec,
-                          previewPct: playheadPct,
-                          anchoredToPlayhead: true,
-                        };
-                      }
                       const gapHit = isManualMode
                         ? manualGaps.find(
-                            (g) => rawSec >= g.startSec - 0.04 && rawSec <= g.endSec + 0.04
+                            (g) => rawSec >= g.startSec - 0.06 && rawSec <= g.endSec + 0.06
                           )
                         : undefined;
                       if (gapHit) {
@@ -1909,6 +1906,18 @@ export function TimelineDock({
                           gapStartPct: (gapHit.startSec / clipDuration) * 100,
                           gapWidthPct: (gapHit.durSec / clipDuration) * 100,
                           gapDurSec: gapHit.durSec,
+                        };
+                      }
+                      const overExisting =
+                        isManualMode &&
+                        clipSegments.some(
+                          (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
+                        );
+                      if (overExisting) {
+                        return {
+                          dropSec: rawSec,
+                          previewPct: playheadPct,
+                          anchoredToPlayhead: true,
                         };
                       }
                       let snappedSec = rawSec;

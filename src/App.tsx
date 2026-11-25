@@ -776,6 +776,20 @@ export default function App() {
         if (!seekRedrawHookedRef.current.has(v)) {
           seekRedrawHookedRef.current.add(v);
           const triggerPausedRedraw = () => {
+            const pending = pendingVideoSeekRef.current.get(v);
+            if (pending !== undefined) {
+              pendingVideoSeekRef.current.delete(v);
+              const safeDur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : vDur;
+              const clamped = Math.min(Math.max(0, safeDur - 0.04), Math.max(0, pending));
+              if (Math.abs(v.currentTime - clamped) > 0.04) {
+                try {
+                  v.currentTime = clamped;
+                  return;
+                } catch {
+                  // fall through to redraw
+                }
+              }
+            }
             if (!isPlayingRef.current) {
               drawOnceRef.current();
             }
@@ -786,7 +800,12 @@ export default function App() {
 
         const applySafeSeek = (sec: number) => {
           if (v.readyState >= 1) {
-            if (!v.seeking) v.currentTime = sec;
+            if (!v.seeking) {
+              pendingVideoSeekRef.current.delete(v);
+              v.currentTime = sec;
+            } else {
+              pendingVideoSeekRef.current.set(v, sec);
+            }
           } else {
             pendingVideoSeekRef.current.set(v, sec);
             if (!pendingSeekHookedRef.current.has(v)) {
@@ -1105,35 +1124,38 @@ export default function App() {
         }
 
         if (options?.atTimeSec !== undefined && options?.mode !== 'playhead') {
-          const dropSec = Math.max(0, Math.min(Math.max(0, maxTimeline - 0.4), options.atTimeSec));
-          // Strictly interior check so dropping into open gap adjacent to a clip edge fills only the gap
-          const overlapsExisting = intervals.some(
-            (iv) => dropSec > iv.startSec + 0.04 && dropSec < iv.endSec - 0.04
-          );
-          if (overlapsExisting) {
-            const newClip = buildClipFromBinItem(binItem, {
-              startSec: dropSec,
-              durationSec: defaultDur,
-            });
-            pushImmediateHistory();
-            setMediaItems((prev) =>
-              insertManualClipAtAnchor(prev, newClip, dropSec, maxTimeline)
+          const dropSec = Math.max(0, Math.min(Math.max(0, maxTimeline - 0.25), options.atTimeSec));
+          const gapCheck = dropBinItemIntoManualGap(items, dropSec, defaultDur, maxTimeline);
+          // Prioritize bounded empty gaps first so dropping anywhere inside/near a gap fills & trims cleanly
+          if (!gapCheck.filledGap) {
+            const overlapsExisting = intervals.some(
+              (iv) => dropSec > iv.startSec + 0.04 && dropSec < iv.endSec - 0.04
             );
-            setSelectedClipId(newClip.id);
-            setSelectedClipIds([newClip.id]);
-            setSelectedFxId(null);
-            return newClip.id;
+            if (overlapsExisting) {
+              const newClip = buildClipFromBinItem(binItem, {
+                startSec: dropSec,
+                durationSec: defaultDur,
+              });
+              pushImmediateHistory();
+              setMediaItems((prev) =>
+                insertManualClipAtAnchor(prev, newClip, dropSec, maxTimeline)
+              );
+              setSelectedClipId(newClip.id);
+              setSelectedClipIds([newClip.id]);
+              setSelectedFxId(null);
+              return newClip.id;
+            }
           }
 
           const beatPoints = trackBeatGridRef.current.beats;
-          const gapCheck = dropBinItemIntoManualGap(items, dropSec, defaultDur, maxTimeline);
           let placement = gapCheck;
           if (!gapCheck.filledGap && cfg.snapToBeats && beatPoints.length > 1) {
             const snappedStart = snapTimeToBeat(dropSec, [0, ...beatPoints], 0.25);
             placement = dropBinItemIntoManualGap(items, snappedStart, defaultDur, maxTimeline);
           }
 
-          if (hasAud && (placement.durationSec < 0.4 || placement.startSec >= maxTimeline - 0.4)) {
+          const minAllowed = placement.filledGap ? 0.25 : 0.4;
+          if (hasAud && (placement.durationSec < minAllowed || placement.startSec >= maxTimeline - minAllowed)) {
             showUndoToast(tFor(langRef.current).errTimelineFullMusic);
             return null;
           }
@@ -1168,7 +1190,17 @@ export default function App() {
         return newClip.id;
       }
 
-      const newClip = buildClipFromBinItem(binItem, { durationSec: defaultDur });
+      let resolvedNonManualDur = defaultDur;
+      if (options?.atTimeSec !== undefined && options?.mode !== 'playhead' && audioRef.current) {
+        const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+        const usedTotal = items.reduce((acc, m) => acc + Math.max(0.4, m.durationSec || 4), 0);
+        if (usedTotal < bounds.clipDuration - 0.35) {
+          resolvedNonManualDur = Number(
+            Math.max(0.25, Math.min(defaultDur, bounds.clipDuration - usedTotal)).toFixed(2)
+          );
+        }
+      }
+      const newClip = buildClipFromBinItem(binItem, { durationSec: resolvedNonManualDur });
       pushImmediateHistory();
       setMediaItems((prev) =>
         options?.mode === 'end'
@@ -1216,7 +1248,9 @@ export default function App() {
             defaultDurationSec: 4.0,
           };
           pushImmediateHistory();
-          setMediaBin((prev) => [...prev, newBinItem]);
+          const nextBinImg = [...mediaBinRef.current, newBinItem];
+          mediaBinRef.current = nextBinImg;
+          setMediaBin(nextBinImg);
           if (autoPlace) {
             setTimeout(() => {
               placeBinItemOnTimeline(newBinItem, autoPlace);
@@ -1262,7 +1296,9 @@ export default function App() {
             defaultDurationSec: Number(Math.max(0.5, Math.min(600, usableDur)).toFixed(1)),
           };
           pushImmediateHistory();
-          setMediaBin((prev) => [...prev, newBinItem]);
+          const nextBinVid = [...mediaBinRef.current, newBinItem];
+          mediaBinRef.current = nextBinVid;
+          setMediaBin(nextBinVid);
           if (autoPlace) {
             setTimeout(() => {
               placeBinItemOnTimeline(newBinItem, autoPlace);
@@ -2106,16 +2142,33 @@ export default function App() {
       const target = mediaBinRef.current.find((b) => b.id === binItemId);
       if (!target) return;
       pushImmediateHistory();
-      setMediaBin((prev) =>
-        prev.map((b) => (b.id === binItemId ? { ...b, ...patch } : b))
+      const updatedAsset: MediaBinItem = { ...target, ...patch };
+      const nextBin = mediaBinRef.current.map((b) =>
+        b.id === binItemId ? updatedAsset : b
       );
+      mediaBinRef.current = nextBin;
+      setMediaBin(nextBin);
       if (syncPlacedClips) {
         const cfg = configRef.current;
         const bounds = getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current);
         const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+        const safeRange = resolveSafeVideoSourceRange(updatedAsset, 0);
+        const requestedDur =
+          patch.defaultDurationSec !== undefined
+            ? target.kind === 'video' && updatedAsset.defaultSourceEndSec !== undefined
+              ? Math.min(patch.defaultDurationSec, safeRange.usableSpanSec)
+              : patch.defaultDurationSec
+            : undefined;
         setMediaItems((prev) => {
           let next = prev.map((clip) => {
             if (clip.url !== target.url) return clip;
+            const cappedClipDur =
+              target.kind === 'video' && updatedAsset.defaultSourceEndSec !== undefined
+                ? Math.min(
+                    requestedDur ?? clip.durationSec,
+                    safeRange.usableSpanSec
+                  )
+                : requestedDur ?? clip.durationSec;
             return {
               ...clip,
               sourceStartSec:
@@ -2132,17 +2185,35 @@ export default function App() {
                   ? patch.defaultClipAudioMuted
                   : clip.clipAudioMuted,
               durationSec:
-                cfg.slideshowMode !== 'manual' && patch.defaultDurationSec !== undefined
-                  ? patch.defaultDurationSec
+                cfg.slideshowMode !== 'manual'
+                  ? Number(Math.max(0.4, cappedClipDur).toFixed(1))
                   : clip.durationSec,
             };
           });
-          if (cfg.slideshowMode === 'manual' && patch.defaultDurationSec !== undefined) {
-            const matchingIds = next
-              .filter((c) => c.url === target.url)
-              .map((c) => c.id);
-            for (const cid of matchingIds) {
-              next = resizeManualClipDuration(next, cid, patch.defaultDurationSec, maxTimeline);
+          if (
+            cfg.slideshowMode === 'manual' &&
+            (requestedDur !== undefined ||
+              (target.kind === 'video' &&
+                (patch.defaultSourceStartSec !== undefined ||
+                  patch.defaultSourceEndSec !== undefined)))
+          ) {
+            const matchingClips = next.filter((c) => c.url === target.url);
+            for (const c of matchingClips) {
+              const targetClipDur =
+                requestedDur !== undefined
+                  ? requestedDur
+                  : target.kind === 'video' && updatedAsset.defaultSourceEndSec !== undefined
+                    ? Math.min(c.durationSec, safeRange.usableSpanSec)
+                    : c.durationSec;
+              if (Math.abs(targetClipDur - c.durationSec) >= 0.05) {
+                next = resizeManualClipDuration(
+                  next,
+                  c.id,
+                  targetClipDur,
+                  maxTimeline,
+                  cfg.timelineStretchMode ?? 'push'
+                );
+              }
             }
           }
           return next;
@@ -2426,9 +2497,8 @@ export default function App() {
       const cfg = configRef.current;
       const needsModeSwitch =
         (patch.durationSec !== undefined ||
-          patch.transitionOut !== undefined ||
-          patch.transitionDurationSec !== undefined) &&
-        mediaItemsRef.current.length > 1 &&
+          ((patch.transitionOut !== undefined || patch.transitionDurationSec !== undefined) &&
+            mediaItemsRef.current.length > 1)) &&
         cfg.slideshowMode !== 'custom_durations' &&
         cfg.slideshowMode !== 'manual';
 
@@ -2464,12 +2534,29 @@ export default function App() {
       if (needsModeSwitch) {
         setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
       }
+      if (!isPlayingRef.current && patch.sourceStartSec !== undefined) {
+        const curBounds = getEffectiveTimelineBounds(cfg, mediaItemsRef.current, audioRef.current);
+        const segs = computeClipTimelineSegments(
+          mediaItemsRef.current,
+          curBounds.clipDuration,
+          cfg,
+          beatCutTimestamps
+        );
+        const clipIdx = mediaItemsRef.current.findIndex((m) => m.id === id);
+        const seg = segs.find((s) => s.clipIndex === clipIdx);
+        const curLocal = Math.max(0, currentTimeRef.current - curBounds.trimBase);
+        if (seg && (curLocal < seg.startSec || curLocal >= seg.endSec)) {
+          const nextAbs = curBounds.trimBase + seg.startSec + Math.min(0.02, (seg.endSec - seg.startSec) * 0.1);
+          currentTimeRef.current = nextAbs;
+          setCurrentTime(nextAbs);
+        }
+      }
     },
     [beatCutTimestamps, getEffectiveTimelineBounds, queueDebouncedHistory]
   );
 
   const handleMoveClipPosition = useCallback(
-    (clipId: string, rawStartSec: number) => {
+    (clipId: string, rawStartSec: number, disableSnap = false) => {
       const cfg = configRef.current;
       const items = mediaItemsRef.current;
       if (cfg.slideshowMode !== 'manual') return;
@@ -2483,7 +2570,8 @@ export default function App() {
         rawStartSec,
         maxTimeline,
         beats,
-        cfg.snapToBeats
+        disableSnap ? false : cfg.snapToBeats,
+        !disableSnap
       );
       setMediaItems((prev) =>
         prev
@@ -2668,6 +2756,7 @@ export default function App() {
 
   const handleInspectClip = useCallback((id: string) => {
     setSelectedClipId(id);
+    setSelectedClipIds([id]);
     setSelectedFxId(null);
     setActiveTab('clip');
   }, []);

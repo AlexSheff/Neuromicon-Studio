@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { tFor } from '../i18n';
+import { NumericDraftInput } from './common/NumericDraftInput';
 import {
   AudioTrackState,
   BeatSyncMode,
@@ -714,24 +715,22 @@ export function MediaInputPanel({
                                       <span className="text-[9.5px] text-gray-400 block">
                                         {t.binRangeStartLabel}
                                       </span>
-                                      <input
-                                        type="number"
+                                      <NumericDraftInput
+                                        value={asset.defaultSourceStartSec ?? 0}
                                         min={0}
                                         max={Math.max(0, (asset.defaultSourceEndSec ?? maxV) - 0.4)}
                                         step={0.5}
-                                        value={Number((asset.defaultSourceStartSec ?? 0).toFixed(1))}
-                                        onChange={(e) => {
+                                        decimals={1}
+                                        ariaLabel={t.binRangeStartLabel}
+                                        onCommit={(val) => {
                                           const curEnd = asset.defaultSourceEndSec ?? maxV;
-                                          const val = Number(
-                                            Math.max(0, Math.min(curEnd - 0.4, Number(e.target.value) || 0)).toFixed(1)
-                                          );
                                           onUpdateBinItem(
                                             asset.id,
                                             {
                                               defaultSourceStartSec: val,
                                               defaultDurationSec: Math.min(
                                                 asset.defaultDurationSec,
-                                                Number(Math.max(0.5, curEnd - val).toFixed(1))
+                                                Number(Math.max(0.4, curEnd - val).toFixed(1))
                                               ),
                                             },
                                             false
@@ -745,27 +744,22 @@ export function MediaInputPanel({
                                       <span className="text-[9.5px] text-gray-400 block">
                                         {t.binRangeEndLabel}
                                       </span>
-                                      <input
-                                        type="number"
+                                      <NumericDraftInput
+                                        value={asset.defaultSourceEndSec ?? maxV}
                                         min={Math.min(maxV, (asset.defaultSourceStartSec ?? 0) + 0.4)}
                                         max={Number(maxV.toFixed(1))}
                                         step={0.5}
-                                        value={Number((asset.defaultSourceEndSec ?? maxV).toFixed(1))}
-                                        onChange={(e) => {
+                                        decimals={1}
+                                        ariaLabel={t.binRangeEndLabel}
+                                        onCommit={(val) => {
                                           const curStart = asset.defaultSourceStartSec ?? 0;
-                                          const val = Number(
-                                            Math.max(
-                                              Math.min(maxV, curStart + 0.4),
-                                              Math.min(maxV, Number(e.target.value) || maxV)
-                                            ).toFixed(1)
-                                          );
                                           onUpdateBinItem(
                                             asset.id,
                                             {
                                               defaultSourceEndSec: val,
                                               defaultDurationSec: Math.min(
                                                 asset.defaultDurationSec,
-                                                Number(Math.max(0.5, val - curStart).toFixed(1))
+                                                Number(Math.max(0.4, val - curStart).toFixed(1))
                                               ),
                                             },
                                             false
@@ -779,27 +773,20 @@ export function MediaInputPanel({
                                       <span className="text-[9.5px] text-gray-400 block">
                                         {t.clipDurationLabel}
                                       </span>
-                                      <input
-                                        type="number"
+                                      <NumericDraftInput
+                                        value={asset.defaultDurationSec}
                                         min={0.4}
-                                        max={Math.max(0.5, (asset.defaultSourceEndSec ?? maxV) - (asset.defaultSourceStartSec ?? 0))}
+                                        max={Math.max(0.4, (asset.defaultSourceEndSec ?? maxV) - (asset.defaultSourceStartSec ?? 0))}
                                         step={0.5}
-                                        value={Number(asset.defaultDurationSec.toFixed(1))}
-                                        onChange={(e) => {
-                                          const span = Math.max(
-                                            0.5,
-                                            (asset.defaultSourceEndSec ?? maxV) - (asset.defaultSourceStartSec ?? 0)
-                                          );
-                                          const val = Math.max(
-                                            0.4,
-                                            Math.min(span, Number(e.target.value) || 0.5)
-                                          );
+                                        decimals={1}
+                                        ariaLabel={t.clipDurationLabel}
+                                        onCommit={(val) =>
                                           onUpdateBinItem(
                                             asset.id,
                                             { defaultDurationSec: Number(val.toFixed(1)) },
                                             false
-                                          );
-                                        }}
+                                          )
+                                        }
                                         className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
                                       />
                                     </label>
@@ -879,19 +866,16 @@ export function MediaInputPanel({
                                     <span className="text-[9.5px] text-gray-400 block">
                                       {t.clipDurationLabel}
                                     </span>
-                                    <input
-                                      type="number"
+                                    <NumericDraftInput
+                                      value={asset.defaultDurationSec}
                                       min={0.4}
                                       max={600}
                                       step={0.5}
-                                      value={Number(asset.defaultDurationSec.toFixed(1))}
-                                      onChange={(e) => {
-                                        const val = Math.max(
-                                          0.4,
-                                          Math.min(600, Number(e.target.value) || 0.5)
-                                        );
-                                        onUpdateBinItem(asset.id, { defaultDurationSec: val }, false);
-                                      }}
+                                      decimals={1}
+                                      ariaLabel={t.clipDurationLabel}
+                                      onCommit={(val) =>
+                                        onUpdateBinItem(asset.id, { defaultDurationSec: val }, false)
+                                      }
                                       className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
                                     />
                                   </label>

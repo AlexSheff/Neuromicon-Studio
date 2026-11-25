@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import { Language, MediaBinItem, SlideTransitionType } from '../types/studio';
+import { NumericDraftInput } from './common/NumericDraftInput';
 
 interface MediaPreviewModalProps {
   lang: Language;
@@ -48,9 +49,31 @@ export function MediaPreviewModal({
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const maxVideoDur = Math.max(0.5, asset.videoDuration || asset.defaultDurationSec || 10);
-  const [dur, setDur] = useState<number>(asset.defaultDurationSec);
-  const [sourceStart, setSourceStart] = useState<number>(asset.defaultSourceStartSec ?? 0);
-  const [sourceEnd, setSourceEnd] = useState<number>(asset.defaultSourceEndSec ?? maxVideoDur);
+  const initialStart =
+    asset.kind === 'video'
+      ? Number(
+          Math.max(0, Math.min(Math.max(0, maxVideoDur - 0.4), asset.defaultSourceStartSec ?? 0)).toFixed(2)
+        )
+      : 0;
+  const initialEnd =
+    asset.kind === 'video'
+      ? Number(
+          Math.max(
+            Math.min(maxVideoDur, initialStart + 0.4),
+            Math.min(maxVideoDur, asset.defaultSourceEndSec ?? maxVideoDur)
+          ).toFixed(2)
+        )
+      : maxVideoDur;
+
+  const [sourceStart, setSourceStart] = useState<number>(initialStart);
+  const [sourceEnd, setSourceEnd] = useState<number>(initialEnd);
+  const [dur, setDur] = useState<number>(() => {
+    if (asset.kind === 'video') {
+      const span = Math.max(0.4, initialEnd - initialStart);
+      return Number(Math.max(0.4, Math.min(span, asset.defaultDurationSec || span)).toFixed(1));
+    }
+    return Number(Math.max(0.4, Math.min(600, asset.defaultDurationSec || 4)).toFixed(1));
+  });
   const [rate, setRate] = useState<number>(asset.defaultPlaybackRate ?? 1.0);
   const [muted, setMuted] = useState<boolean>(
     asset.defaultClipAudioMuted ?? hasMasterAudio
@@ -60,7 +83,7 @@ export function MediaPreviewModal({
   );
   const [syncPlaced, setSyncPlaced] = useState<boolean>(placedCount > 0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [previewTime, setPreviewTime] = useState<number>(asset.defaultSourceStartSec ?? 0);
+  const [previewTime, setPreviewTime] = useState<number>(initialStart);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -82,25 +105,86 @@ export function MediaPreviewModal({
     v.muted = muted;
   }, [muted, asset.kind]);
 
+  const seekPreviewTo = (sec: number) => {
+    const clamped = Math.max(0, Math.min(maxVideoDur - 0.04, sec));
+    setPreviewTime(clamped);
+    const v = videoRef.current;
+    if (v && v.readyState >= 1) {
+      try {
+        v.currentTime = clamped;
+      } catch {
+        // ignore unready seek
+      }
+    }
+  };
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v || asset.kind !== 'video') return;
-    if (Number.isFinite(sourceStart)) {
+    const seekOnLoad = () => {
       try {
-        v.currentTime = Math.max(0, Math.min(maxVideoDur - 0.1, sourceStart));
-        setPreviewTime(v.currentTime);
+        const target = Math.max(0, Math.min(maxVideoDur - 0.05, initialStart));
+        v.currentTime = target;
+        setPreviewTime(target);
       } catch {
         // ignore seek before metadata
       }
+    };
+    if (v.readyState >= 1) {
+      seekOnLoad();
+    } else {
+      v.addEventListener('loadedmetadata', seekOnLoad, { once: true });
     }
     // run once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const applySourceStart = (nextRaw: number, shouldSeek = true) => {
+    const nextIn = Number(Math.max(0, Math.min(Math.max(0, sourceEnd - 0.4), nextRaw)).toFixed(2));
+    const oldSpan = Math.max(0.4, sourceEnd - sourceStart);
+    const newSpan = Math.max(0.4, sourceEnd - nextIn);
+    setSourceStart(nextIn);
+    setDur((prev) => {
+      if (Math.abs(prev - oldSpan) < 0.15) {
+        return Number(Math.max(0.4, Math.min(600, newSpan)).toFixed(1));
+      }
+      return Number(Math.max(0.4, Math.min(newSpan, prev)).toFixed(1));
+    });
+    if (shouldSeek) {
+      seekPreviewTo(nextIn);
+    }
+  };
+
+  const applySourceEnd = (nextRaw: number, shouldSeek = true) => {
+    const nextOut = Number(
+      Math.max(Math.min(maxVideoDur, sourceStart + 0.4), Math.min(maxVideoDur, nextRaw)).toFixed(2)
+    );
+    const oldSpan = Math.max(0.4, sourceEnd - sourceStart);
+    const newSpan = Math.max(0.4, nextOut - sourceStart);
+    setSourceEnd(nextOut);
+    setDur((prev) => {
+      if (Math.abs(prev - oldSpan) < 0.15) {
+        return Number(Math.max(0.4, Math.min(600, newSpan)).toFixed(1));
+      }
+      return Number(Math.max(0.4, Math.min(newSpan, prev)).toFixed(1));
+    });
+    if (shouldSeek) {
+      seekPreviewTo(Math.max(sourceStart, nextOut - 0.05));
+    }
+  };
+
   const togglePlay = () => {
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) {
+      if (v.currentTime < sourceStart - 0.05 || v.currentTime >= sourceEnd - 0.05) {
+        try {
+          v.currentTime = sourceStart;
+          setPreviewTime(sourceStart);
+        } catch {
+          // ignore
+        }
+      }
       v.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     } else {
       v.pause();
@@ -119,8 +203,12 @@ export function MediaPreviewModal({
             Math.max(Math.min(maxVideoDur, clampedStart + 0.4), Math.min(maxVideoDur, sourceEnd)).toFixed(2)
           )
         : undefined;
+    const maxAllowedDur =
+      asset.kind === 'video' && clampedEnd !== undefined
+        ? Math.max(0.4, clampedEnd - clampedStart)
+        : 600;
     return {
-      defaultDurationSec: Number(Math.max(0.4, Math.min(600, dur)).toFixed(1)),
+      defaultDurationSec: Number(Math.max(0.4, Math.min(maxAllowedDur, dur)).toFixed(1)),
       defaultSourceStartSec: clampedStart,
       defaultSourceEndSec: clampedEnd,
       defaultPlaybackRate: asset.kind === 'video' ? rate : 1.0,
@@ -140,8 +228,12 @@ export function MediaPreviewModal({
     onClose();
   };
 
+  const rangeSpan =
+    asset.kind === 'video' ? Math.max(0.4, Number((sourceEnd - sourceStart).toFixed(2))) : 600;
   const sliderMax =
-    asset.kind === 'video' ? Math.max(10, Math.ceil(maxVideoDur)) : 60;
+    asset.kind === 'video' ? Math.max(0.5, Number(rangeSpan.toFixed(1))) : 60;
+  const rangeStartPct = (sourceStart / maxVideoDur) * 100;
+  const rangeWidthPct = Math.max(1, ((sourceEnd - sourceStart) / maxVideoDur) * 100);
 
   return (
     <div
@@ -201,7 +293,20 @@ export function MediaPreviewModal({
                   playsInline
                   muted={muted}
                   onTimeUpdate={() => {
-                    if (videoRef.current) setPreviewTime(videoRef.current.currentTime);
+                    const v = videoRef.current;
+                    if (!v) return;
+                    if (!v.paused && v.currentTime >= sourceEnd - 0.03) {
+                      v.pause();
+                      setIsPlaying(false);
+                      try {
+                        v.currentTime = sourceEnd;
+                      } catch {
+                        // ignore
+                      }
+                      setPreviewTime(sourceEnd);
+                      return;
+                    }
+                    setPreviewTime(v.currentTime);
                   }}
                   onEnded={() => setIsPlaying(false)}
                   onClick={togglePlay}
@@ -216,19 +321,28 @@ export function MediaPreviewModal({
                     >
                       {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
                     </button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={maxVideoDur}
-                      step={0.05}
-                      value={previewTime}
-                      onChange={(e) => {
-                        const sec = Number(e.target.value);
-                        setPreviewTime(sec);
-                        if (videoRef.current) videoRef.current.currentTime = sec;
-                      }}
-                      className="flex-1 studio-slider"
-                    />
+                    <div className="relative flex-1 flex items-center">
+                      <div
+                        className="absolute h-1.5 rounded-full bg-cyan-500/35 border-x border-amber-400 pointer-events-none"
+                        style={{
+                          left: `${Math.max(0, Math.min(100, rangeStartPct))}%`,
+                          width: `${Math.max(0, Math.min(100 - rangeStartPct, rangeWidthPct))}%`,
+                        }}
+                      />
+                      <input
+                        type="range"
+                        min={0}
+                        max={maxVideoDur}
+                        step={0.05}
+                        value={previewTime}
+                        onChange={(e) => {
+                          const sec = Number(e.target.value);
+                          setPreviewTime(sec);
+                          if (videoRef.current) videoRef.current.currentTime = sec;
+                        }}
+                        className="relative z-10 w-full studio-slider"
+                      />
+                    </div>
                     <span className="text-[11px] font-mono tabular-nums text-gray-300 shrink-0">
                       {formatSecShort(previewTime)} / {formatSecShort(maxVideoDur)}
                     </span>
@@ -246,15 +360,7 @@ export function MediaPreviewModal({
                   <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={() => {
-                        const nextIn = Number(
-                          Math.max(0, Math.min(sourceEnd - 0.4, previewTime)).toFixed(2)
-                        );
-                        setSourceStart(nextIn);
-                        setDur((prev) =>
-                          Number(Math.max(0.5, Math.min(sourceEnd - nextIn, prev)).toFixed(1))
-                        );
-                      }}
+                      onClick={() => applySourceStart(previewTime, false)}
                       className="px-2 py-1 rounded border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-[11px] font-medium text-amber-300 flex items-center gap-1 cursor-pointer"
                     >
                       <Scissors className="w-3 h-3" />
@@ -264,10 +370,13 @@ export function MediaPreviewModal({
                       type="button"
                       onClick={() => {
                         const nextOut = Number(
-                          Math.max(Math.min(maxVideoDur, sourceStart + 0.4), Math.min(maxVideoDur, previewTime)).toFixed(2)
+                          Math.max(
+                            Math.min(maxVideoDur, sourceStart + 0.4),
+                            Math.min(maxVideoDur, previewTime)
+                          ).toFixed(2)
                         );
                         setSourceEnd(nextOut);
-                        setDur(Number(Math.max(0.5, nextOut - sourceStart).toFixed(1)));
+                        setDur(Number(Math.max(0.4, nextOut - sourceStart).toFixed(1)));
                       }}
                       className="px-2 py-1 rounded border border-cyan-500/50 bg-cyan-500/10 hover:bg-cyan-500/20 text-[11px] font-medium text-cyan-200 cursor-pointer"
                     >
@@ -281,9 +390,8 @@ export function MediaPreviewModal({
                           const e = Number((maxVideoDur - 5).toFixed(1));
                           setSourceStart(s);
                           setSourceEnd(e);
-                          setDur((prev) => Number(Math.max(0.5, Math.min(e - s, prev)).toFixed(1)));
-                          if (videoRef.current) videoRef.current.currentTime = s;
-                          setPreviewTime(s);
+                          setDur((prev) => Number(Math.max(0.4, Math.min(e - s, prev)).toFixed(1)));
+                          seekPreviewTo(s);
                         }}
                         className="px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-[11px] text-emerald-200 hover:bg-emerald-500/20 cursor-pointer"
                       >
@@ -294,10 +402,16 @@ export function MediaPreviewModal({
                       <button
                         type="button"
                         onClick={() => {
+                          const fullEnd = Number(maxVideoDur.toFixed(2));
+                          const oldSpan = Math.max(0.4, sourceEnd - sourceStart);
                           setSourceStart(0);
-                          setSourceEnd(Number(maxVideoDur.toFixed(1)));
-                          if (videoRef.current) videoRef.current.currentTime = 0;
-                          setPreviewTime(0);
+                          setSourceEnd(fullEnd);
+                          setDur((prev) =>
+                            Math.abs(prev - oldSpan) < 0.15
+                              ? Number(Math.max(0.4, Math.min(600, fullEnd)).toFixed(1))
+                              : Number(Math.max(0.4, Math.min(fullEnd, prev)).toFixed(1))
+                          );
+                          seekPreviewTo(0);
                         }}
                         className="px-2 py-1 rounded border border-[#262B38] bg-[#141821] text-[11px] text-gray-300 hover:text-white flex items-center gap-1 cursor-pointer"
                       >
@@ -305,6 +419,9 @@ export function MediaPreviewModal({
                         <span>{t.previewResetInBtn}</span>
                       </button>
                     )}
+                    <span className="ml-auto text-[10px] font-mono tabular-nums text-cyan-300">
+                      [{sourceStart.toFixed(1)}–{sourceEnd.toFixed(1)}s · {rangeSpan.toFixed(1)}s]
+                    </span>
                   </div>
                 </div>
               </>
@@ -317,15 +434,14 @@ export function MediaPreviewModal({
               <div className="flex items-center justify-between text-xs">
                 <span className="text-gray-200 font-medium">{t.clipDurationLabel}</span>
                 <div className="flex items-center gap-1">
-                  <input
-                    type="number"
-                    min={0.5}
-                    max={600}
+                  <NumericDraftInput
+                    value={dur}
+                    min={0.4}
+                    max={asset.kind === 'video' ? Math.max(0.4, rangeSpan) : 600}
                     step={0.5}
-                    value={Number(dur.toFixed(1))}
-                    onChange={(e) =>
-                      setDur(Math.max(0.5, Math.min(600, Number(e.target.value) || 0.5)))
-                    }
+                    decimals={1}
+                    ariaLabel={t.clipDurationLabel}
+                    onCommit={(v) => setDur(v)}
                     className="w-16 rounded bg-[#0E1016] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
                   />
                   <span className="text-[11px] font-mono text-gray-500">s</span>
@@ -341,29 +457,33 @@ export function MediaPreviewModal({
                 className="w-full studio-slider"
               />
               <div className="flex flex-wrap gap-1">
-                {[1, 2, 4, 8, 12].map((sec) => (
-                  <button
-                    key={sec}
-                    type="button"
-                    onClick={() => setDur(sec)}
-                    className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-pointer ${
-                      Math.abs(dur - sec) < 0.05
-                        ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
-                        : 'border-[#262B38] bg-[#0E1016] text-gray-300'
-                    }`}
-                  >
-                    {sec}s
-                  </button>
-                ))}
+                {[1, 2, 4, 8, 12].map((sec) => {
+                  const targetSec =
+                    asset.kind === 'video' ? Number(Math.min(sec, rangeSpan).toFixed(1)) : sec;
+                  return (
+                    <button
+                      key={sec}
+                      type="button"
+                      onClick={() => setDur(targetSec)}
+                      className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-pointer ${
+                        Math.abs(dur - targetSec) < 0.05
+                          ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                          : 'border-[#262B38] bg-[#0E1016] text-gray-300'
+                      }`}
+                    >
+                      {sec}s
+                    </button>
+                  );
+                })}
                 {asset.kind === 'video' && (
                   <button
                     type="button"
                     onClick={() =>
-                      setDur(Number(Math.max(0.5, Math.min(600, maxVideoDur - sourceStart)).toFixed(1)))
+                      setDur(Number(Math.max(0.4, Math.min(600, rangeSpan)).toFixed(1)))
                     }
                     className="px-2 py-0.5 rounded border border-[#262B38] bg-[#0E1016] hover:border-amber-500/50 text-[10px] font-mono text-amber-200 cursor-pointer"
                   >
-                    Full ({Math.max(0.5, maxVideoDur - sourceStart).toFixed(1)}s)
+                    Full ({rangeSpan.toFixed(1)}s)
                   </button>
                 )}
               </div>
@@ -373,17 +493,14 @@ export function MediaPreviewModal({
               {asset.kind === 'video' && (
                 <label className="space-y-1 block">
                   <span className="text-[10px] text-gray-400 block">{t.binRangeStartLabel}</span>
-                  <input
-                    type="number"
+                  <NumericDraftInput
+                    value={sourceStart}
                     min={0}
                     max={Math.max(0, sourceEnd - 0.4)}
                     step={0.1}
-                    value={Number(sourceStart.toFixed(2))}
-                    onChange={(e) =>
-                      setSourceStart(
-                        Math.max(0, Math.min(Math.max(0, sourceEnd - 0.4), Number(e.target.value) || 0))
-                      )
-                    }
+                    decimals={2}
+                    ariaLabel={t.binRangeStartLabel}
+                    onCommit={(v) => applySourceStart(v, true)}
                     className="w-full rounded bg-[#0E1016] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
                   />
                 </label>
@@ -392,20 +509,14 @@ export function MediaPreviewModal({
               {asset.kind === 'video' && (
                 <label className="space-y-1 block">
                   <span className="text-[10px] text-gray-400 block">{t.binRangeEndLabel}</span>
-                  <input
-                    type="number"
+                  <NumericDraftInput
+                    value={sourceEnd}
                     min={Math.min(maxVideoDur, sourceStart + 0.4)}
                     max={Number(maxVideoDur.toFixed(2))}
                     step={0.1}
-                    value={Number(sourceEnd.toFixed(2))}
-                    onChange={(e) =>
-                      setSourceEnd(
-                        Math.max(
-                          Math.min(maxVideoDur, sourceStart + 0.4),
-                          Math.min(maxVideoDur, Number(e.target.value) || maxVideoDur)
-                        )
-                      )
-                    }
+                    decimals={2}
+                    ariaLabel={t.binRangeEndLabel}
+                    onCommit={(v) => applySourceEnd(v, true)}
                     className="w-full rounded bg-[#0E1016] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
                   />
                 </label>

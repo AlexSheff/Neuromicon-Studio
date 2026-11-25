@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { tFor } from '../i18n';
+import { NumericDraftInput } from './common/NumericDraftInput';
 import {
   AudioTrackState,
   BeatPresetId,
@@ -78,7 +79,7 @@ interface InspectorPanelProps {
   onSelectClip: (id: string) => void;
   onSelectFx: (id: string | null) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
-  onMoveClipPosition?: (id: string, rawStartSec: number) => void;
+  onMoveClipPosition?: (id: string, rawStartSec: number, disableSnap?: boolean) => void;
   onApplyClipOverlay: (
     clipId: string,
     effect: GeneratorEffectId,
@@ -380,16 +381,16 @@ export function InspectorPanel({
                   <div className="flex items-center justify-between text-xs pb-2 border-b border-[#262B38]/60">
                     <span className="text-gray-200 font-medium">{t.clipTimelineStartLabel}</span>
                     <div className="flex items-center gap-1">
-                      <input
-                        type="number"
+                      <NumericDraftInput
+                        value={selectedClip.startSec ?? 0}
                         min={0}
                         max={3600}
                         step={0.1}
-                        value={Number((selectedClip.startSec ?? 0).toFixed(2))}
-                        onChange={(e) => {
-                          const v = Math.max(0, Number(e.target.value) || 0);
+                        decimals={2}
+                        ariaLabel={t.clipTimelineStartLabel}
+                        onCommit={(v) => {
                           if (onMoveClipPosition) {
-                            onMoveClipPosition(selectedClip.id, v);
+                            onMoveClipPosition(selectedClip.id, v, true);
                           } else {
                             onUpdateClip(selectedClip.id, { startSec: Number(v.toFixed(2)) });
                           }
@@ -414,20 +415,17 @@ export function InspectorPanel({
                         <div className="flex items-center justify-between text-xs">
                           <span className="text-gray-200 font-medium">{t.clipDurationLabel}</span>
                           <div className="flex items-center gap-1">
-                            <input
-                              type="number"
-                              min={0.5}
+                            <NumericDraftInput
+                              value={selectedClip.durationSec}
+                              min={0.4}
                               max={inputMax}
                               step={0.5}
-                              value={Number(selectedClip.durationSec.toFixed(1))}
-                              onChange={(e) => {
-                                const v = Math.max(
-                                  0.5,
-                                  Math.min(inputMax, Number(e.target.value) || 0.5)
-                                );
-                                onUpdateClip(selectedClip.id, { durationSec: Number(v.toFixed(1)) });
-                              }}
-                              className="w-14 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
+                              decimals={1}
+                              ariaLabel={t.clipDurationLabel}
+                              onCommit={(v) =>
+                                onUpdateClip(selectedClip.id, { durationSec: Number(v.toFixed(1)) })
+                              }
+                              className="w-16 rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-right text-xs font-mono tabular-nums text-amber-300"
                             />
                             <span className="text-[11px] font-mono text-gray-500">s</span>
                           </div>
@@ -699,15 +697,16 @@ export function InspectorPanel({
                         <span className="text-[10px] text-gray-400 block">
                           {t.clipVideoStartLabel}
                         </span>
-                        <input
-                          type="number"
+                        <NumericDraftInput
+                          value={selectedClip.sourceStartSec}
                           min={0}
-                          max={Math.max(0, (selectedClip.videoDuration || 10) - 0.5)}
+                          max={Math.max(0, (selectedClip.videoDuration || 10) - 0.4)}
                           step={0.2}
-                          value={Number(selectedClip.sourceStartSec.toFixed(1))}
-                          onChange={(e) =>
+                          decimals={2}
+                          ariaLabel={t.clipVideoStartLabel}
+                          onCommit={(v) =>
                             onUpdateClip(selectedClip.id, {
-                              sourceStartSec: Math.max(0, Number(e.target.value) || 0),
+                              sourceStartSec: Number(v.toFixed(2)),
                             })
                           }
                           className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"
@@ -1228,18 +1227,16 @@ export function InspectorPanel({
                         <span className="text-[10px] text-gray-400 block">
                           {t.clipTransDurationLabel}
                         </span>
-                        <input
-                          type="number"
+                        <NumericDraftInput
+                          value={selectedClip.transitionDurationSec}
                           min={0.1}
                           max={2.5}
                           step={0.1}
-                          value={Number(selectedClip.transitionDurationSec.toFixed(1))}
-                          onChange={(e) =>
+                          decimals={1}
+                          ariaLabel={t.clipTransDurationLabel}
+                          onCommit={(v) =>
                             onUpdateClip(selectedClip.id, {
-                              transitionDurationSec: Math.max(
-                                0.1,
-                                Math.min(2.5, Number(e.target.value) || 0.6)
-                              ),
+                              transitionDurationSec: Number(v.toFixed(1)),
                             })
                           }
                           className="w-full rounded bg-[#141821] border border-[#262B38] px-2 py-1 text-xs font-mono tabular-nums text-gray-100"

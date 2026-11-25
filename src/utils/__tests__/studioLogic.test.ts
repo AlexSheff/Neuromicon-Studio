@@ -1500,6 +1500,40 @@ test('closeManualTimelineGap, closeAllManualGapsAndFitBeats, and moveManualClipG
   assert.equal(movedPastC[2].startSec, 5);
 });
 
+test('dropBinItemIntoManualGap handles narrow 0.3s gaps & edges, and clampManualClipMove honors disableSnap', () => {
+  const narrowGapped: VisualMediaState[] = [
+    { ...makeClip('a', 4), id: 'a', startSec: 0 },
+    { ...makeClip('b', 4), id: 'b', startSec: 4.3 },
+  ];
+  const narrowFill = dropBinItemIntoManualGap(narrowGapped, 4.1, 20, 20);
+  assert.equal(narrowFill.filledGap, true);
+  assert.equal(narrowFill.startSec, 4);
+  assert.equal(narrowFill.durationSec, 0.3);
 
+  const edgeTouchFill = dropBinItemIntoManualGap(narrowGapped, 3.96, 15, 20);
+  assert.equal(edgeTouchFill.filledGap, true);
+  assert.equal(edgeTouchFill.startSec, 4);
+  assert.equal(edgeTouchFill.durationSec, 0.3);
 
+  const clipsForMove: VisualMediaState[] = [
+    { ...makeClip('x', 2), id: 'x', startSec: 0 },
+    { ...makeClip('y', 2), id: 'y', startSec: 5.0 },
+  ];
+  const beats = [0, 2.0, 4.0, 6.0];
+  // With magnetic snap disabled, typing 2.08 stays 2.08 (not snapped to 2.0 beat/edge)
+  const exactPos = clampManualClipMove(clipsForMove, 'y', 2.08, 20, beats, false, false);
+  assert.equal(exactPos, 2.08);
+  // With magnetic snap enabled, 2.08 snaps to 2.0
+  const snappedPos = clampManualClipMove(clipsForMove, 'y', 2.08, 20, beats, true, true);
+  assert.equal(snappedPos, 2);
 
+  // Single clip with custom_durations honors durationSec
+  const singleSegs = computeClipTimelineSegments(
+    [{ ...makeClip('solo', 4.5), id: 'solo' }],
+    12,
+    { ...DEFAULT_STUDIO_CONFIG, slideshowMode: 'custom_durations' },
+    []
+  );
+  assert.equal(singleSegs[0].startSec, 0);
+  assert.equal(singleSegs[0].endSec, 4.5);
+});
