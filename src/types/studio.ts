@@ -201,6 +201,7 @@ export interface MediaBinItem {
   decodedAudioBuffer?: AudioBuffer;
   defaultDurationSec: number;
   defaultSourceStartSec?: number;
+  defaultSourceEndSec?: number;
   defaultPlaybackRate?: number;
   defaultTransitionOut?: SlideTransitionType;
   defaultClipAudioMuted?: boolean;
@@ -251,6 +252,7 @@ export interface StudioConfig {
   stabilizeMotion?: boolean;
   showBottomAudioTrack?: boolean;
   timelineStretchMode?: 'push' | 'overlap';
+  autoRippleOnDelete?: boolean;
 
   // Generative visual effects (Fractals, Deep Space, Galaxies, Particles, Aurora, Black Hole, Cyber Grid, Voronoi, Custom GLSL)
   generatorEffect: GeneratorEffectId;

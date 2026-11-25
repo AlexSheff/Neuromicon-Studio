@@ -630,9 +630,13 @@ export function MediaInputPanel({
                                   <Film className="w-2.5 h-2.5 text-amber-400 shrink-0" aria-hidden="true" />
                                 )}
                                 <span className="text-amber-300">{asset.defaultDurationSec.toFixed(1)}s</span>
-                                {(asset.defaultSourceStartSec ?? 0) > 0.05 && (
-                                  <span className="text-cyan-300">in {asset.defaultSourceStartSec!.toFixed(1)}s</span>
-                                )}
+                                {asset.kind === 'video' &&
+                                  ((asset.defaultSourceStartSec ?? 0) > 0.05 ||
+                                    (asset.defaultSourceEndSec ?? maxV) < maxV - 0.05) && (
+                                    <span className="text-cyan-300">
+                                      [{(asset.defaultSourceStartSec ?? 0).toFixed(1)}–{(asset.defaultSourceEndSec ?? maxV).toFixed(1)}s]
+                                    </span>
+                                  )}
                                 {isUsed && (
                                   <button
                                     type="button"
@@ -703,54 +707,195 @@ export function MediaInputPanel({
                               className="px-2 pb-2 pt-1.5 border-t border-[#262B38]/80 bg-[#0E1016]/70 space-y-2"
                               onClick={(e) => e.stopPropagation()}
                             >
-                              <div className="grid grid-cols-2 gap-1.5">
-                                <label className="space-y-0.5 block">
-                                  <span className="text-[9.5px] text-gray-400 block">
-                                    {t.clipDurationLabel}
-                                  </span>
-                                  <input
-                                    type="number"
-                                    min={0.4}
-                                    max={600}
-                                    step={0.5}
-                                    value={Number(asset.defaultDurationSec.toFixed(1))}
-                                    onChange={(e) => {
-                                      const val = Math.max(
-                                        0.4,
-                                        Math.min(600, Number(e.target.value) || 0.5)
-                                      );
-                                      onUpdateBinItem(asset.id, { defaultDurationSec: val }, false);
-                                    }}
-                                    className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
-                                  />
-                                </label>
+                              {asset.kind === 'video' ? (
+                                <>
+                                  <div className="grid grid-cols-3 gap-1.5">
+                                    <label className="space-y-0.5 block">
+                                      <span className="text-[9.5px] text-gray-400 block">
+                                        {t.binRangeStartLabel}
+                                      </span>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        max={Math.max(0, (asset.defaultSourceEndSec ?? maxV) - 0.4)}
+                                        step={0.5}
+                                        value={Number((asset.defaultSourceStartSec ?? 0).toFixed(1))}
+                                        onChange={(e) => {
+                                          const curEnd = asset.defaultSourceEndSec ?? maxV;
+                                          const val = Number(
+                                            Math.max(0, Math.min(curEnd - 0.4, Number(e.target.value) || 0)).toFixed(1)
+                                          );
+                                          onUpdateBinItem(
+                                            asset.id,
+                                            {
+                                              defaultSourceStartSec: val,
+                                              defaultDurationSec: Math.min(
+                                                asset.defaultDurationSec,
+                                                Number(Math.max(0.5, curEnd - val).toFixed(1))
+                                              ),
+                                            },
+                                            false
+                                          );
+                                        }}
+                                        className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-gray-100"
+                                      />
+                                    </label>
 
-                                {asset.kind === 'video' ? (
+                                    <label className="space-y-0.5 block">
+                                      <span className="text-[9.5px] text-gray-400 block">
+                                        {t.binRangeEndLabel}
+                                      </span>
+                                      <input
+                                        type="number"
+                                        min={Math.min(maxV, (asset.defaultSourceStartSec ?? 0) + 0.4)}
+                                        max={Number(maxV.toFixed(1))}
+                                        step={0.5}
+                                        value={Number((asset.defaultSourceEndSec ?? maxV).toFixed(1))}
+                                        onChange={(e) => {
+                                          const curStart = asset.defaultSourceStartSec ?? 0;
+                                          const val = Number(
+                                            Math.max(
+                                              Math.min(maxV, curStart + 0.4),
+                                              Math.min(maxV, Number(e.target.value) || maxV)
+                                            ).toFixed(1)
+                                          );
+                                          onUpdateBinItem(
+                                            asset.id,
+                                            {
+                                              defaultSourceEndSec: val,
+                                              defaultDurationSec: Math.min(
+                                                asset.defaultDurationSec,
+                                                Number(Math.max(0.5, val - curStart).toFixed(1))
+                                              ),
+                                            },
+                                            false
+                                          );
+                                        }}
+                                        className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-gray-100"
+                                      />
+                                    </label>
+
+                                    <label className="space-y-0.5 block">
+                                      <span className="text-[9.5px] text-gray-400 block">
+                                        {t.clipDurationLabel}
+                                      </span>
+                                      <input
+                                        type="number"
+                                        min={0.4}
+                                        max={Math.max(0.5, (asset.defaultSourceEndSec ?? maxV) - (asset.defaultSourceStartSec ?? 0))}
+                                        step={0.5}
+                                        value={Number(asset.defaultDurationSec.toFixed(1))}
+                                        onChange={(e) => {
+                                          const span = Math.max(
+                                            0.5,
+                                            (asset.defaultSourceEndSec ?? maxV) - (asset.defaultSourceStartSec ?? 0)
+                                          );
+                                          const val = Math.max(
+                                            0.4,
+                                            Math.min(span, Number(e.target.value) || 0.5)
+                                          );
+                                          onUpdateBinItem(
+                                            asset.id,
+                                            { defaultDurationSec: Number(val.toFixed(1)) },
+                                            false
+                                          );
+                                        }}
+                                        className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
+                                      />
+                                    </label>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center gap-1">
+                                    {maxV >= 12.5 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const s = 5;
+                                          const e = Number((maxV - 5).toFixed(1));
+                                          onUpdateBinItem(
+                                            asset.id,
+                                            {
+                                              defaultSourceStartSec: s,
+                                              defaultSourceEndSec: e,
+                                              defaultDurationSec: Math.min(
+                                                asset.defaultDurationSec,
+                                                Number(Math.max(0.5, e - s).toFixed(1))
+                                              ),
+                                            },
+                                            false
+                                          );
+                                        }}
+                                        className="px-1.5 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-[9.5px] font-mono text-cyan-200 cursor-pointer"
+                                      >
+                                        {t.binEdgeTrim5sBtn}
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        onUpdateBinItem(
+                                          asset.id,
+                                          {
+                                            defaultSourceStartSec: 0,
+                                            defaultSourceEndSec: Number(maxV.toFixed(1)),
+                                            defaultDurationSec: Number(Math.max(0.5, Math.min(600, maxV)).toFixed(1)),
+                                          },
+                                          false
+                                        )
+                                      }
+                                      className="px-1.5 py-0.5 rounded border border-[#262B38] bg-[#141821] hover:border-gray-500 text-[9.5px] text-gray-300 cursor-pointer"
+                                    >
+                                      {t.binFullRangeBtn}
+                                    </button>
+                                    {[2, 4, 6, 8, 12].map((sec) => (
+                                      <button
+                                        key={sec}
+                                        type="button"
+                                        onClick={() => {
+                                          const span = Math.max(
+                                            0.5,
+                                            (asset.defaultSourceEndSec ?? maxV) - (asset.defaultSourceStartSec ?? 0)
+                                          );
+                                          onUpdateBinItem(
+                                            asset.id,
+                                            { defaultDurationSec: Number(Math.min(sec, span).toFixed(1)) },
+                                            false
+                                          );
+                                        }}
+                                        className={`px-1.5 py-0.5 rounded border text-[9.5px] font-mono cursor-pointer ${
+                                          Math.abs(asset.defaultDurationSec - sec) < 0.05
+                                            ? 'border-amber-400/80 bg-amber-500/15 text-amber-200'
+                                            : 'border-[#262B38] bg-[#141821] text-gray-300 hover:border-gray-500'
+                                        }`}
+                                      >
+                                        {sec}s
+                                      </button>
+                                    ))}
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="grid grid-cols-2 gap-1.5">
                                   <label className="space-y-0.5 block">
                                     <span className="text-[9.5px] text-gray-400 block">
-                                      {t.clipVideoStartLabel}
+                                      {t.clipDurationLabel}
                                     </span>
                                     <input
                                       type="number"
-                                      min={0}
-                                      max={Math.max(0, maxV - 0.4)}
-                                      step={0.2}
-                                      value={Number((asset.defaultSourceStartSec ?? 0).toFixed(1))}
+                                      min={0.4}
+                                      max={600}
+                                      step={0.5}
+                                      value={Number(asset.defaultDurationSec.toFixed(1))}
                                       onChange={(e) => {
                                         const val = Math.max(
-                                          0,
-                                          Math.min(maxV - 0.4, Number(e.target.value) || 0)
+                                          0.4,
+                                          Math.min(600, Number(e.target.value) || 0.5)
                                         );
-                                        onUpdateBinItem(
-                                          asset.id,
-                                          { defaultSourceStartSec: val },
-                                          false
-                                        );
+                                        onUpdateBinItem(asset.id, { defaultDurationSec: val }, false);
                                       }}
-                                      className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-gray-100"
+                                      className="w-full rounded bg-[#141821] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
                                     />
                                   </label>
-                                ) : (
+
                                   <label className="space-y-0.5 block">
                                     <span className="text-[9.5px] text-gray-400 block">
                                       {t.clipTransitionLabel}
@@ -776,8 +921,8 @@ export function MediaInputPanel({
                                       <option value="cut">{t.transitionCut}</option>
                                     </select>
                                   </label>
-                                )}
-                              </div>
+                                </div>
+                              )}
 
                               {asset.kind === 'video' && (
                                 <div className="grid grid-cols-2 gap-1.5 items-center">
@@ -838,6 +983,7 @@ export function MediaInputPanel({
                                         {
                                           defaultDurationSec: asset.defaultDurationSec,
                                           defaultSourceStartSec: asset.defaultSourceStartSec,
+                                          defaultSourceEndSec: asset.defaultSourceEndSec,
                                           defaultPlaybackRate: asset.defaultPlaybackRate,
                                           defaultTransitionOut: asset.defaultTransitionOut,
                                           defaultClipAudioMuted: asset.defaultClipAudioMuted,
@@ -1105,9 +1251,9 @@ export function MediaInputPanel({
                             <input
                               type="range"
                               min={0.5}
-                              max={5.0}
-                              step={0.1}
-                              value={autoClipCfg.minClipSec}
+                              max={8.0}
+                              step={0.5}
+                              value={Math.min(8.0, autoClipCfg.minClipSec)}
                               onChange={(e) => {
                                 const val = Number(e.target.value);
                                 setAutoClipCfg((prev) => ({
@@ -1129,10 +1275,10 @@ export function MediaInputPanel({
                             </div>
                             <input
                               type="range"
-                              min={1.5}
-                              max={14.0}
+                              min={2.0}
+                              max={24.0}
                               step={0.5}
-                              value={autoClipCfg.maxClipSec}
+                              value={Math.min(24.0, autoClipCfg.maxClipSec)}
                               onChange={(e) => {
                                 const val = Number(e.target.value);
                                 setAutoClipCfg((prev) => ({
@@ -1178,6 +1324,22 @@ export function MediaInputPanel({
                             ))}
                           </div>
                         </div>
+
+                        {/* Exclude ±5s Edges */}
+                        <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer pt-0.5">
+                          <span>{t.autoClipEdgeTrimLabel}</span>
+                          <input
+                            type="checkbox"
+                            checked={(autoClipCfg.excludeEdgeSec ?? 5) > 0}
+                            onChange={(e) =>
+                              setAutoClipCfg((prev) => ({
+                                ...prev,
+                                excludeEdgeSec: e.target.checked ? 5 : 0,
+                              }))
+                            }
+                            className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                          />
+                        </label>
 
                         {/* Avoid Back-to-Back Repeat */}
                         <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer pt-0.5">

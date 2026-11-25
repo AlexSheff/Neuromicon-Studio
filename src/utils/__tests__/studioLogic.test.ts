@@ -4,21 +4,26 @@ import { MediaBinItem, StudioConfig, VisualMediaState } from '../../types/studio
 import {
   AUTO_CLIP_PRESETS,
   clampManualClipMove,
+  closeAllManualGapsAndFitBeats,
+  closeManualTimelineGap,
   computeAutoBeatAlignedClips,
   computeBeatMusicalAccents,
   computeClipTimelineSegments,
   computeFadeEnvelope,
   computePhraseEnergyCurve,
   detectTrackBpmAndBeats,
+  dropBinItemIntoManualGap,
   findManualInsertionSlot,
   generateAutoClipPlan,
   generateRandomBeatAutoClips,
   getTimelineSpanSec,
   insertManualClipAtAnchor,
+  moveManualClipGroup,
   packTimelineLanes,
   resizeManualClipDuration,
   resolveActiveSlideshowSlice,
   resolveOverlayWindow,
+  resolveSafeVideoSourceRange,
   snapTimeToBeat,
 } from '../audioAnalyzer';
 import { parseID3Tags } from '../id3Parser';
@@ -1141,7 +1146,7 @@ test('generateAutoClipPlan never leaves untrimmed full-length clips on long trac
 });
 
 test('generateAutoClipPlan guarantees zero duplicate video slices with surplus footage across sequential and shuffled modes', () => {
-  // 6 videos x 25s = 150s of surplus unique video for a 90s track
+  // 6 videos x 30s = 180s raw -> 120s usable ([5..25s] after 5s head/tail edge exclusion) for a 90s track
   const surplusBin: MediaBinItem[] = Array.from({ length: 6 }, (_, idx) => ({
     id: `surplus-v${idx + 1}`,
     kind: 'video' as const,
@@ -1149,8 +1154,8 @@ test('generateAutoClipPlan guarantees zero duplicate video slices with surplus f
     url: `blob:surplus-v${idx + 1}`,
     width: 1920,
     height: 1080,
-    videoDuration: 25,
-    defaultDurationSec: 25,
+    videoDuration: 30,
+    defaultDurationSec: 20,
   }));
 
   // Synthetic 90s track @ 8 kHz with calm verse [0..24s], energetic melodic drop [24..56s], calm bridge/outro [56..90s]
@@ -1171,17 +1176,34 @@ test('generateAutoClipPlan guarantees zero duplicate video slices with surplus f
   const beats = Array.from({ length: 185 }, (_, i) => Number((i * 0.5).toFixed(2)));
   const beatGrid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
 
-  const assertZeroOverlapsAndMixedIntervals = (plan: ReturnType<typeof generateAutoClipPlan>, label: string) => {
-    assert.ok(plan.length >= 25, `${label}: expected rich montage of >=25 cuts, got ${plan.length}`);
+  const assertZeroOverlapsAndBarEditorial = (
+    plan: ReturnType<typeof generateAutoClipPlan>,
+    label: string
+  ) => {
+    assert.ok(plan.length >= 12, `${label}: expected >=12 editorial bar cuts on 90s track, got ${plan.length}`);
     const end = Number((plan[plan.length - 1].startSec + plan[plan.length - 1].durationSec).toFixed(2));
     assert.ok(Math.abs(end - totalSec) <= 0.1, `${label}: expected end ~${totalSec}s, got ${end}s`);
 
-    // Verify both short rhythmic cuts and longer melodic/calm holds exist
-    const hasShort = plan.some((p) => p.durationSec <= 1.25);
-    const hasLong = plan.some((p) => p.durationSec >= 2.0);
-    assert.ok(hasShort && hasLong, `${label}: expected mixed short and long audio-driven intervals`);
+    // Minimize tiny choppy fragments: cuts should align to bar downbeats with long breathing holds
+    const tinyChops = plan.filter((p) => p.durationSec < 1.8);
+    assert.equal(
+      tinyChops.length,
+      0,
+      `${label}: expected zero tiny chopped cuts < 1.8s when surplus footage exists, got ${tinyChops.length}`
+    );
+    const hasDropCut = plan.some((p) => p.durationSec <= 4.05);
+    const hasCalmHold = plan.some((p) => p.durationSec >= 6.0);
+    assert.ok(hasDropCut && hasCalmHold, `${label}: expected mixed short drop bars and longer calm holds`);
 
-    // Strictly verify ZERO overlapping/duplicate intervals per source video URL and no adjacent repeats
+    // Use every unique video file at least once before repeating any file
+    const firstSixIds = new Set(plan.slice(0, 6).map((p) => p.binItemId));
+    assert.equal(
+      firstSixIds.size,
+      6,
+      `${label}: expected first 6 clips to cover all 6 unique videos before repeating, got ${firstSixIds.size}`
+    );
+
+    // Strictly verify 5s head/tail edge exclusion, zero overlapping intervals per source video, and no adjacent repeats
     const slicesByUrl = new Map<string, Array<[number, number]>>();
     for (let i = 0; i < plan.length; i++) {
       const p = plan[i];
@@ -1194,6 +1216,10 @@ test('generateAutoClipPlan guarantees zero duplicate video slices with surplus f
       }
       const s0 = p.sourceStartSec;
       const s1 = Number((p.sourceStartSec + p.durationSec * p.playbackRate).toFixed(2));
+      assert.ok(
+        s0 >= 4.98 && s1 <= 25.02,
+        `${label}: expected 5s head/tail exclusion [5..25] on 30s video, got [${s0}..${s1}] on ${p.binItemId}`
+      );
       const existing = slicesByUrl.get(p.binItemId) ?? [];
       for (const [es, ee] of existing) {
         const overlaps = Math.min(s1, ee) - Math.max(s0, es) > 0.02;
@@ -1206,7 +1232,7 @@ test('generateAutoClipPlan guarantees zero duplicate video slices with surplus f
       existing.push([s0, s1]);
       slicesByUrl.set(p.binItemId, existing);
     }
-    assert.ok(slicesByUrl.size >= 4, `${label}: expected >=4 unique source videos used, got ${slicesByUrl.size}`);
+    assert.equal(slicesByUrl.size, 6, `${label}: expected all 6 unique source videos used`);
   };
 
   let seed = 1337;
@@ -1231,7 +1257,7 @@ test('generateAutoClipPlan guarantees zero duplicate video slices with surplus f
       sampleRate: sr,
       rng: detRng,
     });
-    assertZeroOverlapsAndMixedIntervals(plan, cfg.name);
+    assertZeroOverlapsAndBarEditorial(plan, cfg.name);
 
     if (!cfg.shuffleOrder) {
       // Sequential modes strictly place initial library items in order 1 -> 2 -> 3 -> 4 -> 5 -> 6
@@ -1348,6 +1374,132 @@ test('resizeManualClipDuration supports push & overlap on full timelines, and Au
   const isMonotonicAsc = v34Starts.every((s, idx) => idx === 0 || s > v34Starts[idx - 1]);
   assert.equal(isMonotonicAsc, false, `Expected non-sequential jumps across 34s video, got [${v34Starts.join(', ')}]`);
 });
+
+test('resolveSafeVideoSourceRange enforces 5s head/tail edge exclusion and custom sourceStart/End bounds', () => {
+  const longBin: MediaBinItem = {
+    id: 'b-30',
+    kind: 'video',
+    fileName: 'long30.mp4',
+    url: 'blob:b-30',
+    width: 1920,
+    height: 1080,
+    videoDuration: 30,
+    defaultDurationSec: 20,
+  };
+  const autoEdge = resolveSafeVideoSourceRange(longBin, 5);
+  assert.equal(autoEdge.sourceStartSec, 5);
+  assert.equal(autoEdge.sourceEndSec, 25);
+  assert.equal(autoEdge.usableSpanSec, 20);
+
+  const customBounded: MediaBinItem = {
+    ...longBin,
+    defaultSourceStartSec: 8,
+    defaultSourceEndSec: 18,
+  };
+  const customRange = resolveSafeVideoSourceRange(customBounded, 5);
+  assert.equal(customRange.sourceStartSec, 8);
+  assert.equal(customRange.sourceEndSec, 18);
+  assert.equal(customRange.usableSpanSec, 10);
+
+  const shortBin: MediaBinItem = {
+    id: 'b-9',
+    kind: 'video',
+    fileName: 'short9.mp4',
+    url: 'blob:b-9',
+    width: 1920,
+    height: 1080,
+    videoDuration: 9,
+    defaultDurationSec: 9,
+  };
+  const shortRange = resolveSafeVideoSourceRange(shortBin, 5);
+  assert.equal(shortRange.sourceStartSec, 0);
+  assert.equal(shortRange.sourceEndSec, 9);
+  assert.equal(shortRange.usableSpanSec, 9);
+});
+
+test('dropBinItemIntoManualGap fills bounded timeline gaps without shoving neighbors', () => {
+  const existing: VisualMediaState[] = [
+    { ...makeClip('c1', 4), id: 'c1', startSec: 0 },
+    { ...makeClip('c2', 5), id: 'c2', startSec: 10 },
+  ];
+  const bigBinClip: MediaBinItem = {
+    id: 'bin-30',
+    kind: 'video',
+    fileName: 'big30.mp4',
+    url: 'blob:big30',
+    width: 1920,
+    height: 1080,
+    videoDuration: 30,
+    defaultDurationSec: 20,
+    defaultSourceStartSec: 5,
+    defaultSourceEndSec: 25,
+  };
+  const safeRange = resolveSafeVideoSourceRange(bigBinClip, 5);
+  assert.equal(safeRange.sourceStartSec, 5);
+  assert.equal(safeRange.usableSpanSec, 20);
+
+  const gapRes = dropBinItemIntoManualGap(existing, 6.4, safeRange.usableSpanSec, 30);
+  assert.equal(gapRes.filledGap, true);
+  assert.equal(gapRes.startSec, 4);
+  assert.equal(gapRes.durationSec, 6);
+
+  const edgeGapRes = dropBinItemIntoManualGap(existing, 4.05, safeRange.usableSpanSec, 30);
+  assert.equal(edgeGapRes.filledGap, true);
+  assert.equal(edgeGapRes.startSec, 4);
+  assert.equal(edgeGapRes.durationSec, 6);
+
+  const imgGapRes = dropBinItemIntoManualGap(existing, 7.0, 3.5, 30);
+  assert.equal(imgGapRes.filledGap, true);
+  assert.ok(imgGapRes.startSec >= 4 && imgGapRes.startSec + imgGapRes.durationSec <= 10);
+  assert.equal(imgGapRes.durationSec, 3.5);
+
+  const tailRes = dropBinItemIntoManualGap(existing, 18.0, safeRange.usableSpanSec, 30);
+  assert.equal(tailRes.filledGap, false);
+  assert.equal(tailRes.startSec, 18.0);
+  assert.equal(tailRes.durationSec, 12.0);
+});
+
+test('closeManualTimelineGap, closeAllManualGapsAndFitBeats, and moveManualClipGroup maintain beat alignment and zero overlaps', () => {
+  const beats = [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12];
+  const gapped: VisualMediaState[] = [
+    { ...makeClip('a', 2), id: 'a', startSec: 0 },
+    { ...makeClip('b', 2.2), id: 'b', startSec: 6.1 },
+    { ...makeClip('c', 2.0), id: 'c', startSec: 10.0 },
+  ];
+
+  const closedFirst = closeManualTimelineGap(gapped, 2, 6.1, beats, true, 12);
+  assert.equal(closedFirst[1].startSec, 2);
+  assert.ok(closedFirst[2].startSec! < 10);
+
+  const closedAll = closeAllManualGapsAndFitBeats(gapped, beats, 12, true);
+  assert.equal(closedAll[0].startSec, 0);
+  assert.equal(closedAll[1].startSec, closedAll[0].durationSec);
+  const totalEnd = closedAll[closedAll.length - 1].startSec! + closedAll[closedAll.length - 1].durationSec;
+  assert.equal(totalEnd, 12);
+
+  const gappedForMove: VisualMediaState[] = [
+    { ...makeClip('a', 2), id: 'a', startSec: 0 },
+    { ...makeClip('b', 2), id: 'b', startSec: 2 },
+    { ...makeClip('c', 3), id: 'c', startSec: 8 },
+  ];
+  const movedInsideGap = moveManualClipGroup(gappedForMove, ['a', 'b'], 3.0, 14, beats, true);
+  const ma = movedInsideGap.find((c) => c.id === 'a')!;
+  const mb = movedInsideGap.find((c) => c.id === 'b')!;
+  const mc = movedInsideGap.find((c) => c.id === 'c')!;
+  assert.equal(ma.startSec, 3);
+  assert.equal(mb.startSec, 5);
+  assert.equal(mc.startSec, 8);
+
+  const movedPastC = moveManualClipGroup(gappedForMove, ['a', 'b'], 9.0, 14, beats, true);
+  assert.deepEqual(
+    movedPastC.map((x) => x.id),
+    ['c', 'a', 'b']
+  );
+  assert.equal(movedPastC[0].startSec, 0);
+  assert.equal(movedPastC[1].startSec, 3);
+  assert.equal(movedPastC[2].startSec, 5);
+});
+
 
 
 

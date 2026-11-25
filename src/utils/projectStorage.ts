@@ -26,6 +26,7 @@ export interface SerializedBinItem {
   videoDuration?: number;
   defaultDurationSec: number;
   defaultSourceStartSec?: number;
+  defaultSourceEndSec?: number;
   defaultPlaybackRate?: number;
   defaultTransitionOut?: SlideTransitionType;
   defaultClipAudioMuted?: boolean;
@@ -290,6 +291,7 @@ export function serializeStudioState(
       videoDuration: b.videoDuration,
       defaultDurationSec: b.defaultDurationSec,
       defaultSourceStartSec: b.defaultSourceStartSec,
+      defaultSourceEndSec: b.defaultSourceEndSec,
       defaultPlaybackRate: b.defaultPlaybackRate,
       defaultTransitionOut: b.defaultTransitionOut,
       defaultClipAudioMuted: b.defaultClipAudioMuted,

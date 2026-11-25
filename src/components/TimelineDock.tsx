@@ -54,17 +54,24 @@ interface TimelineDockProps {
   audio: AudioTrackState | null;
   mediaItems: VisualMediaState[];
   selectedClipId: string | null;
+  selectedClipIds?: string[];
   selectedFxId: string | null;
   beatCutTimestamps: number[];
   config: StudioConfig;
   currentTime: number;
   onSeekAbsolute: (sec: number) => void;
-  onSelectClip: (id: string) => void;
+  onSelectClip: (
+    id: string,
+    modifiers?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }
+  ) => void;
   onSelectFx: (id: string | null) => void;
   onInspectClip: (id: string) => void;
   onInspectFx: (id: string) => void;
   onUpdateClip: (id: string, patch: Partial<VisualMediaState>) => void;
   onMoveClipPosition?: (clipId: string, rawStartSec: number) => void;
+  onMoveClipGroup?: (clipIds: string[], rawTargetStartSec: number) => void;
+  onCloseTimelineGap?: (gapStartSec: number, gapEndSec: number) => void;
+  onCloseAllGaps?: (fitBeatsAndMusic?: boolean) => void;
   onTrimClipLeftEdge?: (
     clipId: string,
     nextStartSec: number,
@@ -106,6 +113,7 @@ interface TimelineDockProps {
   onRippleDeleteSelected: () => void;
   onToggleSnapToBeats: () => void;
   onToggleStretchMode?: () => void;
+  onToggleAutoRipple?: () => void;
   onAddBeatMarker: () => void;
   onToggleBeatMarkerAt: (absSec: number) => void;
   onClearBeatMarkers: () => void;
@@ -270,6 +278,7 @@ export function TimelineDock({
   audio,
   mediaItems,
   selectedClipId,
+  selectedClipIds,
   selectedFxId,
   beatCutTimestamps,
   config,
@@ -281,6 +290,9 @@ export function TimelineDock({
   onInspectFx,
   onUpdateClip,
   onMoveClipPosition,
+  onMoveClipGroup,
+  onCloseTimelineGap,
+  onCloseAllGaps,
   onTrimClipLeftEdge,
   onDropBinItemToTimeline,
   onDropFilesToTimeline,
@@ -303,6 +315,7 @@ export function TimelineDock({
   onRippleDeleteSelected,
   onToggleSnapToBeats,
   onToggleStretchMode,
+  onToggleAutoRipple,
   onAddBeatMarker,
   onToggleBeatMarkerAt,
   onClearBeatMarkers,
@@ -345,6 +358,9 @@ export function TimelineDock({
   const [clipDropPreview, setClipDropPreview] = useState<{
     pct: number;
     anchoredToPlayhead: boolean;
+    gapStartPct?: number;
+    gapWidthPct?: number;
+    gapDurSec?: number;
   } | null>(null);
   const [clipDragHud, setClipDragHud] = useState<{
     clipId: string;
@@ -372,11 +388,15 @@ export function TimelineDock({
 
   const trimDragModeRef = useRef<'in' | 'out' | null>(null);
   const dockResizeRef = useRef<{ startY: number; startH: number } | null>(null);
+  const lastDragMovedRef = useRef(false);
   const clipResizeRef = useRef<{
     clipId: string;
     mode: 'move' | 'left' | 'right';
     kind: VisualMediaState['kind'];
     segStartSec: number;
+    groupClipIds?: string[];
+    groupStartSec?: number;
+    groupTotalDurSec?: number;
     origSourceStartSec: number;
     playbackRate: number;
     startX: number;
@@ -515,6 +535,33 @@ export function TimelineDock({
   }, [mediaItems, selectedClipId]);
 
   const selectedClip = selectedIndex >= 0 ? mediaItems[selectedIndex] : null;
+  const effectiveSelectedIds = useMemo(() => {
+    const valid = new Set(mediaItems.map((m) => m.id));
+    const filtered = (selectedClipIds || []).filter((id) => valid.has(id));
+    if (filtered.length > 0) return filtered;
+    return selectedClip ? [selectedClip.id] : [];
+  }, [mediaItems, selectedClip, selectedClipIds]);
+
+  const manualGaps = useMemo(() => {
+    if (config.slideshowMode !== 'manual' || clipSegments.length === 0) return [];
+    const sorted = [...clipSegments]
+      .filter((s) => !s.isLoopRepeat)
+      .sort((a, b) => a.startSec - b.startSec);
+    const gaps: Array<{ startSec: number; endSec: number; durSec: number }> = [];
+    let cursor = 0;
+    for (const seg of sorted) {
+      if (seg.startSec - cursor >= 0.25) {
+        gaps.push({
+          startSec: Number(cursor.toFixed(2)),
+          endSec: Number(seg.startSec.toFixed(2)),
+          durSec: Number((seg.startSec - cursor).toFixed(2)),
+        });
+      }
+      cursor = Math.max(cursor, seg.endSec);
+    }
+    return gaps;
+  }, [clipSegments, config.slideshowMode]);
+
   const fxOverlays = config.fxOverlays || [];
   const selectedFx = useMemo(
     () => (selectedFxId ? fxOverlays.find((fx) => fx.id === selectedFxId) || null : null),
@@ -1183,6 +1230,11 @@ export function TimelineDock({
                     <SlidersHorizontal className="w-2.5 h-2.5" aria-hidden="true" />
                     <span className="hidden md:inline">{t.inspectClipBtn}</span>
                   </button>
+                  {effectiveSelectedIds.length > 1 && (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/45 text-[10px] font-mono text-amber-200 whitespace-nowrap">
+                      {effectiveSelectedIds.length} {t.timelineSelectedCount}
+                    </span>
+                  )}
                 </>
               )}
             </div>
@@ -1334,6 +1386,34 @@ export function TimelineDock({
                   ? t.timelineStretchOverlapLabel
                   : t.timelineStretchPushLabel}
               </span>
+            </button>
+          )}
+
+          {onToggleAutoRipple && config.slideshowMode === 'manual' && (
+            <button
+              type="button"
+              onClick={onToggleAutoRipple}
+              title={t.timelineAutoShiftFitTitle}
+              aria-label={t.timelineAutoShiftFitTitle}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium cursor-pointer transition-colors whitespace-nowrap ${
+                config.autoRippleOnDelete !== false
+                  ? 'border-emerald-500/55 bg-emerald-500/15 text-emerald-200'
+                  : 'border-[#262B38] bg-[#141821] text-gray-400 hover:border-gray-500'
+              }`}
+            >
+              <span>{t.timelineAutoShiftFitLabel}</span>
+            </button>
+          )}
+
+          {onCloseAllGaps && config.slideshowMode === 'manual' && manualGaps.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onCloseAllGaps(true)}
+              title={t.timelineCloseAllGapsBtn}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-amber-500/55 bg-amber-500/15 hover:bg-amber-500/25 text-[11px] font-medium text-amber-200 cursor-pointer transition-colors whitespace-nowrap"
+            >
+              <span>{t.timelineCloseAllGapsBtn}</span>
+              <span className="font-mono text-[10px] opacity-85">({manualGaps.length})</span>
             </button>
           )}
 
@@ -1670,13 +1750,29 @@ export function TimelineDock({
                   if (!rect || rect.width <= 0) return;
                   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                   const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
+                  const isManual = config.slideshowMode === 'manual';
                   const overExisting =
-                    config.slideshowMode === 'manual' &&
+                    isManual &&
                     clipSegments.some(
-                      (s) => rawSec >= s.startSec - 0.08 && rawSec <= s.endSec + 0.08
+                      (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
                     );
                   if (overExisting) {
                     setClipDropPreview({ pct: playheadPct, anchoredToPlayhead: true });
+                    return;
+                  }
+                  const gapHit = isManual
+                    ? manualGaps.find(
+                        (g) => rawSec >= g.startSec - 0.04 && rawSec <= g.endSec + 0.04
+                      )
+                    : undefined;
+                  if (gapHit) {
+                    setClipDropPreview({
+                      pct: Math.max(0, Math.min(100, (gapHit.startSec / clipDuration) * 100)),
+                      anchoredToPlayhead: false,
+                      gapStartPct: (gapHit.startSec / clipDuration) * 100,
+                      gapWidthPct: (gapHit.durSec / clipDuration) * 100,
+                      gapDurSec: gapHit.durSec,
+                    });
                     return;
                   }
                   let snappedSec = rawSec;
@@ -1708,10 +1804,23 @@ export function TimelineDock({
                   if (rect && rect.width > 0) {
                     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                     const rawSec = Math.max(0, Number((ratio * clipDuration).toFixed(2)));
-                    finalSec =
-                      config.snapToBeats && relSnapPoints.length > 0
-                        ? Math.max(0, Number(snapTimeToBeat(rawSec, relSnapPoints, 0.22).toFixed(2)))
-                        : rawSec;
+                    const isManual = config.slideshowMode === 'manual';
+                    const gapHit = isManual
+                      ? manualGaps.find(
+                          (g) => rawSec >= g.startSec - 0.04 && rawSec <= g.endSec + 0.04
+                        )
+                      : undefined;
+                    if (gapHit) {
+                      finalSec = Math.max(
+                        gapHit.startSec,
+                        Math.min(Math.max(gapHit.startSec, gapHit.endSec - 0.02), rawSec)
+                      );
+                    } else {
+                      finalSec =
+                        config.snapToBeats && relSnapPoints.length > 0
+                          ? Math.max(0, Number(snapTimeToBeat(rawSec, relSnapPoints, 0.22).toFixed(2)))
+                          : rawSec;
+                    }
                   }
                   if (binId && onDropBinItemToTimeline) {
                     onDropBinItemToTimeline(binId, finalSec);
@@ -1771,13 +1880,35 @@ export function TimelineDock({
                       const overExisting =
                         isManualMode &&
                         clipSegments.some(
-                          (s) => rawSec >= s.startSec - 0.08 && rawSec <= s.endSec + 0.08
+                          (s) => rawSec > s.startSec + 0.04 && rawSec < s.endSec - 0.04
                         );
                       if (overExisting) {
                         return {
                           dropSec: rawSec,
                           previewPct: playheadPct,
                           anchoredToPlayhead: true,
+                        };
+                      }
+                      const gapHit = isManualMode
+                        ? manualGaps.find(
+                            (g) => rawSec >= g.startSec - 0.04 && rawSec <= g.endSec + 0.04
+                          )
+                        : undefined;
+                      if (gapHit) {
+                        const clampedGapSec = Math.max(
+                          gapHit.startSec,
+                          Math.min(Math.max(gapHit.startSec, gapHit.endSec - 0.02), rawSec)
+                        );
+                        return {
+                          dropSec: Number(clampedGapSec.toFixed(2)),
+                          previewPct: Math.max(
+                            0,
+                            Math.min(100, (gapHit.startSec / clipDuration) * 100)
+                          ),
+                          anchoredToPlayhead: false,
+                          gapStartPct: (gapHit.startSec / clipDuration) * 100,
+                          gapWidthPct: (gapHit.durSec / clipDuration) * 100,
+                          gapDurSec: gapHit.durSec,
                         };
                       }
                       let snappedSec = rawSec;
@@ -1806,6 +1937,9 @@ export function TimelineDock({
                           setClipDropPreview({
                             pct: info.previewPct,
                             anchoredToPlayhead: info.anchoredToPlayhead,
+                            gapStartPct: info.gapStartPct,
+                            gapWidthPct: info.gapWidthPct,
+                            gapDurSec: info.gapDurSec,
                           });
                         }}
                         onDragLeave={(e) => {
@@ -1845,7 +1979,23 @@ export function TimelineDock({
                             : 'bg-[#0B0D11]'
                         }`}
                       >
-                        {clipDropPreview !== null && (
+                        {clipDropPreview !== null &&
+                          clipDropPreview.gapWidthPct !== undefined &&
+                          clipDropPreview.gapStartPct !== undefined && (
+                            <div
+                              className="absolute top-0 bottom-0 bg-emerald-500/20 border-x border-emerald-400/80 z-[25] pointer-events-none flex items-center justify-center overflow-hidden"
+                              style={{
+                                left: `${clipDropPreview.gapStartPct}%`,
+                                width: `${clipDropPreview.gapWidthPct}%`,
+                              }}
+                            >
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500 text-zinc-950 text-[8.5px] font-mono font-bold shadow whitespace-nowrap">
+                                {t.timelineDropFillGapBadge} {clipDropPreview.gapDurSec?.toFixed(1)}s
+                              </span>
+                            </div>
+                          )}
+
+                        {clipDropPreview !== null && clipDropPreview.gapWidthPct === undefined && (
                           <div
                             className="absolute top-0 bottom-0 w-0.5 bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.95)] z-30 pointer-events-none"
                             style={{ left: `${clipDropPreview.pct}%` }}
@@ -1857,6 +2007,35 @@ export function TimelineDock({
                             )}
                           </div>
                         )}
+
+                        {isManualMode &&
+                          onCloseTimelineGap &&
+                          manualGaps.map((gap) => {
+                            const gapLeftPct = (gap.startSec / clipDuration) * 100;
+                            const gapWidthPct = Math.max(
+                              0,
+                              Math.min(100 - gapLeftPct, (gap.durSec / clipDuration) * 100)
+                            );
+                            if (gapWidthPct < 0.8) return null;
+                            return (
+                              <button
+                                key={`gap-${gap.startSec}-${gap.endSec}`}
+                                type="button"
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onCloseTimelineGap(gap.startSec, gap.endSec);
+                                }}
+                                style={{ left: `${gapLeftPct}%`, width: `${gapWidthPct}%` }}
+                                title={`${t.timelineCloseGapBtn} (${gap.durSec.toFixed(1)}s)`}
+                                className="absolute top-1 bottom-1 border border-dashed border-[#2C3447] hover:border-amber-400/75 bg-[#121620]/55 hover:bg-amber-500/15 rounded-xs z-10 flex items-center justify-center gap-1 text-[8.5px] font-mono text-gray-400 hover:text-amber-200 cursor-pointer transition-colors overflow-hidden px-1"
+                              >
+                                <ArrowLeftRight className="w-2.5 h-2.5 shrink-0" aria-hidden="true" />
+                                <span className="truncate">{gap.durSec.toFixed(1)}s</span>
+                              </button>
+                            );
+                          })}
+
                         {clipSegments.length > 0 ? (
                           clipSegments.map((seg, idx) => {
                             const clip = mediaItems[seg.clipIndex];
@@ -1864,7 +2043,7 @@ export function TimelineDock({
                             const segDur = seg.endSec - seg.startSec;
                             const leftPct = Math.max(0, Math.min(100, (seg.startSec / clipDuration) * 100));
                             const widthPct = Math.max(0, Math.min(100 - leftPct, (segDur / clipDuration) * 100));
-                            const isSelected = !selectedFx && selectedClip?.id === clip.id;
+                            const isSelected = !selectedFx && effectiveSelectedIds.includes(clip.id);
                             const isPlayheadInside =
                               localTime >= seg.startSec && localTime < seg.endSec + 0.001;
                             const isDragOver =
@@ -1914,14 +2093,38 @@ export function TimelineDock({
                                   onPointerDown={(e) => {
                                     if (!isManualMode) return;
                                     e.stopPropagation();
-                                    onSelectClip(clip.id);
                                     setSelectedLoopSegIdx(null);
-                                    if (onMoveClipPosition) {
+                                    if (e.metaKey || e.ctrlKey || e.shiftKey) {
+                                      lastDragMovedRef.current = false;
+                                      return;
+                                    }
+                                    const activeGroupIds = effectiveSelectedIds.includes(clip.id)
+                                      ? effectiveSelectedIds
+                                      : [clip.id];
+                                    if (!effectiveSelectedIds.includes(clip.id)) {
+                                      onSelectClip(clip.id);
+                                    }
+                                    const groupSegs = clipSegments.filter((s) =>
+                                      activeGroupIds.includes(mediaItems[s.clipIndex]?.id || '')
+                                    );
+                                    const groupStartSec =
+                                      groupSegs.length > 0
+                                        ? Math.min(...groupSegs.map((s) => s.startSec))
+                                        : seg.startSec;
+                                    const groupTotalDurSec =
+                                      groupSegs.length > 0
+                                        ? groupSegs.reduce((sum, s) => sum + (s.endSec - s.startSec), 0)
+                                        : segDur;
+                                    if (onMoveClipGroup || onMoveClipPosition) {
+                                      lastDragMovedRef.current = false;
                                       clipResizeRef.current = {
                                         clipId: clip.id,
                                         mode: 'move',
                                         kind: clip.kind,
                                         segStartSec: seg.startSec,
+                                        groupClipIds: activeGroupIds,
+                                        groupStartSec,
+                                        groupTotalDurSec,
                                         origSourceStartSec: clip.sourceStartSec || 0,
                                         playbackRate: clip.playbackRate || 1,
                                         startX: e.clientX,
@@ -1938,29 +2141,37 @@ export function TimelineDock({
                                     const drag = clipResizeRef.current;
                                     if (!drag || drag.clipId !== clip.id) return;
                                     if ((e.buttons & 1) === 0) return;
-                                    if (drag.mode === 'move' && onMoveClipPosition) {
+                                    if (drag.mode === 'move' && (onMoveClipGroup || onMoveClipPosition)) {
                                       if (!drag.hasMoved && Math.abs(e.clientX - drag.startX) < 3) {
                                         return;
                                       }
                                       drag.hasMoved = true;
+                                      lastDragMovedRef.current = true;
                                       const seqW =
                                         seqInnerRef.current?.getBoundingClientRect().width || 600;
                                       const deltaSec =
                                         ((e.clientX - drag.startX) / seqW) * drag.trackScaleSec;
-                                      const proposed = Math.max(0, drag.segStartSec + deltaSec);
-                                      onMoveClipPosition(clip.id, proposed);
+                                      const baseStart = drag.groupStartSec ?? drag.segStartSec;
+                                      const totalDur = drag.groupTotalDurSec ?? drag.startDur;
+                                      const proposed = Math.max(0, baseStart + deltaSec);
+                                      if (onMoveClipGroup && drag.groupClipIds && drag.groupClipIds.length > 0) {
+                                        onMoveClipGroup(drag.groupClipIds, proposed);
+                                      } else if (onMoveClipPosition) {
+                                        onMoveClipPosition(clip.id, proposed);
+                                      }
                                       setClipDragHud({
                                         clipId: clip.id,
                                         mode: 'move',
                                         startSec: Number(proposed.toFixed(1)),
-                                        endSec: Number((proposed + drag.startDur).toFixed(1)),
-                                        durSec: Number(drag.startDur.toFixed(1)),
+                                        endSec: Number((proposed + totalDur).toFixed(1)),
+                                        durSec: Number(totalDur.toFixed(1)),
                                       });
                                     }
                                   }}
                                   onPointerUp={(e) => {
                                     if (clipResizeRef.current?.clipId === clip.id) {
                                       e.stopPropagation();
+                                      lastDragMovedRef.current = clipResizeRef.current.hasMoved;
                                       clipResizeRef.current = null;
                                       setClipDragHud(null);
                                     }
@@ -1973,7 +2184,15 @@ export function TimelineDock({
                                   }}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    onSelectClip(clip.id);
+                                    if (lastDragMovedRef.current) {
+                                      lastDragMovedRef.current = false;
+                                      return;
+                                    }
+                                    onSelectClip(clip.id, {
+                                      shiftKey: e.shiftKey,
+                                      metaKey: e.metaKey,
+                                      ctrlKey: e.ctrlKey,
+                                    });
                                     setSelectedLoopSegIdx(seg.isLoopRepeat ? idx : null);
                                   }}
                                   onDoubleClick={(e) => {

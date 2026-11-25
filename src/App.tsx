@@ -31,6 +31,8 @@ import {
   AutoClipGenerateConfig,
   buildMonoAudioData,
   clampManualClipMove,
+  closeAllManualGapsAndFitBeats,
+  closeManualTimelineGap,
   computeAutoBeatAlignedClips,
   computeBeatCutTimestamps,
   computeClipTimelineSegments,
@@ -38,14 +40,17 @@ import {
   computeWaveformPeaks,
   createSmoothState,
   detectTrackBpmAndBeats,
+  dropBinItemIntoManualGap,
   findManualInsertionSlot,
   generateAutoClipPlan,
   generateDemoAudioBuffer,
   getNormalizedManualClipIntervals,
   getTimelineSpanSec,
   insertManualClipAtAnchor,
+  moveManualClipGroup,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
+  resolveSafeVideoSourceRange,
   resizeManualClipDuration,
   snapFxOverlayToBeats,
   snapTimeToBeat,
@@ -237,6 +242,7 @@ export default function App() {
   const [mediaBin, setMediaBin] = useState<MediaBinItem[]>([]);
   const [mediaItems, setMediaItems] = useState<VisualMediaState[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectedFxId, setSelectedFxId] = useState<string | null>(null);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   const [noticeError, setNoticeError] = useState<string | null>(null);
@@ -292,6 +298,7 @@ export default function App() {
   const mediaBinRef = useRef<MediaBinItem[]>(mediaBin);
   const mediaItemsRef = useRef<VisualMediaState[]>(mediaItems);
   const selectedClipIdRef = useRef<string | null>(selectedClipId);
+  const selectedClipIdsRef = useRef<string[]>(selectedClipIds);
   const selectedFxIdRef = useRef<string | null>(selectedFxId);
   const audioRef = useRef<AudioTrackState | null>(audio);
   const langRef = useRef<Language>(lang);
@@ -317,6 +324,7 @@ export default function App() {
   mediaBinRef.current = mediaBin;
   mediaItemsRef.current = mediaItems;
   selectedClipIdRef.current = selectedClipId;
+  selectedClipIdsRef.current = selectedClipIds;
   selectedFxIdRef.current = selectedFxId;
   audioRef.current = audio;
   langRef.current = lang;
@@ -1010,6 +1018,12 @@ export default function App() {
         video.src = binItem.url;
       }
       const vDur = binItem.videoDuration || 10;
+      const safeRange = resolveSafeVideoSourceRange(binItem, 0);
+      const defaultDur = binItem.defaultDurationSec || safeRange.usableSpanSec || vDur;
+      const cappedDur =
+        binItem.defaultSourceEndSec !== undefined
+          ? Math.min(defaultDur, safeRange.usableSpanSec)
+          : defaultDur;
       const resolvedMuted =
         placement.clipAudioMuted ?? binItem.defaultClipAudioMuted ?? Boolean(audioRef.current);
       return {
@@ -1025,8 +1039,8 @@ export default function App() {
         startSec: placement.startSec,
         durationSec:
           placement.durationSec ??
-          Number(Math.max(0.5, Math.min(600, binItem.defaultDurationSec || vDur)).toFixed(1)),
-        sourceStartSec: placement.sourceStartSec ?? binItem.defaultSourceStartSec ?? 0,
+          Number(Math.max(0.5, Math.min(600, cappedDur)).toFixed(1)),
+        sourceStartSec: placement.sourceStartSec ?? safeRange.sourceStartSec,
         playbackRate: placement.playbackRate ?? binItem.defaultPlaybackRate ?? 1.0,
         transitionOut: defaultTrans,
         transitionDurationSec: 0.65,
@@ -1045,12 +1059,18 @@ export default function App() {
     ) => {
       const cfg = configRef.current;
       const items = mediaItemsRef.current;
-      const defaultDur =
+      const safeRange = resolveSafeVideoSourceRange(binItem, 0);
+      const rawDefaultDur =
         binItem.kind === 'video'
-          ? Number(
-              Math.max(0.5, Math.min(600, binItem.defaultDurationSec || binItem.videoDuration || 10)).toFixed(1)
-            )
-          : Number(Math.max(0.4, Math.min(600, binItem.defaultDurationSec || 4.0)).toFixed(1));
+          ? binItem.defaultDurationSec || safeRange.usableSpanSec || binItem.videoDuration || 10
+          : binItem.defaultDurationSec || 4.0;
+      const boundedVideoDur =
+        binItem.kind === 'video' && binItem.defaultSourceEndSec !== undefined
+          ? Math.min(rawDefaultDur, safeRange.usableSpanSec)
+          : rawDefaultDur;
+      const defaultDur = Number(
+        Math.max(binItem.kind === 'video' ? 0.5 : 0.4, Math.min(600, boundedVideoDur)).toFixed(1)
+      );
 
       if (cfg.slideshowMode === 'manual') {
         const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
@@ -1079,51 +1099,54 @@ export default function App() {
           pushImmediateHistory();
           setMediaItems((prev) => [...prev, newClip]);
           setSelectedClipId(newClip.id);
+          setSelectedClipIds([newClip.id]);
           setSelectedFxId(null);
           return newClip.id;
         }
 
         if (options?.atTimeSec !== undefined && options?.mode !== 'playhead') {
-          const dropSec = Math.max(0, Math.min(Math.max(0, maxTimeline - 0.45), options.atTimeSec));
+          const dropSec = Math.max(0, Math.min(Math.max(0, maxTimeline - 0.4), options.atTimeSec));
+          // Strictly interior check so dropping into open gap adjacent to a clip edge fills only the gap
           const overlapsExisting = intervals.some(
-            (iv) => dropSec >= iv.startSec - 0.08 && dropSec <= iv.endSec + 0.08
+            (iv) => dropSec > iv.startSec + 0.04 && dropSec < iv.endSec - 0.04
           );
           if (overlapsExisting) {
-            const clampedAnchor = hasAud
-              ? Math.max(0, Math.min(Math.max(0, maxTimeline - 0.45), playheadLocalSec))
-              : playheadLocalSec;
             const newClip = buildClipFromBinItem(binItem, {
-              startSec: clampedAnchor,
+              startSec: dropSec,
               durationSec: defaultDur,
             });
             pushImmediateHistory();
             setMediaItems((prev) =>
-              insertManualClipAtAnchor(prev, newClip, clampedAnchor, maxTimeline)
+              insertManualClipAtAnchor(prev, newClip, dropSec, maxTimeline)
             );
             setSelectedClipId(newClip.id);
+            setSelectedClipIds([newClip.id]);
             setSelectedFxId(null);
             return newClip.id;
           }
 
           const beatPoints = trackBeatGridRef.current.beats;
-          let desiredStart = dropSec;
-          if (cfg.snapToBeats && beatPoints.length > 1) {
-            desiredStart = snapTimeToBeat(desiredStart, [0, ...beatPoints], 0.25);
+          const gapCheck = dropBinItemIntoManualGap(items, dropSec, defaultDur, maxTimeline);
+          let placement = gapCheck;
+          if (!gapCheck.filledGap && cfg.snapToBeats && beatPoints.length > 1) {
+            const snappedStart = snapTimeToBeat(dropSec, [0, ...beatPoints], 0.25);
+            placement = dropBinItemIntoManualGap(items, snappedStart, defaultDur, maxTimeline);
           }
-          const slot = findManualInsertionSlot(items, desiredStart, defaultDur, maxTimeline);
-          if (hasAud && (slot.durationSec < 0.4 || slot.startSec >= maxTimeline - 0.4)) {
+
+          if (hasAud && (placement.durationSec < 0.4 || placement.startSec >= maxTimeline - 0.4)) {
             showUndoToast(tFor(langRef.current).errTimelineFullMusic);
             return null;
           }
           const newClip = buildClipFromBinItem(binItem, {
-            startSec: slot.startSec,
-            durationSec: Math.min(defaultDur, slot.durationSec),
+            startSec: placement.startSec,
+            durationSec: placement.durationSec,
           });
           pushImmediateHistory();
           setMediaItems((prev) =>
             [...prev, newClip].sort((a, b) => (a.startSec ?? 0) - (b.startSec ?? 0))
           );
           setSelectedClipId(newClip.id);
+          setSelectedClipIds([newClip.id]);
           setSelectedFxId(null);
           return newClip.id;
         }
@@ -1140,6 +1163,7 @@ export default function App() {
           insertManualClipAtAnchor(prev, newClip, anchorStart, maxTimeline)
         );
         setSelectedClipId(newClip.id);
+        setSelectedClipIds([newClip.id]);
         setSelectedFxId(null);
         return newClip.id;
       }
@@ -1152,6 +1176,7 @@ export default function App() {
           : insertClipAfterSelection(prev, newClip, selectedClipIdRef.current)
       );
       setSelectedClipId(newClip.id);
+      setSelectedClipIds([newClip.id]);
       setSelectedFxId(null);
       return newClip.id;
     },
@@ -1220,6 +1245,10 @@ export default function App() {
         video.preload = 'metadata';
         video.onloadedmetadata = () => {
           const vDur = video.duration || 10;
+          const trimEdges = vDur >= 12.5;
+          const initStart = trimEdges ? 5 : 0;
+          const initEnd = trimEdges ? Number((vDur - 5).toFixed(1)) : Number(vDur.toFixed(1));
+          const usableDur = Math.max(0.5, initEnd - initStart);
           const newBinItem: MediaBinItem = {
             id: binId,
             kind: 'video',
@@ -1228,7 +1257,9 @@ export default function App() {
             width: video.videoWidth || 1080,
             height: video.videoHeight || 1920,
             videoDuration: vDur,
-            defaultDurationSec: Number(Math.max(0.5, Math.min(600, vDur)).toFixed(1)),
+            defaultSourceStartSec: initStart,
+            defaultSourceEndSec: initEnd,
+            defaultDurationSec: Number(Math.max(0.5, Math.min(600, usableDur)).toFixed(1)),
           };
           pushImmediateHistory();
           setMediaBin((prev) => [...prev, newBinItem]);
@@ -1556,6 +1587,7 @@ export default function App() {
                 defaultDurationSec:
                   sb.defaultDurationSec || Number(Math.max(0.5, Math.min(600, vDur)).toFixed(1)),
                 defaultSourceStartSec: sb.defaultSourceStartSec,
+                defaultSourceEndSec: sb.defaultSourceEndSec,
                 defaultPlaybackRate: sb.defaultPlaybackRate,
                 defaultTransitionOut: sb.defaultTransitionOut,
                 defaultClipAudioMuted: sb.defaultClipAudioMuted,
@@ -2062,6 +2094,7 @@ export default function App() {
     if (created.length > 0) {
       setMediaItems((prev) => [...prev, ...created]);
       setSelectedClipId(created[0].id);
+      setSelectedClipIds([created[0].id]);
       setSelectedFxId(null);
     } else if (hasAud) {
       showUndoToast(tFor(langRef.current).errTimelineFullMusic);
@@ -2199,6 +2232,7 @@ export default function App() {
           startOffsetSec,
           avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
           shuffleOrder: autoCfg.shuffleOrder,
+          excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
           excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
           excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
           fillToTargetEnd: Boolean(aud),
@@ -2260,6 +2294,7 @@ export default function App() {
       const nextItems = isAppend ? [...normalizedPrev, ...builtClips] : builtClips;
       setMediaItems(nextItems);
       setSelectedClipId(builtClips[0].id);
+      setSelectedClipIds([builtClips[0].id]);
       setSelectedFxId(null);
       if (cfg.slideshowMode !== 'manual') {
         setConfig((prev) => ({ ...prev, slideshowMode: 'manual' }));
@@ -2459,6 +2494,72 @@ export default function App() {
     [getEffectiveTimelineBounds, queueDebouncedHistory, trackBeatGrid.beats]
   );
 
+  const handleMoveClipGroup = useCallback(
+    (clipIds: string[], rawTargetStartSec: number) => {
+      const cfg = configRef.current;
+      const items = mediaItemsRef.current;
+      if (cfg.slideshowMode !== 'manual' || clipIds.length === 0) return;
+      queueDebouncedHistory();
+      const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+      const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+      const beats = trackBeatGrid.beats.length > 0 ? [0, ...trackBeatGrid.beats] : [];
+      setMediaItems((prev) =>
+        moveManualClipGroup(prev, clipIds, rawTargetStartSec, maxTimeline, beats, cfg.snapToBeats)
+      );
+    },
+    [getEffectiveTimelineBounds, queueDebouncedHistory, trackBeatGrid.beats]
+  );
+
+  const handleCloseTimelineGap = useCallback(
+    (gapStartSec: number, gapEndSec: number) => {
+      const cfg = configRef.current;
+      const items = mediaItemsRef.current;
+      if (items.length === 0) return;
+      pushImmediateHistory();
+      const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+      const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+      const beats = trackBeatGrid.beats.length > 0 ? [0, ...trackBeatGrid.beats] : [];
+      setMediaItems((prev) =>
+        closeManualTimelineGap(
+          prev,
+          gapStartSec,
+          gapEndSec,
+          beats,
+          Boolean(cfg.snapToBeats),
+          audioRef.current ? maxTimeline : undefined
+        )
+      );
+      if (cfg.slideshowMode !== 'manual') {
+        setConfig((prev) => ({ ...prev, slideshowMode: 'manual' }));
+      }
+    },
+    [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid.beats]
+  );
+
+  const handleCloseAllGaps = useCallback(
+    (fitBeatsAndMusic = true) => {
+      const cfg = configRef.current;
+      const items = mediaItemsRef.current;
+      if (items.length === 0) return;
+      pushImmediateHistory();
+      const bounds = getEffectiveTimelineBounds(cfg, items, audioRef.current);
+      const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+      const beats = trackBeatGrid.beats.length > 0 ? [0, ...trackBeatGrid.beats] : [];
+      setMediaItems((prev) =>
+        closeAllManualGapsAndFitBeats(
+          prev,
+          beats,
+          maxTimeline,
+          fitBeatsAndMusic && Boolean(audioRef.current)
+        )
+      );
+      if (cfg.slideshowMode !== 'manual') {
+        setConfig((prev) => ({ ...prev, slideshowMode: 'manual' }));
+      }
+    },
+    [getEffectiveTimelineBounds, pushImmediateHistory, trackBeatGrid.beats]
+  );
+
   const handleTrimClipLeftEdge = useCallback(
     (
       clipId: string,
@@ -2520,10 +2621,46 @@ export default function App() {
     [getEffectiveTimelineBounds, queueDebouncedHistory]
   );
 
-  const handleSelectClip = useCallback((id: string) => {
-    setSelectedClipId(id);
-    setSelectedFxId(null);
-  }, []);
+  const handleSelectClip = useCallback(
+    (id: string, modifiers?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }) => {
+      setSelectedFxId(null);
+      if (modifiers?.metaKey || modifiers?.ctrlKey) {
+        const prev = selectedClipIdsRef.current.length > 0
+          ? selectedClipIdsRef.current
+          : selectedClipIdRef.current
+            ? [selectedClipIdRef.current]
+            : [];
+        const exists = prev.includes(id);
+        const next = exists ? prev.filter((x) => x !== id) : [...prev, id];
+        if (next.length === 0) {
+          setSelectedClipIds([id]);
+          setSelectedClipId(id);
+        } else {
+          setSelectedClipIds(next);
+          setSelectedClipId(exists ? next[next.length - 1] : id);
+        }
+        return;
+      }
+      if (modifiers?.shiftKey && selectedClipIdRef.current) {
+        const ordered =
+          configRef.current.slideshowMode === 'manual'
+            ? [...mediaItemsRef.current].sort((a, b) => (a.startSec ?? 0) - (b.startSec ?? 0))
+            : mediaItemsRef.current;
+        const idxA = ordered.findIndex((c) => c.id === selectedClipIdRef.current);
+        const idxB = ordered.findIndex((c) => c.id === id);
+        if (idxA >= 0 && idxB >= 0) {
+          const lo = Math.min(idxA, idxB);
+          const hi = Math.max(idxA, idxB);
+          setSelectedClipIds(ordered.slice(lo, hi + 1).map((c) => c.id));
+          setSelectedClipId(id);
+          return;
+        }
+      }
+      setSelectedClipId(id);
+      setSelectedClipIds([id]);
+    },
+    []
+  );
 
   const handleSelectFx = useCallback((id: string | null) => {
     setSelectedFxId(id);
@@ -3356,23 +3493,49 @@ export default function App() {
     }
   }, [beatCutTimestamps, getEffectiveTimelineBounds, pushImmediateHistory]);
 
-  const handleRemoveVisual = useCallback(
-    (id: string) => {
+  const removeClipsByIds = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return;
       const prev = mediaItemsRef.current;
-      const target = prev.find((item) => item.id === id);
-      if (!target) return;
+      const idSet = new Set(ids);
+      const targets = prev.filter((item) => idSet.has(item.id));
+      if (targets.length === 0) return;
       pushImmediateHistory();
-      if (target.kind === 'video') {
-        detachClipVideoElement(target.videoElement);
+      for (const target of targets) {
+        if (target.kind === 'video') {
+          detachClipVideoElement(target.videoElement);
+        }
       }
-      const remaining = prev.filter((item) => item.id !== id);
+      const cfg = configRef.current;
+      let remaining = prev.filter((item) => !idSet.has(item.id));
+      if (cfg.slideshowMode === 'manual' && cfg.autoRippleOnDelete && remaining.length > 0) {
+        const bounds = getEffectiveTimelineBounds(cfg, prev, audioRef.current);
+        const maxTimeline = audioRef.current ? bounds.clipDuration : 3600;
+        const beats = trackBeatGrid.beats.length > 0 ? [0, ...trackBeatGrid.beats] : [];
+        remaining = closeAllManualGapsAndFitBeats(
+          remaining,
+          beats,
+          maxTimeline,
+          Boolean(audioRef.current)
+        );
+      }
       setMediaItems(remaining);
-      if (selectedClipIdRef.current === id) {
-        setSelectedClipId(remaining[0]?.id ?? null);
+      const nextIds = selectedClipIdsRef.current.filter((cid) => !idSet.has(cid));
+      const fallback = remaining[0]?.id ?? null;
+      setSelectedClipIds(nextIds.length > 0 ? nextIds : fallback ? [fallback] : []);
+      if (!selectedClipIdRef.current || idSet.has(selectedClipIdRef.current)) {
+        setSelectedClipId(nextIds[0] ?? fallback);
       }
       showUndoToast(tFor(langRef.current).toastClipDeleted);
     },
-    [pushImmediateHistory, showUndoToast]
+    [getEffectiveTimelineBounds, pushImmediateHistory, showUndoToast, trackBeatGrid.beats]
+  );
+
+  const handleRemoveVisual = useCallback(
+    (id: string) => {
+      removeClipsByIds([id]);
+    },
+    [removeClipsByIds]
   );
 
   const handleRippleDeleteSelected = useCallback(() => {
@@ -3382,9 +3545,15 @@ export default function App() {
     }
     const items = mediaItemsRef.current;
     if (items.length === 0) return;
-    const targetId = selectedClipIdRef.current || items[0].id;
-    handleRemoveVisual(targetId);
-  }, [handleRemoveFxOverlay, handleRemoveVisual]);
+    const validSet = new Set(items.map((m) => m.id));
+    const multi = selectedClipIdsRef.current.filter((cid) => validSet.has(cid));
+    if (multi.length > 0) {
+      removeClipsByIds(multi);
+    } else {
+      const targetId = selectedClipIdRef.current || items[0].id;
+      removeClipsByIds([targetId]);
+    }
+  }, [handleRemoveFxOverlay, removeClipsByIds]);
 
   const handleClearVisuals = useCallback(() => {
     if (mediaItemsRef.current.length === 0) return;
@@ -3396,6 +3565,7 @@ export default function App() {
     }
     setMediaItems([]);
     setSelectedClipId(null);
+    setSelectedClipIds([]);
   }, [pushImmediateHistory]);
 
   const handleUseEmbeddedCover = useCallback(() => {
@@ -3843,6 +4013,11 @@ export default function App() {
                 decodedAudioBuffer: decodedBuf,
                 defaultDurationSec:
                   sb.defaultDurationSec || Number(Math.max(0.5, Math.min(600, vDur)).toFixed(1)),
+                defaultSourceStartSec: sb.defaultSourceStartSec,
+                defaultSourceEndSec: sb.defaultSourceEndSec,
+                defaultPlaybackRate: sb.defaultPlaybackRate,
+                defaultTransitionOut: sb.defaultTransitionOut,
+                defaultClipAudioMuted: sb.defaultClipAudioMuted,
               });
             } else {
               missingBinaryMedia = true;
@@ -5087,6 +5262,7 @@ export default function App() {
         audio={audio}
         mediaItems={mediaItems}
         selectedClipId={selectedClipId}
+        selectedClipIds={selectedClipIds}
         selectedFxId={selectedFxId}
         beatCutTimestamps={beatCutTimestamps}
         config={config}
@@ -5098,6 +5274,9 @@ export default function App() {
         onInspectFx={handleInspectFx}
         onUpdateClip={handleUpdateClip}
         onMoveClipPosition={handleMoveClipPosition}
+        onMoveClipGroup={handleMoveClipGroup}
+        onCloseTimelineGap={handleCloseTimelineGap}
+        onCloseAllGaps={handleCloseAllGaps}
         onTrimClipLeftEdge={handleTrimClipLeftEdge}
         onDropBinItemToTimeline={handleDropBinItemToTimeline}
         onDropFilesToTimeline={handleDropFilesToTimeline}
@@ -5123,6 +5302,11 @@ export default function App() {
         onToggleStretchMode={() =>
           handleUpdateConfig({
             timelineStretchMode: config.timelineStretchMode === 'overlap' ? 'push' : 'overlap',
+          })
+        }
+        onToggleAutoRipple={() =>
+          handleUpdateConfig({
+            autoRippleOnDelete: !config.autoRippleOnDelete,
           })
         }
         onAddBeatMarker={handleAddBeatMarker}

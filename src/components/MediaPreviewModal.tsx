@@ -50,6 +50,7 @@ export function MediaPreviewModal({
   const maxVideoDur = Math.max(0.5, asset.videoDuration || asset.defaultDurationSec || 10);
   const [dur, setDur] = useState<number>(asset.defaultDurationSec);
   const [sourceStart, setSourceStart] = useState<number>(asset.defaultSourceStartSec ?? 0);
+  const [sourceEnd, setSourceEnd] = useState<number>(asset.defaultSourceEndSec ?? maxVideoDur);
   const [rate, setRate] = useState<number>(asset.defaultPlaybackRate ?? 1.0);
   const [muted, setMuted] = useState<boolean>(
     asset.defaultClipAudioMuted ?? hasMasterAudio
@@ -107,16 +108,26 @@ export function MediaPreviewModal({
     }
   };
 
-  const buildPatch = (): Partial<MediaBinItem> => ({
-    defaultDurationSec: Number(Math.max(0.4, Math.min(600, dur)).toFixed(1)),
-    defaultSourceStartSec:
+  const buildPatch = (): Partial<MediaBinItem> => {
+    const clampedStart =
       asset.kind === 'video'
         ? Number(Math.max(0, Math.min(Math.max(0, maxVideoDur - 0.4), sourceStart)).toFixed(2))
-        : 0,
-    defaultPlaybackRate: asset.kind === 'video' ? rate : 1.0,
-    defaultTransitionOut: trans,
-    defaultClipAudioMuted: asset.kind === 'video' ? muted : true,
-  });
+        : 0;
+    const clampedEnd =
+      asset.kind === 'video'
+        ? Number(
+            Math.max(Math.min(maxVideoDur, clampedStart + 0.4), Math.min(maxVideoDur, sourceEnd)).toFixed(2)
+          )
+        : undefined;
+    return {
+      defaultDurationSec: Number(Math.max(0.4, Math.min(600, dur)).toFixed(1)),
+      defaultSourceStartSec: clampedStart,
+      defaultSourceEndSec: clampedEnd,
+      defaultPlaybackRate: asset.kind === 'video' ? rate : 1.0,
+      defaultTransitionOut: trans,
+      defaultClipAudioMuted: asset.kind === 'video' ? muted : true,
+    };
+  };
 
   const handleSave = () => {
     onSaveDefaults(asset.id, buildPatch(), syncPlaced);
@@ -237,11 +248,11 @@ export function MediaPreviewModal({
                       type="button"
                       onClick={() => {
                         const nextIn = Number(
-                          Math.max(0, Math.min(maxVideoDur - 0.5, previewTime)).toFixed(2)
+                          Math.max(0, Math.min(sourceEnd - 0.4, previewTime)).toFixed(2)
                         );
                         setSourceStart(nextIn);
                         setDur((prev) =>
-                          Number(Math.max(0.5, Math.min(maxVideoDur - nextIn, prev)).toFixed(1))
+                          Number(Math.max(0.5, Math.min(sourceEnd - nextIn, prev)).toFixed(1))
                         );
                       }}
                       className="px-2 py-1 rounded border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-[11px] font-medium text-amber-300 flex items-center gap-1 cursor-pointer"
@@ -252,22 +263,39 @@ export function MediaPreviewModal({
                     <button
                       type="button"
                       onClick={() => {
-                        const computedLen = Number(
-                          Math.max(0.5, Math.min(600, previewTime - sourceStart)).toFixed(1)
+                        const nextOut = Number(
+                          Math.max(Math.min(maxVideoDur, sourceStart + 0.4), Math.min(maxVideoDur, previewTime)).toFixed(2)
                         );
-                        if (previewTime > sourceStart + 0.4) {
-                          setDur(computedLen);
-                        }
+                        setSourceEnd(nextOut);
+                        setDur(Number(Math.max(0.5, nextOut - sourceStart).toFixed(1)));
                       }}
                       className="px-2 py-1 rounded border border-cyan-500/50 bg-cyan-500/10 hover:bg-cyan-500/20 text-[11px] font-medium text-cyan-200 cursor-pointer"
                     >
-                      {t.previewSetOutBtn}
+                      {t.previewSetRangeEndBtn} ({previewTime.toFixed(1)}s)
                     </button>
-                    {sourceStart > 0.05 && (
+                    {maxVideoDur >= 12.5 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const s = 5;
+                          const e = Number((maxVideoDur - 5).toFixed(1));
+                          setSourceStart(s);
+                          setSourceEnd(e);
+                          setDur((prev) => Number(Math.max(0.5, Math.min(e - s, prev)).toFixed(1)));
+                          if (videoRef.current) videoRef.current.currentTime = s;
+                          setPreviewTime(s);
+                        }}
+                        className="px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-[11px] text-emerald-200 hover:bg-emerald-500/20 cursor-pointer"
+                      >
+                        {t.binEdgeTrim5sBtn}
+                      </button>
+                    )}
+                    {(sourceStart > 0.05 || sourceEnd < maxVideoDur - 0.05) && (
                       <button
                         type="button"
                         onClick={() => {
                           setSourceStart(0);
+                          setSourceEnd(Number(maxVideoDur.toFixed(1)));
                           if (videoRef.current) videoRef.current.currentTime = 0;
                           setPreviewTime(0);
                         }}
@@ -341,19 +369,41 @@ export function MediaPreviewModal({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
               {asset.kind === 'video' && (
                 <label className="space-y-1 block">
-                  <span className="text-[10px] text-gray-400 block">{t.clipVideoStartLabel}</span>
+                  <span className="text-[10px] text-gray-400 block">{t.binRangeStartLabel}</span>
                   <input
                     type="number"
                     min={0}
-                    max={Math.max(0, maxVideoDur - 0.4)}
+                    max={Math.max(0, sourceEnd - 0.4)}
                     step={0.1}
                     value={Number(sourceStart.toFixed(2))}
                     onChange={(e) =>
                       setSourceStart(
-                        Math.max(0, Math.min(Math.max(0, maxVideoDur - 0.4), Number(e.target.value) || 0))
+                        Math.max(0, Math.min(Math.max(0, sourceEnd - 0.4), Number(e.target.value) || 0))
+                      )
+                    }
+                    className="w-full rounded bg-[#0E1016] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
+                  />
+                </label>
+              )}
+
+              {asset.kind === 'video' && (
+                <label className="space-y-1 block">
+                  <span className="text-[10px] text-gray-400 block">{t.binRangeEndLabel}</span>
+                  <input
+                    type="number"
+                    min={Math.min(maxVideoDur, sourceStart + 0.4)}
+                    max={Number(maxVideoDur.toFixed(2))}
+                    step={0.1}
+                    value={Number(sourceEnd.toFixed(2))}
+                    onChange={(e) =>
+                      setSourceEnd(
+                        Math.max(
+                          Math.min(maxVideoDur, sourceStart + 0.4),
+                          Math.min(maxVideoDur, Number(e.target.value) || maxVideoDur)
+                        )
                       )
                     }
                     className="w-full rounded bg-[#0E1016] border border-[#262B38] px-2 py-1 text-xs font-mono text-gray-100"
