@@ -18,13 +18,16 @@ import {
 import {
   analyzeAudioAtTime,
   buildMonoAudioData,
+  computeBeatCutsFromGrid,
   computeBeatCutTimestamps,
   computeClipTimelineSegments,
   computeFadeEnvelope,
   createSmoothState,
+  detectTrackBpmAndBeats,
   getTimelineSpanSec,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
+  resolveCalibratedBeatGrid,
 } from './audioAnalyzer';
 import { renderStudioFrame } from './canvasRenderer';
 
@@ -484,17 +487,42 @@ export async function exportStudioVideo(params: {
 
   const audioSampleRate = audio?.sampleRate || 48000;
   const monoData = audio ? buildMonoAudioData(audio.buffer) : new Float32Array(0);
-  const autoCuts =
-    audio && effectiveConfig.slideshowMode === 'beat_cut'
-      ? computeBeatCutTimestamps(
-          monoData,
-          audioSampleRate,
-          effectiveConfig.trimStart,
-          effectiveConfig.trimEnd,
-          effectiveConfig.minBeatCutSec,
-          effectiveConfig.beatSensitivity
-        )
-      : [0];
+  const hasCalibratedGrid =
+    (effectiveConfig.beatGridMode ?? 'auto') !== 'auto' ||
+    Math.abs(effectiveConfig.beatOffsetSec ?? 0) > 0.005 ||
+    (effectiveConfig.beatDownbeatShift ?? 0) !== 0;
+  let autoCuts: number[] = [0];
+  if (audio && effectiveConfig.slideshowMode === 'beat_cut') {
+    if (hasCalibratedGrid) {
+      const rawGrid = detectTrackBpmAndBeats(
+        monoData,
+        audioSampleRate,
+        effectiveConfig.trimStart,
+        effectiveConfig.trimEnd,
+        effectiveConfig.beatSensitivity
+      );
+      const calibratedGrid = resolveCalibratedBeatGrid(rawGrid, clipDuration, {
+        mode: effectiveConfig.beatGridMode,
+        manualBpm: effectiveConfig.manualBpm,
+        offsetSec: effectiveConfig.beatOffsetSec,
+        downbeatShift: effectiveConfig.beatDownbeatShift,
+      });
+      autoCuts = computeBeatCutsFromGrid(
+        calibratedGrid,
+        clipDuration,
+        effectiveConfig.minBeatCutSec
+      );
+    } else {
+      autoCuts = computeBeatCutTimestamps(
+        monoData,
+        audioSampleRate,
+        effectiveConfig.trimStart,
+        effectiveConfig.trimEnd,
+        effectiveConfig.minBeatCutSec,
+        effectiveConfig.beatSensitivity
+      );
+    }
+  }
   const beatCutTimestamps = resolveBeatCutPoints(
     autoCuts,
     effectiveConfig.manualBeatMarkers,

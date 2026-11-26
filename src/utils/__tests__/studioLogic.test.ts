@@ -2,15 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MediaBinItem, StudioConfig, VisualMediaState } from '../../types/studio';
 import {
+  alignBeatGridToTime,
   AUTO_CLIP_PRESETS,
   clampManualClipMove,
   closeAllManualGapsAndFitBeats,
   closeManualTimelineGap,
   computeAutoBeatAlignedClips,
+  computeBeatCutsFromGrid,
   computeBeatMusicalAccents,
   computeClipTimelineSegments,
   computeFadeEnvelope,
   computePhraseEnergyCurve,
+  computeTapTempoBpm,
   detectTrackBpmAndBeats,
   dropBinItemIntoManualGap,
   findManualInsertionSlot,
@@ -23,6 +26,7 @@ import {
   packTimelineLanes,
   resizeManualClipDuration,
   resolveActiveSlideshowSlice,
+  resolveCalibratedBeatGrid,
   resolveOverlayWindow,
   resolveSafeVideoSourceRange,
   snapTimeToBeat,
@@ -1791,6 +1795,136 @@ test('auto_rhythm produces varied durations despite sharp drum accents and keeps
     assert.notEqual(plan[i].binItemId, plan[i - 1].binItemId);
   }
 });
+
+test('resolveCalibratedBeatGrid supports strict_bpm, custom_bpm, offsetSec, and downbeatShift without drift', () => {
+  const rawGrid = {
+    bpm: 120,
+    exactBpm: 120,
+    beatSec: 0.5,
+    anchorSec: 0.12,
+    downbeatOffset: 1, // raw beat[1] = 0.65 is Beat 1
+    beats: [0.12, 0.65, 1.09, 1.61, 2.13, 2.62],
+  };
+
+  const strict = resolveCalibratedBeatGrid(rawGrid, 10, {
+    mode: 'strict_bpm',
+    offsetSec: 0,
+    downbeatShift: 0,
+  });
+  assert.equal(strict.bpm, 120);
+  assert.ok(Math.abs(strict.beats[0] - 0.12) < 0.005);
+  assert.ok(Math.abs(strict.beats[4] - 2.12) < 0.005, `Expected strict lattice without jitter, got ${strict.beats[4]}`);
+  assert.equal(strict.downbeatOffset, 1);
+
+  const custom = resolveCalibratedBeatGrid(rawGrid, 10, {
+    mode: 'custom_bpm',
+    manualBpm: 150, // 0.4s beat interval
+    offsetSec: 0.05,
+    downbeatShift: 0,
+  });
+  assert.equal(custom.bpm, 150);
+  assert.ok(Math.abs(custom.beatSec - 0.4) < 0.001);
+  assert.ok(
+    custom.beats.some((b) => Math.abs(b - 0.17) < 0.005),
+    `Expected shifted lattice beat at 0.17s, got [${custom.beats.slice(0, 4).join(', ')}]`
+  );
+  assert.ok(
+    Math.abs((custom.beats[2] - custom.beats[1]) - 0.4) < 0.002,
+    'Expected exact 0.4s spacing at 150 BPM'
+  );
+
+  // Shifting left so beat[0] drops below 0.02s keeps Beat 1 locked to original beat[1]
+  const shiftedLeft = resolveCalibratedBeatGrid(rawGrid, 10, {
+    mode: 'strict_bpm',
+    offsetSec: -0.14, // old beat[0] (0.12) -> -0.02 (dropped), old beat[1] (0.62) -> 0.48 (now index 0!)
+    downbeatShift: 0,
+  });
+  assert.ok(Math.abs(shiftedLeft.beats[0] - 0.48) < 0.005);
+  assert.equal(shiftedLeft.downbeatOffset, 0, 'Beat 1 should follow old beat[1] into index 0');
+});
+
+test('alignBeatGridToTime aligns Beat 1 directly to playhead and computeTapTempoBpm measures steady taps', () => {
+  const rawGrid = {
+    bpm: 120,
+    exactBpm: 120,
+    beatSec: 0.5,
+    anchorSec: 0,
+    downbeatOffset: 0,
+    beats: [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+  };
+  const aligned = alignBeatGridToTime(rawGrid, 20, 1.63, 'strict_bpm');
+  const resolved = resolveCalibratedBeatGrid(rawGrid, 20, {
+    mode: 'strict_bpm',
+    offsetSec: aligned.offsetSec,
+    downbeatShift: aligned.downbeatShift,
+  });
+  const beatAtTargetIdx = resolved.beats.findIndex((b) => Math.abs(b - 1.63) < 0.005);
+  assert.ok(beatAtTargetIdx >= 0, 'Expected calibrated beat directly on target playhead 1.63s');
+  assert.equal(
+    (((beatAtTargetIdx - (resolved.downbeatOffset ?? 0)) % 4) + 4) % 4,
+    0,
+    'Aligned beat at playhead must become Bar Beat 1'
+  );
+
+  const tapped = computeTapTempoBpm([1000, 1500, 2000, 2500, 3000]);
+  assert.equal(tapped, 120);
+  const pausedTap = computeTapTempoBpm([1000, 1500, 6000, 6400, 6800]);
+  assert.equal(pausedTap, 150);
+
+  const cuts = computeBeatCutsFromGrid(resolved, 20, 1.5);
+  assert.ok(cuts.length >= 4);
+  for (let i = 1; i < cuts.length; i++) {
+    assert.ok(
+      resolved.beats.some((b) => Math.abs(b - cuts[i]) < 0.005),
+      `Expected cut ${cuts[i]} to sit directly on calibrated beat grid`
+    );
+  }
+});
+
+test('generateAutoClipPlan cuts lock onto user-calibrated beat grid phase and BPM', () => {
+  const bin: MediaBinItem[] = ['a', 'b', 'c', 'd'].map((id) => ({
+    id,
+    kind: 'image',
+    fileName: `${id}.jpg`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    defaultDurationSec: 4,
+  }));
+  const rawGrid = {
+    bpm: 120,
+    exactBpm: 120,
+    beatSec: 0.5,
+    anchorSec: 0,
+    downbeatOffset: 0,
+    beats: Array.from({ length: 40 }, (_, i) => Number(((i + 1) * 0.5).toFixed(2))),
+  };
+  const calibrated = resolveCalibratedBeatGrid(rawGrid, 24, {
+    mode: 'custom_bpm',
+    manualBpm: 100, // 0.6s beat interval
+    offsetSec: 0.14,
+    downbeatShift: 2,
+  });
+
+  const plan = generateAutoClipPlan(bin, calibrated, [], 0, 24, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_4',
+    minClipSec: 2.0,
+    maxClipSec: 8.0,
+    fillToTargetEnd: true,
+    hasAudio: true,
+  });
+
+  assert.ok(plan.length >= 3);
+  for (let i = 1; i < plan.length; i++) {
+    const cutTime = plan[i].startSec;
+    assert.ok(
+      calibrated.beats.some((b) => Math.abs(b - cutTime) <= 0.025),
+      `Expected clip ${i} cut at ${cutTime}s to align with calibrated beat grid`
+    );
+  }
+});
+
 
 
 

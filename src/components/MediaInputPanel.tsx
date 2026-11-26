@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArrowLeftRight,
   Copy,
   Download,
@@ -18,12 +19,14 @@ import {
   Subtitles,
   Trash2,
   Upload,
+  Volume2,
 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { tFor } from '../i18n';
 import { NumericDraftInput } from './common/NumericDraftInput';
 import {
   AudioTrackState,
+  BeatGridMode,
   BeatSyncMode,
   GeneratorEffectId,
   Language,
@@ -46,10 +49,12 @@ import {
   AutoClipRhythm,
   AutoClipTargetMode,
   AutoClipTransitionStyle,
+  computeTapTempoBpm,
   DEFAULT_AUTO_CLIP_CONFIG,
   getDefaultBoundsForAutoClipRhythm,
   getNormalizedManualClipIntervals,
   getTimelineSpanSec,
+  TrackBeatGrid,
 } from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
 import { MediaPreviewModal } from './MediaPreviewModal';
@@ -96,6 +101,13 @@ interface MediaInputPanelProps {
   onFitTrimToClips: () => void;
   onAutoBeatSyncClips: (mode?: BeatSyncMode, applyMotionAndTrans?: boolean) => void;
   trackBpm: number;
+  trackBeatGrid: TrackBeatGrid;
+  rawTrackBpm: number;
+  currentTime: number;
+  onSetBeat1AtPlayhead: () => void;
+  onReextractAudioBeats: () => void;
+  onResetBeatCalibration: () => void;
+  onToggleMetronome: () => void;
   onUseEmbeddedCover: () => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
   onSelectTrimPreset: (preset: TrimPresetId) => void;
@@ -147,6 +159,13 @@ export function MediaInputPanel({
   onFitTrimToClips,
   onAutoBeatSyncClips,
   trackBpm,
+  trackBeatGrid,
+  rawTrackBpm,
+  currentTime,
+  onSetBeat1AtPlayhead,
+  onReextractAudioBeats,
+  onResetBeatCalibration,
+  onToggleMetronome,
   onUseEmbeddedCover,
   onUpdateConfig,
   onSelectTrimPreset,
@@ -178,9 +197,49 @@ export function MediaInputPanel({
   const [previewBinId, setPreviewBinId] = useState<string | null>(null);
   const [autoClipCfg, setAutoClipCfg] = useState<AutoClipGenerateConfig>(DEFAULT_AUTO_CLIP_CONFIG);
   const [autoSettingsOpen, setAutoSettingsOpen] = useState(false);
+  const [beatCalibOpen, setBeatCalibOpen] = useState(true);
+  const tapHistoryRef = useRef<number[]>([]);
+  const tapResetTimerRef = useRef<number | null>(null);
+  const [tapCount, setTapCount] = useState(0);
   const [genToAdd, setGenToAdd] = useState<Exclude<GeneratorEffectId, 'none'>>('galaxy_spiral');
   const [syncWithMotion, setSyncWithMotion] = useState(true);
   const [srtDraft, setSrtDraft] = useState('');
+
+  useEffect(() => {
+    return () => {
+      if (tapResetTimerRef.current !== null) {
+        window.clearTimeout(tapResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleTapTempo = () => {
+    const now = performance.now();
+    const prev = tapHistoryRef.current;
+    const trimmed =
+      prev.length > 0 && now - prev[prev.length - 1] > 2500 ? [now] : [...prev.slice(-8), now];
+    tapHistoryRef.current = trimmed;
+    setTapCount(trimmed.length);
+    if (tapResetTimerRef.current !== null) {
+      window.clearTimeout(tapResetTimerRef.current);
+    }
+    tapResetTimerRef.current = window.setTimeout(() => {
+      tapHistoryRef.current = [];
+      setTapCount(0);
+    }, 2600);
+    const measured = computeTapTempoBpm(trimmed);
+    if (measured !== null) {
+      onUpdateConfig({ beatGridMode: 'custom_bpm', manualBpm: measured });
+    }
+  };
+
+  const activeBeatGridMode: BeatGridMode = config.beatGridMode ?? 'auto';
+  const activeDisplayBpm =
+    activeBeatGridMode === 'custom_bpm' && (config.manualBpm ?? 0) >= 40
+      ? Number((config.manualBpm as number).toFixed(1))
+      : Number((trackBeatGrid.exactBpm || trackBpm || rawTrackBpm || 0).toFixed(1));
+  const beatOffsetMs = Math.round((config.beatOffsetSec ?? 0) * 1000);
+  const downbeatIdx = ((config.beatDownbeatShift ?? 0) % 4 + 4) % 4;
 
   const isTimelineFullMusic = useMemo(() => {
     if (!audio || mediaItems.length === 0) return false;
@@ -464,15 +523,266 @@ export function MediaInputPanel({
                   <p className="text-[10px] text-gray-500 mt-0.5">{t.audioDropHint}</p>
                 </div>
               ) : (
-                <div className="rounded-lg border border-[#262B38] bg-[#141821] p-2.5 space-y-1">
-                  <p className="text-xs font-semibold text-gray-100 truncate" title={audio.fileName}>
-                    {audio.fileName}
-                  </p>
-                  <p className="text-[10px] text-gray-400 font-mono tabular-nums">
-                    {formatSec(audio.duration)} · {(audio.sampleRate / 1000).toFixed(1)} kHz ·{' '}
-                    {audio.numberOfChannels}ch
-                    {audio.isSyntheticDemo ? ` · ${t.audioSyntheticNote}` : ''}
-                  </p>
+                <div className="space-y-2">
+                  <div className="rounded-lg border border-[#262B38] bg-[#141821] p-2.5 space-y-1">
+                    <p className="text-xs font-semibold text-gray-100 truncate" title={audio.fileName}>
+                      {audio.fileName}
+                    </p>
+                    <p className="text-[10px] text-gray-400 font-mono tabular-nums">
+                      {formatSec(audio.duration)} · {(audio.sampleRate / 1000).toFixed(1)} kHz ·{' '}
+                      {audio.numberOfChannels}ch
+                      {audio.isSyntheticDemo ? ` · ${t.audioSyntheticNote}` : ''}
+                    </p>
+                  </div>
+
+                  {/* Audio Beat Extraction & Calibration Box */}
+                  <div className="rounded-lg border border-cyan-500/30 bg-[#121722] p-2 space-y-2">
+                    <div className="flex items-center justify-between gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setBeatCalibOpen((v) => !v)}
+                        title={t.beatCalibToggleTitle}
+                        className="flex items-center gap-1.5 min-w-0 text-left cursor-pointer"
+                      >
+                        <Activity className="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
+                        <span className="text-[11px] font-semibold text-cyan-200 truncate">
+                          {t.beatCalibTitle}
+                        </span>
+                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <span className="px-1.5 py-0.5 rounded bg-[#0B0D11] border border-[#262B38] text-[10px] font-mono tabular-nums text-amber-300">
+                          {activeDisplayBpm > 0 ? `${activeDisplayBpm} ${t.detectedBpmLabel}` : '—'} ·{' '}
+                          {trackBeatGrid.beats.length}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onToggleMetronome}
+                          title={t.beatCalibMetronomeHint}
+                          aria-pressed={Boolean(config.beatMetronomeEnabled)}
+                          className={`px-1.5 py-0.5 rounded border text-[10px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                            config.beatMetronomeEnabled
+                              ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                              : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          <Volume2 className="w-3 h-3" aria-hidden="true" />
+                          <span>{t.beatCalibMetronomeBtn}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBeatCalibOpen((v) => !v)}
+                          title={t.beatCalibToggleTitle}
+                          aria-expanded={beatCalibOpen}
+                          className={`p-1 rounded border text-[10px] cursor-pointer ${
+                            beatCalibOpen
+                              ? 'border-cyan-400/70 bg-cyan-500/15 text-cyan-200'
+                              : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:text-gray-200'
+                          }`}
+                        >
+                          <SlidersHorizontal className="w-3 h-3" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {beatCalibOpen && (
+                      <div className="space-y-2 pt-1 border-t border-[#1F2636]">
+                        {/* Beat Grid Mode */}
+                        <div className="grid grid-cols-3 gap-1">
+                          {(
+                            [
+                              { id: 'auto', label: t.beatCalibModeAuto },
+                              { id: 'strict_bpm', label: t.beatCalibModeStrict },
+                              { id: 'custom_bpm', label: t.beatCalibModeCustom },
+                            ] as { id: BeatGridMode; label: string }[]
+                          ).map((gm) => (
+                            <button
+                              key={gm.id}
+                              type="button"
+                              onClick={() => {
+                                if (gm.id === 'custom_bpm' && (config.manualBpm ?? 0) < 40) {
+                                  onUpdateConfig({
+                                    beatGridMode: 'custom_bpm',
+                                    manualBpm: Math.max(45, Math.min(220, activeDisplayBpm || 120)),
+                                  });
+                                } else {
+                                  onUpdateConfig({ beatGridMode: gm.id });
+                                }
+                              }}
+                              className={`py-1 px-1 rounded border text-[9.5px] font-medium cursor-pointer truncate ${
+                                activeBeatGridMode === gm.id
+                                  ? 'border-cyan-400/90 bg-cyan-500/20 text-cyan-200'
+                                  : 'border-[#262B38] bg-[#0E1016] text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                              }`}
+                            >
+                              {gm.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Manual BPM / x0.5 / x2 / Tap Tempo */}
+                        <div className="flex items-center gap-1">
+                          <div className="flex-1 min-w-0">
+                            <NumericDraftInput
+                              value={activeDisplayBpm > 0 ? activeDisplayBpm : 120}
+                              min={45}
+                              max={220}
+                              step={0.5}
+                              decimals={1}
+                              ariaLabel={t.beatCalibManualBpmLabel}
+                              onCommit={(val) =>
+                                onUpdateConfig({
+                                  beatGridMode: 'custom_bpm',
+                                  manualBpm: Number(val.toFixed(1)),
+                                })
+                              }
+                              className="w-full rounded bg-[#0E1016] border border-[#262B38] px-1.5 py-0.5 text-[11px] font-mono tabular-nums text-amber-300"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const base = activeDisplayBpm > 0 ? activeDisplayBpm : 120;
+                              const next = Math.max(45, Number((base / 2).toFixed(1)));
+                              onUpdateConfig({ beatGridMode: 'custom_bpm', manualBpm: next });
+                            }}
+                            className="px-1.5 py-1 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[10px] font-mono text-gray-300 hover:text-cyan-200 cursor-pointer"
+                          >
+                            ÷2
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const base = activeDisplayBpm > 0 ? activeDisplayBpm : 120;
+                              const next = Math.min(220, Number((base * 2).toFixed(1)));
+                              onUpdateConfig({ beatGridMode: 'custom_bpm', manualBpm: next });
+                            }}
+                            className="px-1.5 py-1 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[10px] font-mono text-gray-300 hover:text-cyan-200 cursor-pointer"
+                          >
+                            ×2
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleTapTempo}
+                            title={t.beatCalibTapHint}
+                            className={`px-2 py-1 rounded border text-[10px] font-semibold cursor-pointer whitespace-nowrap ${
+                              tapCount > 0
+                                ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                                : 'border-cyan-500/45 bg-cyan-500/12 hover:bg-cyan-500/20 text-cyan-200'
+                            }`}
+                          >
+                            {tapCount > 0 ? `${t.beatCalibTapBtn} (${tapCount})` : t.beatCalibTapBtn}
+                          </button>
+                        </div>
+
+                        {/* Grid Phase Nudge & Beat 1 Alignment */}
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[10px]">
+                            <span className="text-gray-400">{t.beatCalibOffsetLabel}</span>
+                            <button
+                              type="button"
+                              onClick={() => onUpdateConfig({ beatOffsetSec: 0 })}
+                              className="font-mono tabular-nums text-cyan-300 hover:text-amber-300 cursor-pointer"
+                            >
+                              {beatOffsetMs >= 0 ? `+${beatOffsetMs}ms` : `${beatOffsetMs}ms`}
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-4 gap-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onUpdateConfig({
+                                  beatOffsetSec: Number(
+                                    Math.max(-2, (config.beatOffsetSec ?? 0) - 0.02).toFixed(3)
+                                  ),
+                                })
+                              }
+                              className="py-1 px-1 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[10px] font-mono text-gray-300 cursor-pointer"
+                            >
+                              -20ms
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onUpdateConfig({
+                                  beatOffsetSec: Number(
+                                    Math.min(2, (config.beatOffsetSec ?? 0) + 0.02).toFixed(3)
+                                  ),
+                                })
+                              }
+                              className="py-1 px-1 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[10px] font-mono text-gray-300 cursor-pointer"
+                            >
+                              +20ms
+                            </button>
+                            <button
+                              type="button"
+                              onClick={onSetBeat1AtPlayhead}
+                              title={`${t.beatCalibSetBeat1Hint} (${Math.max(0, currentTime - config.trimStart).toFixed(2)}s)`}
+                              className="py-1 px-1 rounded border border-amber-500/55 bg-amber-500/12 hover:bg-amber-500/25 text-[9.5px] font-semibold text-amber-200 cursor-pointer truncate"
+                            >
+                              {t.beatCalibSetBeat1Btn}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onUpdateConfig({
+                                  beatDownbeatShift: (((config.beatDownbeatShift ?? 0) + 1) % 4) as
+                                    | 0
+                                    | 1
+                                    | 2
+                                    | 3,
+                                })
+                              }
+                              title={t.beatCalibDownbeatHint}
+                              className="py-1 px-1 rounded border border-[#262B38] bg-[#0E1016] hover:border-cyan-500/60 text-[9.5px] font-mono text-cyan-200 cursor-pointer truncate"
+                            >
+                              {t.beatCalibDownbeatBtn} {downbeatIdx + 1}/4
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Sensitivity & Extract / Reset */}
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.beatCalibSensitivityLabel}</span>
+                            <span className="font-mono tabular-nums text-gray-200">
+                              {config.beatSensitivity.toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.6}
+                            max={2.2}
+                            step={0.05}
+                            value={config.beatSensitivity}
+                            onChange={(e) =>
+                              onUpdateConfig({ beatSensitivity: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </div>
+
+                        <div className="flex items-center gap-1 pt-0.5">
+                          <button
+                            type="button"
+                            onClick={onReextractAudioBeats}
+                            title={t.beatCalibExtractHint}
+                            className="flex-1 py-1 px-2 rounded border border-cyan-500/45 bg-cyan-500/12 hover:bg-cyan-500/20 text-[10px] font-medium text-cyan-200 cursor-pointer flex items-center justify-center gap-1"
+                          >
+                            <Activity className="w-3 h-3" aria-hidden="true" />
+                            <span>{t.beatCalibExtractBtn}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={onResetBeatCalibration}
+                            className="py-1 px-2 rounded border border-[#262B38] bg-[#0E1016] hover:border-gray-500 text-[10px] text-gray-300 cursor-pointer flex items-center gap-1"
+                          >
+                            <RotateCcw className="w-2.5 h-2.5" aria-hidden="true" />
+                            <span>{t.beatCalibResetBtn}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1013,6 +1323,11 @@ export function MediaInputPanel({
                         <h3 className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
                           <Shuffle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                           <span className="truncate">{t.binAutoClipTitle}</span>
+                          {audio && activeDisplayBpm > 0 && (
+                            <span className="px-1 py-0.2 rounded bg-[#0B0D11] border border-[#262B38] text-[9.5px] font-mono text-cyan-300 shrink-0">
+                              {activeDisplayBpm} BPM
+                            </span>
+                          )}
                         </h3>
                         <p className="text-[10px] text-gray-400 leading-snug mt-0.5">
                           {autoClipCfg.mode === 'auto_rhythm'

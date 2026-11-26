@@ -1,5 +1,6 @@
 import {
   AudioFrameMetrics,
+  BeatGridMode,
   BeatSyncMode,
   MediaBinItem,
   SlideTransitionType,
@@ -1220,6 +1221,8 @@ export interface TrackBeatGrid {
   beatSec: number;
   beats: number[]; // relative to trimStart (0..clipDuration)
   downbeatOffset?: number; // index offset (0..3) marking musical bar-1 downbeats
+  exactBpm?: number; // sub-integer estimated BPM for drift-free strict grid
+  anchorSec?: number; // primary phase anchor in [0..beatSec) relative to trimStart
 }
 
 /**
@@ -1495,7 +1498,273 @@ export function detectTrackBpmAndBeats(
     }
   }
 
-  return { bpm, beatSec, beats, downbeatOffset };
+  return {
+    bpm,
+    beatSec,
+    beats,
+    downbeatOffset,
+    exactBpm: Number(lockedBpm.toFixed(2)),
+    anchorSec: Number(bestPhase.toFixed(3)),
+  };
+}
+
+export interface BeatGridCalibrationOptions {
+  mode?: BeatGridMode;
+  manualBpm?: number;
+  offsetSec?: number;
+  downbeatShift?: number;
+}
+
+/**
+ * Applies user beat-grid calibration (Strict BPM lattice, Manual BPM, phase offset ms,
+ * and Beat-1 downbeat rotation) on top of an extracted raw TrackBeatGrid without losing bar-1 tracking.
+ */
+export function resolveCalibratedBeatGrid(
+  rawGrid: TrackBeatGrid,
+  clipDuration: number,
+  options: BeatGridCalibrationOptions = {}
+): TrackBeatGrid {
+  const mode: BeatGridMode = options.mode ?? 'auto';
+  const offsetSec = Number.isFinite(options.offsetSec)
+    ? Math.max(-4, Math.min(4, options.offsetSec as number))
+    : 0;
+  const downbeatShift = ((((options.downbeatShift ?? 0) % 4) + 4) % 4) as 0 | 1 | 2 | 3;
+
+  const hasCustomBpm =
+    mode === 'custom_bpm' &&
+    typeof options.manualBpm === 'number' &&
+    Number.isFinite(options.manualBpm) &&
+    options.manualBpm >= 40 &&
+    options.manualBpm <= 240;
+
+  const effectiveBpm = hasCustomBpm
+    ? Number((options.manualBpm as number).toFixed(2))
+    : rawGrid.exactBpm && rawGrid.exactBpm > 0
+      ? rawGrid.exactBpm
+      : rawGrid.bpm;
+
+  if (effectiveBpm <= 0 || clipDuration <= 0.05) {
+    return {
+      bpm: 0,
+      exactBpm: 0,
+      beatSec: 0.5,
+      beats: [],
+      downbeatOffset: 0,
+      anchorSec: 0,
+    };
+  }
+
+  const beatSec = Number((60 / effectiveBpm).toFixed(5));
+  const baseDownbeat = (((rawGrid.downbeatOffset ?? 0) % 4) + 4) % 4;
+
+  if (mode === 'auto' && Math.abs(offsetSec) < 0.0005 && downbeatShift === 0) {
+    return {
+      ...rawGrid,
+      bpm: Math.round(effectiveBpm),
+      exactBpm: effectiveBpm,
+      beatSec,
+      downbeatOffset: baseDownbeat,
+    };
+  }
+
+  const kept: Array<{ t: number; phase: number }> = [];
+
+  if (mode === 'auto' && rawGrid.beats.length > 0) {
+    // Preserve adaptive transient timings while allowing smooth ±offset nudging across boundaries
+    const extended: Array<{ t: number; rawIdx: number }> = [];
+    let backT = rawGrid.beats[0] - beatSec;
+    let backIdx = -1;
+    while (backT > -4.5) {
+      extended.unshift({ t: backT, rawIdx: backIdx });
+      backT -= beatSec;
+      backIdx--;
+    }
+    for (let i = 0; i < rawGrid.beats.length; i++) {
+      extended.push({ t: rawGrid.beats[i], rawIdx: i });
+    }
+    let fwdT = rawGrid.beats[rawGrid.beats.length - 1] + beatSec;
+    let fwdIdx = rawGrid.beats.length;
+    while (fwdT < clipDuration + 4.5) {
+      extended.push({ t: fwdT, rawIdx: fwdIdx });
+      fwdT += beatSec;
+      fwdIdx++;
+    }
+
+    for (const item of extended) {
+      const shifted = Number((item.t + offsetSec).toFixed(3));
+      if (shifted > 0.02 && shifted < clipDuration - 0.02) {
+        const phase = (((item.rawIdx - baseDownbeat) % 4) + 4) % 4;
+        kept.push({ t: shifted, phase });
+      }
+    }
+  } else {
+    // Drift-free equidistant lattice locked to primary anchor phase + user offset
+    const rawAnchor =
+      rawGrid.anchorSec !== undefined
+        ? rawGrid.anchorSec
+        : rawGrid.beats.length > 0
+          ? rawGrid.beats[0]
+          : 0;
+    const baseAnchor = ((rawAnchor % beatSec) + beatSec) % beatSec;
+    const minK = Math.ceil((0.0205 - baseAnchor - offsetSec) / beatSec);
+    const maxK = Math.floor((clipDuration - 0.0205 - baseAnchor - offsetSec) / beatSec);
+    for (let k = minK; k <= maxK; k++) {
+      const t = Number((baseAnchor + k * beatSec + offsetSec).toFixed(3));
+      if (t > 0.02 && t < clipDuration - 0.02) {
+        const phase = (((k - baseDownbeat) % 4) + 4) % 4;
+        kept.push({ t, phase });
+      }
+    }
+  }
+
+  if (kept.length === 0) {
+    return {
+      bpm: Math.round(effectiveBpm),
+      exactBpm: effectiveBpm,
+      beatSec,
+      beats: [],
+      downbeatOffset: 0,
+      anchorSec: Number(((((rawGrid.anchorSec ?? 0) + offsetSec) % beatSec + beatSec) % beatSec).toFixed(3)),
+    };
+  }
+
+  const p0 = kept[0].phase;
+  const nextDownbeatOffset = (((downbeatShift - p0) % 4) + 4) % 4;
+  const anchorSec = Number((((kept[0].t % beatSec) + beatSec) % beatSec).toFixed(3));
+
+  return {
+    bpm: Math.round(effectiveBpm),
+    exactBpm: effectiveBpm,
+    beatSec,
+    beats: kept.map((k) => k.t),
+    downbeatOffset: nextDownbeatOffset,
+    anchorSec,
+  };
+}
+
+/**
+ * Computes BPM from recent user tap timestamps (ms). Ignores pauses > 2.5s and trims outliers.
+ */
+export function computeTapTempoBpm(tapTimestampsMs: number[]): number | null {
+  if (tapTimestampsMs.length < 2) return null;
+  const recent: number[] = [tapTimestampsMs[tapTimestampsMs.length - 1]];
+  for (let i = tapTimestampsMs.length - 2; i >= 0 && recent.length < 9; i--) {
+    if (recent[0] - tapTimestampsMs[i] > 2500) break;
+    recent.unshift(tapTimestampsMs[i]);
+  }
+  if (recent.length < 2) return null;
+
+  const intervals: number[] = [];
+  for (let i = 1; i < recent.length; i++) {
+    const dt = recent[i] - recent[i - 1];
+    if (dt >= 250 && dt <= 1500) {
+      intervals.push(dt);
+    }
+  }
+  if (intervals.length === 0) return null;
+
+  let avgMs: number;
+  if (intervals.length >= 4) {
+    const sorted = [...intervals].sort((a, b) => a - b);
+    const trimmed = sorted.slice(1, sorted.length - 1);
+    avgMs = trimmed.reduce((a, b) => a + b, 0) / trimmed.length;
+  } else {
+    avgMs = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  }
+  const rawBpm = 60000 / Math.max(250, avgMs);
+  return Number(Math.max(45, Math.min(220, Math.round(rawBpm * 2) / 2)).toFixed(1));
+}
+
+/**
+ * Computes the phase offset and downbeat rotation needed so Beat 1 lands squarely on `targetLocalSec`.
+ */
+export function alignBeatGridToTime(
+  rawGrid: TrackBeatGrid,
+  clipDuration: number,
+  targetLocalSec: number,
+  mode: BeatGridMode,
+  manualBpm?: number
+): { offsetSec: number; downbeatShift: 0 | 1 | 2 | 3 } {
+  const unshifted = resolveCalibratedBeatGrid(rawGrid, clipDuration, {
+    mode,
+    manualBpm,
+    offsetSec: 0,
+    downbeatShift: 0,
+  });
+  const beatSec =
+    unshifted.beatSec > 0.2 && unshifted.beatSec < 1.5 ? unshifted.beatSec : 0.5;
+  if (unshifted.beats.length === 0) {
+    return { offsetSec: 0, downbeatShift: 0 };
+  }
+
+  let nearest = unshifted.beats[0];
+  let bestDist = Math.abs(targetLocalSec - nearest);
+  for (const b of unshifted.beats) {
+    const d = Math.abs(targetLocalSec - b);
+    if (d < bestDist) {
+      bestDist = d;
+      nearest = b;
+    }
+  }
+
+  let offsetSec = Number((targetLocalSec - nearest).toFixed(3));
+  if (Math.abs(offsetSec) > beatSec * 0.55) {
+    // Wrap into [-beatSec/2 .. +beatSec/2]
+    const anchor = unshifted.anchorSec ?? unshifted.beats[0] % beatSec;
+    const k = Math.round((targetLocalSec - anchor) / beatSec);
+    offsetSec = Number((targetLocalSec - (anchor + k * beatSec)).toFixed(3));
+  }
+
+  const shifted = resolveCalibratedBeatGrid(rawGrid, clipDuration, {
+    mode,
+    manualBpm,
+    offsetSec,
+    downbeatShift: 0,
+  });
+  if (shifted.beats.length === 0) {
+    return { offsetSec, downbeatShift: 0 };
+  }
+
+  let targetIdx = 0;
+  let targetDist = Infinity;
+  for (let i = 0; i < shifted.beats.length; i++) {
+    const d = Math.abs(targetLocalSec - shifted.beats[i]);
+    if (d < targetDist) {
+      targetDist = d;
+      targetIdx = i;
+    }
+  }
+  const downbeatShift = (((targetIdx - (shifted.downbeatOffset ?? 0)) % 4) + 4) % 4 as
+    | 0
+    | 1
+    | 2
+    | 3;
+  return { offsetSec, downbeatShift };
+}
+
+/**
+ * Generates beat_cut cut points from an already-calibrated TrackBeatGrid respecting minBeatCutSec.
+ */
+export function computeBeatCutsFromGrid(
+  beatGrid: TrackBeatGrid,
+  clipDuration: number,
+  minBeatCutSec: number
+): number[] {
+  const cuts: number[] = [0];
+  const minHold = Math.max(0.35, minBeatCutSec - 0.04);
+  const downbeat = beatGrid.downbeatOffset ?? 0;
+  let lastCut = 0;
+  for (let i = 0; i < beatGrid.beats.length; i++) {
+    const b = beatGrid.beats[i];
+    if (b <= 0.15 || b >= clipDuration - 0.15) continue;
+    const isDownbeat = (((i - downbeat) % 4) + 4) % 4 === 0;
+    const dt = b - lastCut;
+    if (dt >= minHold || (isDownbeat && dt >= minHold * 0.82 && lastCut === 0)) {
+      cuts.push(Number(b.toFixed(3)));
+      lastCut = b;
+    }
+  }
+  return cuts;
 }
 
 export interface BeatAlignedClipPlan {

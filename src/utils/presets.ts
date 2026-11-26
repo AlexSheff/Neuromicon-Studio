@@ -598,6 +598,11 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
 
   manualBeatMarkers: [],
   snapToBeats: true,
+  beatGridMode: 'auto',
+  manualBpm: 0,
+  beatOffsetSec: 0,
+  beatDownbeatShift: 0,
+  beatMetronomeEnabled: false,
 
   colorSchemeId: 'obsidian_amber',
   customTextColor: '#F9FAFB',

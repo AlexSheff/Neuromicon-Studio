@@ -27,6 +27,7 @@ export type GeneratorBlendMode = 'backdrop' | 'screen' | 'lighter';
 export type OverlayBlendMode = 'screen' | 'lighter' | 'soft-light';
 
 export type BeatSyncMode = 'fit_track' | 'beats_1' | 'beats_2' | 'beats_4' | 'beats_8';
+export type BeatGridMode = 'auto' | 'strict_bpm' | 'custom_bpm';
 
 export type TextAnimationId =
   | 'fade_rise'
@@ -317,9 +318,14 @@ export interface StudioConfig {
   subtitles: SubtitleCue[];
   overlays: OverlayLayer[];
 
-  // Manual Beat Markers & Snapping
+  // Manual Beat Markers, Calibration & Snapping
   manualBeatMarkers: number[];
   snapToBeats: boolean;
+  beatGridMode?: BeatGridMode;
+  manualBpm?: number;
+  beatOffsetSec?: number;
+  beatDownbeatShift?: 0 | 1 | 2 | 3;
+  beatMetronomeEnabled?: boolean;
 
   // Color scheme
   colorSchemeId: ColorSchemeId;

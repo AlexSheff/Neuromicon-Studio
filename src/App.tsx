@@ -27,6 +27,7 @@ import {
   VisualMediaState,
 } from './types/studio';
 import {
+  alignBeatGridToTime,
   analyzeAudioAtTime,
   AutoClipGenerateConfig,
   buildMonoAudioData,
@@ -34,6 +35,7 @@ import {
   closeAllManualGapsAndFitBeats,
   closeManualTimelineGap,
   computeAutoBeatAlignedClips,
+  computeBeatCutsFromGrid,
   computeBeatCutTimestamps,
   computeClipTimelineSegments,
   computeFadeEnvelope,
@@ -50,6 +52,7 @@ import {
   moveManualClipGroup,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
+  resolveCalibratedBeatGrid,
   resolveSafeVideoSourceRange,
   resizeManualClipDuration,
   snapFxOverlayToBeats,
@@ -286,6 +289,7 @@ export default function App() {
   const playStartPerfMsRef = useRef(0);
   const playStartAudioRef = useRef(0);
   const playSessionRef = useRef(0);
+  const lastMetronomeBeatRef = useRef(-1);
   const currentTimeRef = useRef(0);
   const isLoopingRef = useRef(false);
   const startPlaybackAtRef = useRef<(sec: number) => void>(() => {});
@@ -621,35 +625,7 @@ export default function App() {
     []
   );
 
-  // Precompute deterministic beat-cut timestamps (merging manual beat markers when present)
-  const beatCutTimestamps = useMemo(() => {
-    const bounds = getEffectiveTimelineBounds(config, mediaItems, audio);
-    const clipDuration = bounds.clipDuration;
-    const autoCuts =
-      audio && config.slideshowMode === 'beat_cut' && mediaItems.length > 1
-        ? computeBeatCutTimestamps(
-            monoDataRef.current,
-            audio.sampleRate,
-            config.trimStart,
-            config.trimEnd,
-            config.minBeatCutSec,
-            config.beatSensitivity
-          )
-        : [0];
-    return resolveBeatCutPoints(
-      autoCuts,
-      config.manualBeatMarkers,
-      bounds.trimBase,
-      clipDuration
-    );
-  }, [
-    audio,
-    config,
-    getEffectiveTimelineBounds,
-    mediaItems,
-  ]);
-
-  const trackBeatGrid = useMemo(() => {
+  const rawTrackBeatGrid = useMemo(() => {
     if (!audio || monoDataRef.current.length === 0) {
       return { bpm: 0, beatSec: 0.5, beats: [] as number[] };
     }
@@ -662,11 +638,69 @@ export default function App() {
     );
   }, [audio, config.beatSensitivity, config.trimEnd, config.trimStart]);
 
+  const trackBeatGrid = useMemo(() => {
+    const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+    return resolveCalibratedBeatGrid(rawTrackBeatGrid, clipDuration, {
+      mode: config.beatGridMode,
+      manualBpm: config.manualBpm,
+      offsetSec: config.beatOffsetSec,
+      downbeatShift: config.beatDownbeatShift,
+    });
+  }, [
+    config.beatDownbeatShift,
+    config.beatGridMode,
+    config.beatOffsetSec,
+    config.manualBpm,
+    config.trimEnd,
+    config.trimStart,
+    rawTrackBeatGrid,
+  ]);
+
   const trackBeatGridRef = useRef(trackBeatGrid);
   trackBeatGridRef.current = trackBeatGrid;
 
+  useEffect(() => {
+    lastMetronomeBeatRef.current = -1;
+  }, [trackBeatGrid]);
+
+  // Precompute deterministic beat-cut timestamps (merging manual beat markers when present)
+  const beatCutTimestamps = useMemo(() => {
+    const bounds = getEffectiveTimelineBounds(config, mediaItems, audio);
+    const clipDuration = bounds.clipDuration;
+    const hasCalibratedGrid =
+      (config.beatGridMode ?? 'auto') !== 'auto' ||
+      Math.abs(config.beatOffsetSec ?? 0) > 0.005 ||
+      (config.beatDownbeatShift ?? 0) !== 0;
+    let autoCuts: number[] = [0];
+    if (audio && config.slideshowMode === 'beat_cut' && mediaItems.length > 1) {
+      autoCuts = hasCalibratedGrid
+        ? computeBeatCutsFromGrid(trackBeatGrid, clipDuration, config.minBeatCutSec)
+        : computeBeatCutTimestamps(
+            monoDataRef.current,
+            audio.sampleRate,
+            config.trimStart,
+            config.trimEnd,
+            config.minBeatCutSec,
+            config.beatSensitivity
+          );
+    }
+    return resolveBeatCutPoints(
+      autoCuts,
+      config.manualBeatMarkers,
+      bounds.trimBase,
+      clipDuration
+    );
+  }, [
+    audio,
+    config,
+    getEffectiveTimelineBounds,
+    mediaItems,
+    trackBeatGrid,
+  ]);
+
   const stopPlayback = useCallback(() => {
     playSessionRef.current++;
+    lastMetronomeBeatRef.current = -1;
     if (sourceNodeRef.current) {
       try {
         sourceNodeRef.current.stop();
@@ -976,6 +1010,7 @@ export default function App() {
       playStartCtxTimeRef.current = startCtxTime;
       playStartPerfMsRef.current = performance.now();
       playStartAudioRef.current = clampedStart;
+      lastMetronomeBeatRef.current = clampedStart - cfg.trimStart - 0.02;
       currentTimeRef.current = clampedStart;
       setCurrentTime(clampedStart);
       setIsPlaying(true);
@@ -1415,6 +1450,10 @@ export default function App() {
           albumText: meta.album || (meta.year ? `Release · ${meta.year}` : ''),
           trimStart: 0,
           trimEnd: Number(nextTrimEnd.toFixed(2)),
+          beatGridMode: 'auto',
+          manualBpm: 0,
+          beatOffsetSec: 0,
+          beatDownbeatShift: 0,
         }));
 
         // Mute already-placed video clip audio tracks & clamp manual clips within music length
@@ -3832,6 +3871,66 @@ export default function App() {
     setConfig((prev) => ({ ...prev, manualBeatMarkers: [] }));
   }, [pushImmediateHistory]);
 
+  const handleSetBeat1AtPlayhead = useCallback(() => {
+    if (!audioRef.current) return;
+    const cfg = configRef.current;
+    const clipDuration = Math.max(0.5, cfg.trimEnd - cfg.trimStart);
+    const localPlayhead = Math.max(
+      0.02,
+      Math.min(clipDuration - 0.02, currentTimeRef.current - cfg.trimStart)
+    );
+    const activeMode = cfg.beatGridMode ?? 'auto';
+    const nextMode = activeMode === 'auto' ? 'strict_bpm' : activeMode;
+    const aligned = alignBeatGridToTime(
+      rawTrackBeatGrid,
+      clipDuration,
+      localPlayhead,
+      nextMode,
+      cfg.manualBpm
+    );
+    pushImmediateHistory();
+    setConfig((prev) => ({
+      ...prev,
+      beatGridMode: nextMode,
+      beatOffsetSec: aligned.offsetSec,
+      beatDownbeatShift: aligned.downbeatShift,
+    }));
+    showUndoToast(tFor(langRef.current).beatCalibAlignedToast);
+  }, [pushImmediateHistory, rawTrackBeatGrid, showUndoToast]);
+
+  const handleReextractAudioBeats = useCallback(() => {
+    if (!audioRef.current) return;
+    pushImmediateHistory();
+    setConfig((prev) => ({
+      ...prev,
+      beatGridMode: 'auto',
+      manualBpm: 0,
+      beatOffsetSec: 0,
+      beatDownbeatShift: 0,
+    }));
+    showUndoToast(tFor(langRef.current).beatCalibExtractedToast);
+  }, [pushImmediateHistory, showUndoToast]);
+
+  const handleResetBeatCalibration = useCallback(() => {
+    pushImmediateHistory();
+    setConfig((prev) => ({
+      ...prev,
+      beatGridMode: 'auto',
+      manualBpm: 0,
+      beatOffsetSec: 0,
+      beatDownbeatShift: 0,
+      beatSensitivity: DEFAULT_STUDIO_CONFIG.beatSensitivity,
+    }));
+  }, [pushImmediateHistory]);
+
+  const handleToggleMetronome = useCallback(() => {
+    lastMetronomeBeatRef.current = -1;
+    setConfig((prev) => ({
+      ...prev,
+      beatMetronomeEnabled: !prev.beatMetronomeEnabled,
+    }));
+  }, []);
+
   const handleImportSubtitlesText = useCallback(
     (raw: string) => {
       const parsed = parseSubtitles(raw);
@@ -4768,6 +4867,41 @@ export default function App() {
       const localTime = Math.max(0, currentTimeRef.current - bounds.trimBase);
       syncVideosAtLocalTime(localTime, true);
 
+      // Preview-only sample-accurate metronome click on calibrated beats (never mixed into export)
+      if (hasAudioSource && audioCtxRef.current && configRef.current.beatMetronomeEnabled) {
+        const ctx = audioCtxRef.current;
+        const grid = trackBeatGridRef.current;
+        const downbeat = grid.downbeatOffset ?? 0;
+        const lookAheadEnd = localTime + 0.085;
+        for (let bi = 0; bi < grid.beats.length; bi++) {
+          const bt = grid.beats[bi];
+          if (bt < localTime - 0.015) continue;
+          if (bt > lookAheadEnd) break;
+          if (bt <= lastMetronomeBeatRef.current + 0.015) continue;
+          lastMetronomeBeatRef.current = bt;
+          const isDownbeat = (((bi - downbeat) % 4) + 4) % 4 === 0;
+          const beatAbs = bounds.trimBase + bt;
+          const whenCtx = Math.max(
+            ctx.currentTime + 0.002,
+            playStartCtxTimeRef.current + (beatAbs - playStartAudioRef.current)
+          );
+          try {
+            const osc = ctx.createOscillator();
+            const clickGain = ctx.createGain();
+            osc.type = isDownbeat ? 'triangle' : 'sine';
+            osc.frequency.setValueAtTime(isDownbeat ? 1280 : 840, whenCtx);
+            clickGain.gain.setValueAtTime(isDownbeat ? 0.24 : 0.14, whenCtx);
+            clickGain.gain.exponentialRampToValueAtTime(0.0008, whenCtx + 0.036);
+            osc.connect(clickGain);
+            clickGain.connect(ctx.destination);
+            osc.start(whenCtx);
+            osc.stop(whenCtx + 0.04);
+          } catch {
+            // ignore WebAudio scheduling edge errors
+          }
+        }
+      }
+
       if (now - lastUiSync > 50 || absSec >= bounds.trimEnd) {
         setCurrentTime(currentTimeRef.current);
         lastUiSync = now;
@@ -5345,6 +5479,13 @@ export default function App() {
               onFitTrimToClips={handleFitTrimToClips}
               onAutoBeatSyncClips={handleAutoBeatSyncClips}
               trackBpm={trackBeatGrid.bpm}
+              trackBeatGrid={trackBeatGrid}
+              rawTrackBpm={rawTrackBeatGrid.exactBpm || rawTrackBeatGrid.bpm}
+              currentTime={currentTime}
+              onSetBeat1AtPlayhead={handleSetBeat1AtPlayhead}
+              onReextractAudioBeats={handleReextractAudioBeats}
+              onResetBeatCalibration={handleResetBeatCalibration}
+              onToggleMetronome={handleToggleMetronome}
               onUseEmbeddedCover={handleUseEmbeddedCover}
               onUpdateConfig={handleUpdateConfig}
               onSelectTrimPreset={handleSelectTrimPreset}
@@ -5498,6 +5639,9 @@ export default function App() {
         onAutoBeatSyncClips={handleAutoBeatSyncClips}
         trackBpm={trackBeatGrid.bpm}
         beatGridPoints={trackBeatGrid.beats}
+        beatDownbeatOffset={trackBeatGrid.downbeatOffset ?? 0}
+        beatMetronomeEnabled={Boolean(config.beatMetronomeEnabled)}
+        onToggleMetronome={handleToggleMetronome}
         onSetTrimStart={handleSetTrimStart}
         onSetTrimEnd={handleSetTrimEnd}
         onChangeSlideshowMode={(mode) => handleUpdateConfig({ slideshowMode: mode })}

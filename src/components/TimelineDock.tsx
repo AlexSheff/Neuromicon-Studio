@@ -121,6 +121,9 @@ interface TimelineDockProps {
   onAutoBeatSyncClips: (mode?: BeatSyncMode, applyMotionAndTrans?: boolean) => void;
   trackBpm: number;
   beatGridPoints: number[];
+  beatDownbeatOffset?: number;
+  beatMetronomeEnabled?: boolean;
+  onToggleMetronome?: () => void;
   onSetTrimStart: (sec: number) => void;
   onSetTrimEnd: (sec: number) => void;
   onChangeSlideshowMode?: (mode: SlideshowMode) => void;
@@ -323,6 +326,9 @@ export function TimelineDock({
   onAutoBeatSyncClips,
   trackBpm,
   beatGridPoints,
+  beatDownbeatOffset = 0,
+  beatMetronomeEnabled = false,
+  onToggleMetronome,
   onSetTrimStart,
   onSetTrimEnd,
   onChangeSlideshowMode,
@@ -2960,15 +2966,21 @@ export function TimelineDock({
                           className="absolute inset-0 w-full h-full pointer-events-none"
                         />
 
-                        {beatGridPoints
-                          .filter((b) => b > 0.05 && b < clipDuration)
-                          .map((b, idx) => (
+                        {beatGridPoints.map((b, idx) => {
+                          if (b <= 0.02 || b >= clipDuration) return null;
+                          const isDownbeat = (((idx - beatDownbeatOffset) % 4) + 4) % 4 === 0;
+                          return (
                             <div
                               key={`grid-${idx}-${b}`}
-                              className="absolute bottom-0 h-1.5 w-px bg-gray-400/35 pointer-events-none"
+                              className={`absolute pointer-events-none ${
+                                isDownbeat
+                                  ? 'top-0 bottom-0 w-px bg-cyan-400/50'
+                                  : 'bottom-0 h-2 w-px bg-gray-400/35'
+                              }`}
                               style={{ left: `${(b / clipDuration) * 100}%` }}
                             />
-                          ))}
+                          );
+                        })}
 
                         {beatCutTimestamps
                           .filter((b) => b > 0.05 && b < clipDuration)
@@ -3191,6 +3203,27 @@ export function TimelineDock({
                 className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
               />
             </label>
+
+            {onToggleMetronome && (
+              <button
+                type="button"
+                onClick={onToggleMetronome}
+                title={t.beatCalibMetronomeHint}
+                className={`w-full py-1 px-2.5 rounded border text-[11px] font-medium flex items-center justify-between cursor-pointer ${
+                  beatMetronomeEnabled
+                    ? 'border-amber-400/80 bg-amber-500/18 text-amber-200'
+                    : 'border-[#262B38] bg-[#0E1016] hover:border-gray-500 text-gray-300'
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <Volume2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>{t.beatCalibMetronomeBtn}</span>
+                </span>
+                <span className="font-mono text-[10px]">
+                  {beatMetronomeEnabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+            )}
 
             {fxOverlays.length > 0 && (
               <button
