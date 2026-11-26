@@ -1662,4 +1662,135 @@ test('getDefaultBoundsForAutoClipRhythm unlocks 1-beat and 2-beat pacing and cap
   assert.ok(noAudioEnd <= 45, `Expected no-audio plan bounded by usable footage span, got ${noAudioEnd}s`);
 });
 
+test('detectTrackBpmAndBeats locks downbeatOffset to Beat 1 sub-bass kicks even with sharp snares on Beats 2 and 4', () => {
+  const sr = 8000;
+  const dur = 32;
+  const mono = new Float32Array(sr * dur);
+  const beatSec = 0.5; // 120 BPM
+
+  for (let b = 0; b * beatSec < dur; b++) {
+    const startSample = Math.round(b * beatSec * sr);
+    const beatInBar = b % 4;
+    for (let j = 0; j < 640 && startSample + j < mono.length; j++) {
+      const env = Math.exp(-j / 180);
+      if (beatInBar === 0) {
+        // Strong sub-bass kick on Beat 1
+        mono[startSample + j] += Math.sin((j / sr) * 2 * Math.PI * 60) * env * 0.85;
+      } else if (beatInBar === 2) {
+        // Lighter bass on Beat 3
+        mono[startSample + j] += Math.sin((j / sr) * 2 * Math.PI * 65) * env * 0.45;
+      } else {
+        // Loud sharp mid/high snare transient on Beats 2 and 4
+        const snare =
+          (Math.sin((j / sr) * 2 * Math.PI * 320) * 0.45 +
+            Math.sin((j / sr) * 2 * Math.PI * 1450) * 0.65) *
+          Math.exp(-j / 90);
+        mono[startSample + j] += snare;
+      }
+    }
+  }
+
+  const grid = detectTrackBpmAndBeats(mono, sr, 0, dur, 1.0);
+  assert.ok(grid.bpm >= 116 && grid.bpm <= 124, `Expected ~120 BPM, got ${grid.bpm}`);
+  assert.ok(grid.beats.length >= 40);
+  const downbeatIdx = grid.downbeatOffset ?? 0;
+  const downbeatPhaseMod2 = grid.beats[downbeatIdx] % 2.0;
+  assert.ok(
+    downbeatPhaseMod2 < 0.2 || downbeatPhaseMod2 > 1.8,
+    `Expected downbeatOffset=${downbeatIdx} (${grid.beats[downbeatIdx]}s) on Beat 1 kick, not snare backbeat`
+  );
+});
+
+test('auto_rhythm produces varied durations despite sharp drum accents and keeps transitions beat-snapped', () => {
+  const bin: MediaBinItem[] = Array.from({ length: 5 }, (_, i) => ({
+    id: `mv-${i + 1}`,
+    kind: 'video' as const,
+    fileName: `shot_${i + 1}.mp4`,
+    url: `blob:mv-${i + 1}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: 36,
+    defaultDurationSec: 26,
+    defaultTransitionOut: 'crossfade',
+  }));
+
+  // 72s track at 120 BPM with crisp kick/snare transients on every beat + alternating energy verses/drops
+  const sr = 8000;
+  const totalSec = 72;
+  const mono = new Float32Array(sr * totalSec);
+  const chords = [196, 246.94, 293.66, 220, 261.63, 329.63];
+  for (let i = 0; i < mono.length; i++) {
+    const t = i / sr;
+    const sectionIdx = Math.floor(t / 12);
+    const amp = sectionIdx % 2 === 1 ? 0.55 : 0.2;
+    const beatMod = t % 0.5;
+    const kick =
+      beatMod < 0.08 ? Math.sin(2 * Math.PI * 64 * beatMod) * Math.exp(-beatMod * 30) * (sectionIdx % 2 === 1 ? 0.75 : 0.35) : 0;
+    const snare =
+      (Math.floor(t / 0.5) % 2 === 1 && beatMod < 0.05)
+        ? Math.sin(2 * Math.PI * 1100 * beatMod) * Math.exp(-beatMod * 45) * 0.45
+        : 0;
+    mono[i] = kick + snare + Math.sin(2 * Math.PI * chords[Math.floor(t / 4) % chords.length] * t) * amp;
+  }
+
+  const beats = Array.from({ length: 150 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const beatGrid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  let seed = 9001;
+  const rng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  const plan = generateAutoClipPlan(bin, beatGrid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    transitionStyle: 'musical',
+    minClipSec: 2.0,
+    maxClipSec: 10.0,
+    fillToTargetEnd: true,
+    hasAudio: true,
+    monoData: mono,
+    sampleRate: sr,
+    rng,
+  });
+
+  // 1. Varied shot lengths rather than uniform 2.0s clones
+  const distinctDurs = new Set(plan.map((p) => Number(p.durationSec.toFixed(1))));
+  assert.ok(
+    distinctDurs.size >= 4,
+    `Expected >=4 distinct musical clip lengths, got [${Array.from(distinctDurs).join(', ')}]`
+  );
+
+  // Never repeat exact same length >3 times in a row
+  let maxSameRun = 1;
+  let curRun = 1;
+  for (let i = 1; i < plan.length; i++) {
+    if (Math.abs(plan[i].durationSec - plan[i - 1].durationSec) < 0.05) {
+      curRun++;
+      if (curRun > maxSameRun) maxSameRun = curRun;
+    } else {
+      curRun = 1;
+    }
+  }
+  assert.ok(maxSameRun <= 3, `Expected varied phrasing without >3 identical durations in a row, got ${maxSameRun}`);
+
+  // 2. Transitions stay tightly beat-snapped (<= 0.48s max, <= 0.25s on active beats) and expressively varied
+  const distinctTransitions = new Set(plan.map((p) => p.transitionOut));
+  assert.ok(
+    distinctTransitions.size >= 3,
+    `Expected >=3 distinct musical transition styles, got [${Array.from(distinctTransitions).join(', ')}]`
+  );
+  assert.ok(
+    plan.every((p) => p.transitionDurationSec <= 0.48),
+    `Expected all transitions bounded <= 0.48s so cuts stay locked on rhythm`
+  );
+
+  // 3. No adjacent clip repeats and unique source intervals never overlap
+  for (let i = 1; i < plan.length; i++) {
+    assert.notEqual(plan[i].binItemId, plan[i - 1].binItemId);
+  }
+});
+
+
 

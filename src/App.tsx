@@ -730,10 +730,10 @@ export default function App() {
         }
         const upcoming = items[s.clipIndex];
         if (!upcoming || upcoming.kind !== 'video') continue;
-        if (dt <= 3.2 || upcomingVideoCount < 3) {
+        if (dt <= 3.6 || upcomingVideoCount < 5) {
           preloadWindowIds.add(upcoming.id);
           keepAttachedIds.add(upcoming.id);
-          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 2 && dt <= 2.4) {
+          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 4 && dt <= 3.2) {
             const vDur = upcoming.videoDuration || 1;
             const maxSafe = Math.max(0, vDur - 0.04);
             prewarmTargets.set(
