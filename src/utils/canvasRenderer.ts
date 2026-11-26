@@ -512,7 +512,8 @@ function drawSingleClipLayer(
   if (config.framingMode === 'fit_blur') {
     drawFitBlurBackdrop(ctx, drawSource, drawSrcW, drawSrcH, width, height, pulseScale, config);
   } else {
-    const safeHeadroom = Math.max(0, totalScale - 1);
+    const baseScale = pulseScale > 0.01 ? totalScale / pulseScale : totalScale;
+    const safeHeadroom = Math.max(0, baseScale - 1);
     const maxPanX = width * safeHeadroom * 0.42;
     const maxPanY = height * safeHeadroom * 0.42;
     const clampedPanX = media.kind === 'video' ? 0 : Math.max(-maxPanX, Math.min(maxPanX, panX));
@@ -819,7 +820,7 @@ function hexToRgba(hex: string, alpha: number): string {
 }
 
 export function resolveBeatPulseScale(config: StudioConfig, beatPulse: number): number {
-  if (config.disableBeatPulse || config.stabilizeMotion) return 1;
+  if (config.beatPreset === 'none' || config.disableBeatPulse || config.stabilizeMotion) return 1;
   if (config.beatPreset === 'beat_zoom') {
     return config.backgroundPulse <= 0.005 ? 1 : 1 + beatPulse * 0.085 * config.visualizerScale;
   }
@@ -867,17 +868,20 @@ export function renderStudioFrame(params: RenderFrameParams): void {
   );
 
   const beatPulseOff = Boolean(
-    config.disableBeatPulse || config.stabilizeMotion || config.backgroundPulse <= 0.005
+    config.beatPreset === 'none' ||
+      config.disableBeatPulse ||
+      config.stabilizeMotion ||
+      config.backgroundPulse <= 0.005
   );
   const pulseScale = resolveBeatPulseScale(config, metrics.beatPulse);
   const allowKenBurns = Boolean(config.kenBurnsMotion && !reducedMotion && !config.stabilizeMotion);
 
   const progress = clipDuration > 0 ? Math.min(1, localTime / clipDuration) : 0;
-  const kenBurnsScale = allowKenBurns ? 1 + progress * 0.065 : 1;
+  const kenBurnsScale = allowKenBurns ? 1 + progress * 0.035 : 1;
   const totalScale = pulseScale * kenBurnsScale;
 
-  const panX = allowKenBurns ? Math.sin(localTime * 0.18) * width * 0.012 : 0;
-  const panY = allowKenBurns ? Math.cos(localTime * 0.14) * height * 0.012 : 0;
+  const panX = allowKenBurns ? Math.sin(localTime * 0.16) * width * 0.008 : 0;
+  const panY = allowKenBurns ? Math.cos(localTime * 0.12) * height * 0.008 : 0;
 
   // 2. Multi-Clip Sequence Layer
   if (mediaItems.length > 0) {
@@ -892,35 +896,38 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     const prevMedia = slice.prevIndex !== null ? mediaItems[slice.prevIndex] : null;
     const p = slice.transitionProgress;
 
-    const slideKenActive =
-      allowKenBurns && activeMedia?.kind === 'image'
-        ? pulseScale * (1 + Math.min(0.055, slice.slideLocalTime * 0.01))
-        : pulseScale;
-    const slideKenPrev =
-      allowKenBurns && prevMedia?.kind === 'image'
-        ? pulseScale * (1 + Math.min(0.055, slice.prevSlideLocalTime * 0.01))
-        : pulseScale;
     const activeClipDur = Math.max(0.2, slice.activeSegmentDuration || activeMedia?.durationSec || clipDuration);
     const prevClipDur = Math.max(0.2, slice.prevSegmentDuration || prevMedia?.durationSec || clipDuration);
+    const hasExplicitZoom = (m: VisualMediaState | null) =>
+      Boolean(m?.transform && Math.abs((m.transform.endScale ?? 1) - (m.transform.scale ?? 1)) > 0.004);
+
+    // Avoid stacking Ken Burns zoom on top of clip keyframes or jumping on short <1.8s beat photos
+    const slideKenActive =
+      allowKenBurns && activeMedia?.kind === 'image' && activeClipDur >= 1.8 && !hasExplicitZoom(activeMedia)
+        ? pulseScale * (1 + Math.min(0.025, slice.slideLocalTime * 0.006))
+        : pulseScale;
+    const slideKenPrev =
+      allowKenBurns && prevMedia?.kind === 'image' && prevClipDur >= 1.8 && !hasExplicitZoom(prevMedia)
+        ? pulseScale * (1 + Math.min(0.025, slice.prevSlideLocalTime * 0.006))
+        : pulseScale;
+    const activeTotalScale =
+      mediaItems.length > 1
+        ? slideKenActive
+        : activeMedia?.kind === 'image' && hasExplicitZoom(activeMedia)
+          ? pulseScale
+          : totalScale;
     const activeProgress = Math.min(1, slice.slideLocalTime / activeClipDur);
     const prevProgress = Math.min(1, slice.prevSlideLocalTime / prevClipDur);
 
     if (prevMedia && activeMedia && p < 0.999 && slice.transitionType !== 'cut') {
       if (slice.transitionType === 'crossfade' || slice.transitionType === 'zoom_cross') {
-        // Render incoming clip into main canvas cleanly at full alpha
-        const incomingZoom = slice.transitionType === 'zoom_cross' ? 1 + (1 - p) * 0.08 : 1;
-        if (incomingZoom !== 1) {
-          ctx.save();
-          ctx.translate(width * 0.5, height * 0.5);
-          ctx.scale(incomingZoom, incomingZoom);
-          ctx.translate(-width * 0.5, -height * 0.5);
-        }
+        // Keep incoming clip unscaled so photos never reverse-zoom jump at transition finish
         drawSingleClipLayer(
           ctx,
           activeMedia,
           width,
           height,
-          mediaItems.length > 1 ? slideKenActive : totalScale,
+          activeTotalScale,
           pulseScale,
           panX,
           panY,
@@ -934,7 +941,6 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           1,
           Boolean(isExport)
         );
-        if (incomingZoom !== 1) ctx.restore();
 
         // Render outgoing clip into isolated offscreen buffer at alpha=1, then composite (1-p)
         // Guarantees (1-p)*Prev + p*Next with zero dark dip and zero filter+alpha artifacts
@@ -973,8 +979,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           ctx.save();
           ctx.filter = 'none';
           ctx.globalAlpha = Math.max(0, Math.min(1, 1 - p));
-          if (slice.transitionType === 'zoom_cross') {
-            const outZoom = 1 + p * 0.14;
+          if (slice.transitionType === 'zoom_cross' && prevMedia.kind === 'video' && activeMedia.kind === 'video') {
+            const outZoom = 1 + p * 0.08;
             ctx.translate(width * 0.5, height * 0.5);
             ctx.scale(outZoom, outZoom);
             ctx.translate(-width * 0.5, -height * 0.5);
@@ -1175,7 +1181,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
         activeMedia,
         width,
         height,
-        mediaItems.length > 1 ? slideKenActive : totalScale,
+        activeTotalScale,
         pulseScale,
         panX,
         panY,
@@ -1310,7 +1316,12 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     ctx.fillRect(0, 0, width, height);
   }
 
-  if (!beatPulseOff && metrics.beatPulse > 0.08 && (config.backgroundPulse > 0.05 || config.beatPreset === 'beat_zoom')) {
+  if (
+    config.beatPreset !== 'none' &&
+    !beatPulseOff &&
+    metrics.beatPulse > 0.08 &&
+    (config.backgroundPulse > 0.05 || config.beatPreset === 'beat_zoom')
+  ) {
     const vig = ctx.createRadialGradient(
       width * 0.5,
       height * 0.5,
@@ -1328,7 +1339,7 @@ export function renderStudioFrame(params: RenderFrameParams): void {
   }
 
   // 4. Beat-Synced Visualizer Layer
-  if (config.showVisualizer !== false) {
+  if (config.showVisualizer !== false && config.beatPreset !== 'none') {
   const useCustomVis = config.visualizerColor && config.visualizerColor !== 'auto';
   const visPrimary = useCustomVis ? config.visualizerColor : scheme.accentColor;
   const visSecondary = useCustomVis ? config.visualizerColor : scheme.visualizerSecondary;

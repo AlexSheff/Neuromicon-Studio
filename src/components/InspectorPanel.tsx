@@ -114,6 +114,7 @@ interface InspectorPanelProps {
 }
 
 const BEAT_PRESETS: BeatPresetId[] = [
+  'none',
   'spectrum_bars',
   'radial_pulse',
   'horizon_wave',
@@ -1471,7 +1472,18 @@ export function InspectorPanel({
                 )}
               </div>
 
-              <label className="text-xs font-semibold text-gray-200 block">{t.beatPresetLabel}</label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-gray-200 block">{t.beatPresetLabel}</label>
+                {config.beatPreset !== 'none' && (
+                  <button
+                    type="button"
+                    onClick={() => onUpdateConfig({ beatPreset: 'none' })}
+                    className="px-2 py-0.5 rounded border border-[#262B38] bg-[#141821] hover:border-gray-500 text-[10px] font-medium text-gray-300 hover:text-gray-100 transition-colors cursor-pointer"
+                  >
+                    {t.disableVisualPresetBtn}
+                  </button>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 {BEAT_PRESETS.map((id) => {
                   const info = t.presets[id];
@@ -1480,10 +1492,26 @@ export function InspectorPanel({
                     <button
                       key={id}
                       type="button"
-                      onClick={() => onUpdateConfig({ beatPreset: id })}
+                      onClick={() => {
+                        if (id === 'none') {
+                          onUpdateConfig({ beatPreset: 'none' });
+                        } else {
+                          onUpdateConfig({
+                            beatPreset: id,
+                            showVisualizer: true,
+                            ...(id === 'beat_zoom' &&
+                            config.backgroundPulse <= 0.05 &&
+                            !config.disableBeatPulse
+                              ? { backgroundPulse: 0.45 }
+                              : {}),
+                          });
+                        }
+                      }}
                       className={`p-2.5 rounded-md border text-left transition-colors cursor-pointer ${
                         active
-                          ? 'border-amber-500 bg-amber-500/12'
+                          ? id === 'none'
+                            ? 'border-slate-400 bg-slate-500/15'
+                            : 'border-amber-500 bg-amber-500/12'
                           : 'border-[#262B38] bg-[#141821] hover:border-gray-500'
                       }`}
                     >

@@ -1925,6 +1925,135 @@ test('generateAutoClipPlan cuts lock onto user-calibrated beat grid phase and BP
   }
 });
 
+test('beatPreset none disables beat zoom scale and DEFAULT_STUDIO_CONFIG prevents default photo zoom bounce', () => {
+  assert.equal(DEFAULT_STUDIO_CONFIG.backgroundPulse, 0);
+  assert.equal(resolveBeatPulseScale(DEFAULT_STUDIO_CONFIG, 1.0), 1);
+
+  const disabledPresetCfg: StudioConfig = {
+    ...DEFAULT_STUDIO_CONFIG,
+    beatPreset: 'none',
+    backgroundPulse: 0.9,
+    visualizerScale: 1.5,
+    disableBeatPulse: false,
+    stabilizeMotion: false,
+  };
+  assert.equal(resolveBeatPulseScale(disabledPresetCfg, 1.0), 1);
+});
+
+test('mixed photo + video generateAutoClipPlan prioritizes videos for longer shots, reserves photos for short beats without zoom jump, and aligns 128 BPM cuts to <= 5ms', () => {
+  const mixedBin: MediaBinItem[] = [
+    {
+      id: 'vid-main-1',
+      kind: 'video',
+      fileName: 'concert_a.mp4',
+      url: 'blob:vid-main-1',
+      width: 1920,
+      height: 1080,
+      videoDuration: 40,
+      defaultDurationSec: 30,
+    },
+    {
+      id: 'vid-main-2',
+      kind: 'video',
+      fileName: 'concert_b.mp4',
+      url: 'blob:vid-main-2',
+      width: 1920,
+      height: 1080,
+      videoDuration: 40,
+      defaultDurationSec: 30,
+    },
+    {
+      id: 'photo-punch-1',
+      kind: 'image',
+      fileName: 'flash_1.jpg',
+      url: 'blob:photo-punch-1',
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4,
+    },
+    {
+      id: 'photo-punch-2',
+      kind: 'image',
+      fileName: 'flash_2.jpg',
+      url: 'blob:photo-punch-2',
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4,
+    },
+  ];
+
+  // Exact 128 BPM => 0.46875s fractional beat spacing over 48s track with clear verse + drop kicks
+  const sr = 8000;
+  const totalSec = 48;
+  const beatSec128 = 60 / 128; // 0.46875s
+  const mono = new Float32Array(sr * totalSec);
+  const rawBeats: number[] = [];
+  for (let b = 0; b * beatSec128 < totalSec; b++) {
+    const bt = Number((b * beatSec128).toFixed(3));
+    if (bt > 0.02 && bt < totalSec - 0.02) rawBeats.push(bt);
+    const startSample = Math.round(b * beatSec128 * sr);
+    const isDrop = bt >= 12 && bt < 36;
+    const kickAmp = isDrop ? 0.9 : 0.4;
+    for (let j = 0; j < 360 && startSample + j < mono.length; j++) {
+      mono[startSample + j] += Math.sin((j / sr) * 2 * Math.PI * 64) * Math.exp(-j / 130) * kickAmp;
+    }
+  }
+
+  const grid128 = {
+    bpm: 128,
+    exactBpm: 128,
+    beatSec: beatSec128,
+    anchorSec: 0,
+    downbeatOffset: 0,
+    beats: rawBeats,
+  };
+
+  let seed = 4242;
+  const rng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  const plan = generateAutoClipPlan(mixedBin, grid128, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    transitionStyle: 'musical',
+    minClipSec: 2.0,
+    maxClipSec: 10.0,
+    fillToTargetEnd: true,
+    hasAudio: true,
+    monoData: mono,
+    sampleRate: sr,
+    rng,
+  });
+
+  const videoClips = plan.filter((p) => p.binItemId.startsWith('vid-'));
+  const photoClips = plan.filter((p) => p.binItemId.startsWith('photo-'));
+  assert.ok(videoClips.length >= 4, `Expected >=4 video shots, got ${videoClips.length}`);
+  assert.ok(photoClips.length >= 2, `Expected >=2 short-beat photo shots, got ${photoClips.length}`);
+
+  const avgVideoDur = videoClips.reduce((s, p) => s + p.durationSec, 0) / videoClips.length;
+  const avgPhotoDur = photoClips.reduce((s, p) => s + p.durationSec, 0) / photoClips.length;
+  assert.ok(
+    avgVideoDur > avgPhotoDur * 1.4,
+    `Expected longer video holds (${avgVideoDur.toFixed(2)}s) vs short-beat photo cuts (${avgPhotoDur.toFixed(2)}s)`
+  );
+  assert.ok(
+    photoClips.every((p) => p.durationSec <= beatSec128 * 3.1 && p.scaleEnd === 1.0 && p.transitionOut !== 'zoom_cross'),
+    'Expected mixed-mode photo clips to sit on short beat hits without zoom jumps'
+  );
+
+  for (let i = 1; i < plan.length; i++) {
+    const cutTime = plan[i].startSec;
+    const minDist = Math.min(...grid128.beats.map((b) => Math.abs(b - cutTime)));
+    assert.ok(
+      minDist <= 0.005,
+      `Expected cut #${i} at ${cutTime}s to stay locked within 5ms of 128 BPM beat grid (diff=${minDist.toFixed(4)}s)`
+    );
+  }
+});
+
+
 
 
 

@@ -52,6 +52,7 @@ interface PreviewStageProps {
 }
 
 const BEAT_PRESET_IDS: BeatPresetId[] = [
+  'none',
   'spectrum_bars',
   'radial_pulse',
   'horizon_wave',
@@ -195,7 +196,11 @@ export function PreviewStage({
               setPresetDrawerOpen((v) => !v);
               setShortcutsOpen(false);
             }}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-xs font-semibold text-amber-300 transition-colors cursor-pointer whitespace-nowrap"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+              config.beatPreset === 'none' || config.showVisualizer === false
+                ? 'border-[#262B38] bg-[#141821] hover:border-gray-500 text-gray-300'
+                : 'border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300'
+            }`}
           >
             <AudioWaveform className="w-3.5 h-3.5" aria-hidden="true" />
             <span className="hidden sm:inline">{t.beatPresetButton}:</span>
@@ -344,14 +349,28 @@ export function PreviewStage({
                   <h3 className="text-sm font-semibold text-gray-100">{t.beatPresetDrawerTitle}</h3>
                   <p className="text-xs text-gray-400 mt-0.5">{t.beatPresetDrawerSubtitle}</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setPresetDrawerOpen(false)}
-                  className="p-1.5 rounded-md text-gray-400 hover:text-gray-100 hover:bg-[#1E2330] cursor-pointer"
-                  aria-label={t.closeLabel}
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1.5">
+                  {config.beatPreset !== 'none' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectBeatPreset('none');
+                        setPresetDrawerOpen(false);
+                      }}
+                      className="px-2 py-1 rounded-md border border-[#262B38] bg-[#10131A] hover:border-gray-500 text-[11px] font-medium text-gray-300 hover:text-gray-100 cursor-pointer"
+                    >
+                      {t.disableVisualPresetBtn}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setPresetDrawerOpen(false)}
+                    className="p-1.5 rounded-md text-gray-400 hover:text-gray-100 hover:bg-[#1E2330] cursor-pointer"
+                    aria-label={t.closeLabel}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
                 {BEAT_PRESET_IDS.map((id) => {
@@ -367,7 +386,9 @@ export function PreviewStage({
                       }}
                       className={`text-left p-3 rounded-md border transition-colors cursor-pointer ${
                         isSelected
-                          ? 'border-amber-500 bg-amber-500/12'
+                          ? id === 'none'
+                            ? 'border-slate-400 bg-slate-500/15'
+                            : 'border-amber-500 bg-amber-500/12'
                           : 'border-[#262B38] bg-[#10131A] hover:border-gray-500'
                       }`}
                     >

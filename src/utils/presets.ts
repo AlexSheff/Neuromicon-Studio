@@ -541,7 +541,7 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   visualizerSmoothing: 0.45,
   mirrorVisualizer: false,
   visualizerPlacement: 'bottom',
-  backgroundPulse: 0.45,
+  backgroundPulse: 0,
   disableBeatPulse: false,
   stabilizeMotion: false,
   showBottomAudioTrack: true,

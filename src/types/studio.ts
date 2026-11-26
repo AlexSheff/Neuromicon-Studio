@@ -1,6 +1,7 @@
 export type Language = 'ru' | 'en';
 
 export type BeatPresetId =
+  | 'none'
   | 'spectrum_bars'
   | 'radial_pulse'
   | 'horizon_wave'

@@ -673,16 +673,17 @@ export default function App() {
       (config.beatDownbeatShift ?? 0) !== 0;
     let autoCuts: number[] = [0];
     if (audio && config.slideshowMode === 'beat_cut' && mediaItems.length > 1) {
-      autoCuts = hasCalibratedGrid
-        ? computeBeatCutsFromGrid(trackBeatGrid, clipDuration, config.minBeatCutSec)
-        : computeBeatCutTimestamps(
-            monoDataRef.current,
-            audio.sampleRate,
-            config.trimStart,
-            config.trimEnd,
-            config.minBeatCutSec,
-            config.beatSensitivity
-          );
+      autoCuts =
+        hasCalibratedGrid || trackBeatGrid.beats.length >= 2
+          ? computeBeatCutsFromGrid(trackBeatGrid, clipDuration, config.minBeatCutSec)
+          : computeBeatCutTimestamps(
+              monoDataRef.current,
+              audio.sampleRate,
+              config.trimStart,
+              config.trimEnd,
+              config.minBeatCutSec,
+              config.beatSensitivity
+            );
     }
     return resolveBeatCutPoints(
       autoCuts,
@@ -1059,11 +1060,11 @@ export default function App() {
           startSec: placement.startSec,
           durationSec:
             placement.durationSec ??
-            Number(Math.max(0.4, Math.min(600, binItem.defaultDurationSec || 4.0)).toFixed(2)),
+            Number(Math.max(0.4, Math.min(600, binItem.defaultDurationSec || 4.0)).toFixed(3)),
           sourceStartSec: 0,
           playbackRate: 1.0,
           transitionOut: defaultTrans,
-          transitionDurationSec: 0.65,
+          transitionDurationSec: defaultTrans === 'cut' ? 0 : 0.28,
           transform: { ...DEFAULT_CLIP_TRANSFORM },
           clipAudioVolume: 0,
           clipAudioMuted: true,
@@ -1102,11 +1103,11 @@ export default function App() {
         startSec: placement.startSec,
         durationSec:
           placement.durationSec ??
-          Number(Math.max(0.5, Math.min(600, cappedDur)).toFixed(1)),
+          Number(Math.max(0.5, Math.min(600, cappedDur)).toFixed(3)),
         sourceStartSec: placement.sourceStartSec ?? safeRange.sourceStartSec,
         playbackRate: placement.playbackRate ?? binItem.defaultPlaybackRate ?? 1.0,
         transitionOut: defaultTrans,
-        transitionDurationSec: 0.65,
+        transitionDurationSec: defaultTrans === 'cut' ? 0 : 0.28,
         transform: { ...DEFAULT_CLIP_TRANSFORM },
         clipAudioVolume: resolvedMuted ? 0 : 0.8,
         clipAudioMuted: resolvedMuted,
@@ -2418,7 +2419,7 @@ export default function App() {
         if (!asset) continue;
         if (aud && p.startSec >= maxLimit - 0.1) continue;
         const clampedDur = aud
-          ? Number(Math.max(0.4, Math.min(p.durationSec, maxLimit - p.startSec)).toFixed(2))
+          ? Number(Math.max(0.4, Math.min(p.durationSec, maxLimit - p.startSec)).toFixed(3))
           : p.durationSec;
         const clip = buildClipFromBinItem(asset, {
           startSec: p.startSec,
@@ -3213,11 +3214,11 @@ export default function App() {
     if (!audioRef.current || mediaItemsRef.current.length === 0) return;
     pushImmediateHistory();
     const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
-    const perClip = Number(Math.max(0.5, clipDuration / mediaItemsRef.current.length).toFixed(2));
+    const perClip = Number(Math.max(0.5, clipDuration / mediaItemsRef.current.length).toFixed(3));
     setMediaItems((prev) =>
       prev.map((item, idx) => ({
         ...item,
-        startSec: Number((idx * perClip).toFixed(2)),
+        startSec: Number((idx * perClip).toFixed(3)),
         durationSec: perClip,
       }))
     );
@@ -3252,9 +3253,9 @@ export default function App() {
           if (!p) continue;
           const remaining = bounds.clipDuration - cursor;
           if (remaining < 0.4) break;
-          const clippedDur = Number(Math.min(p.durationSec, remaining).toFixed(2));
+          const clippedDur = Number(Math.min(p.durationSec, remaining).toFixed(3));
           const baseTransform = clip.transform || DEFAULT_CLIP_TRANSFORM;
-          const clipStart = Number(cursor.toFixed(2));
+          const clipStart = Number(cursor.toFixed(3));
           cursor += clippedDur;
           const nextTransitionOut = applyMotionAndTrans
             ? p.suggestedTransition
@@ -3265,9 +3266,9 @@ export default function App() {
               ? 0
               : Number(
                   Math.max(
-                    0.14,
-                    Math.min(clip.transitionDurationSec || 0.45, Math.max(0.14, clippedDur * 0.85))
-                  ).toFixed(2)
+                    0.08,
+                    Math.min(clip.transitionDurationSec || 0.25, Math.max(0.08, clippedDur * 0.85))
+                  ).toFixed(3)
                 );
           updated.push({
             ...clip,
@@ -5526,7 +5527,17 @@ export default function App() {
           onSnapshotPng={handleSnapshotPng}
           onStepFrame={handleStepFrame}
           onJumpCut={handleJumpCut}
-          onSelectBeatPreset={(preset: BeatPresetId) => handleUpdateConfig({ beatPreset: preset })}
+          onSelectBeatPreset={(preset: BeatPresetId) =>
+            handleUpdateConfig({
+              beatPreset: preset,
+              ...(preset !== 'none' ? { showVisualizer: true } : {}),
+              ...(preset === 'beat_zoom' &&
+              (configRef.current.backgroundPulse ?? 0) <= 0.05 &&
+              !configRef.current.disableBeatPulse
+                ? { backgroundPulse: 0.45 }
+                : {}),
+            })
+          }
           onSelectAspectMode={(mode: ExportAspectMode) => handleUpdateConfig({ aspectMode: mode })}
           onToggleSafeZones={() => handleUpdateConfig({ showSafeZones: !config.showSafeZones })}
           onLoadDemoBeat={handleLoadDemoBeat}

@@ -526,7 +526,10 @@ export const TRANSLATIONS = {
     hideBottomAudioTrackBtn: 'Скрыть аудиодорожку с таймлайна',
     showBottomAudioTrackBtn: 'Показать аудиодорожку на таймлайне',
 
+    disableVisualPresetBtn: 'Отключить',
+
     presets: {
+      none: { name: 'Отключён', desc: 'Чистый кадр без визуализатора и пульсации' },
       spectrum_bars: { name: 'Спектр-бары', desc: 'Эквалайзер с реакцией на бас и верх' },
       radial_pulse: { name: 'Радиальное кольцо', desc: 'Круговая волна вокруг центра' },
       horizon_wave: { name: 'Волна горизонта', desc: 'Плавный осциллограф по центру' },
@@ -1056,7 +1059,10 @@ export const TRANSLATIONS = {
     hideBottomAudioTrackBtn: 'Hide audio track from timeline',
     showBottomAudioTrackBtn: 'Show audio track on timeline',
 
+    disableVisualPresetBtn: 'Turn Off',
+
     presets: {
+      none: { name: 'Disabled', desc: 'Clean frame without visualizer or beat pulse' },
       spectrum_bars: { name: 'Spectrum Bars', desc: 'Bass-and-treble reactive frequency bars' },
       radial_pulse: { name: 'Radial Pulse', desc: 'Circular harmonic ring around center' },
       horizon_wave: { name: 'Horizon Wave', desc: 'Smooth mirrored audio oscilloscope' },
