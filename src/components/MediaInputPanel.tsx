@@ -99,7 +99,6 @@ interface MediaInputPanelProps {
   onSelectClip: (id: string) => void;
   onInspectClip: (id: string) => void;
   onDuplicateClip?: (id: string) => void;
-  onMoveVisual?: (index: number, direction: -1 | 1) => void;
   onReverseClips: () => void;
   onRemoveVisual: (id: string) => void;
   onClearVisuals: () => void;
@@ -1826,10 +1825,19 @@ export function MediaInputPanel({
                           <span>{t.autoClipCenteredTransLabel}</span>
                           <input
                             type="checkbox"
-                            checked={Boolean(config.beatCenteredTransitions)}
-                            onChange={(e) =>
-                              onUpdateConfig({ beatCenteredTransitions: e.target.checked })
+                            checked={
+                              autoClipCfg.beatCenteredTransitions ??
+                              config.beatCenteredTransitions ??
+                              true
                             }
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setAutoClipCfg((prev) => ({
+                                ...prev,
+                                beatCenteredTransitions: checked,
+                              }));
+                              onUpdateConfig({ beatCenteredTransitions: checked });
+                            }}
                             className="accent-cyan-400 w-3.5 h-3.5 rounded cursor-pointer"
                           />
                         </label>

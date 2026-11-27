@@ -264,7 +264,10 @@ function drawFitBlurBackdrop(
   dstW: number,
   dstH: number,
   scaleFactor: number,
-  config: StudioConfig
+  panX: number,
+  panY: number,
+  config: StudioConfig,
+  allowForegroundMotion: boolean
 ) {
   const hasFilter = supportsCanvasFilter(ctx);
   const bgExtraBlur = Math.round(Math.min(dstW, dstH) * 0.032);
@@ -311,34 +314,56 @@ function drawFitBlurBackdrop(
   const srcRatio = srcW / srcH;
   const availRatio = availW / availH;
 
-  let drawW: number;
-  let drawH: number;
+  let baseW: number;
+  let baseH: number;
   if (srcRatio > availRatio) {
-    drawW = availW * scaleFactor;
-    drawH = drawW / srcRatio;
+    baseW = availW;
+    baseH = baseW / srcRatio;
   } else {
-    drawH = availH * scaleFactor;
-    drawW = drawH * srcRatio;
+    baseH = availH;
+    baseW = baseH * srcRatio;
   }
 
-  const x = (dstW - drawW) / 2;
-  const y = (dstH - drawH) / 2;
+  const clampedScale = Math.max(0.2, scaleFactor);
+  const outerScale = Math.min(1, clampedScale);
+  const innerScale = Math.max(1, clampedScale);
+  const cardW = baseW * outerScale;
+  const cardH = baseH * outerScale;
+  const cardX = (dstW - cardW) / 2;
+  const cardY = (dstH - cardH) / 2;
+
+  const drawW = cardW * innerScale;
+  const drawH = cardH * innerScale;
+  const maxPanX = Math.max(0, (drawW - cardW) * 0.45);
+  const maxPanY = Math.max(0, (drawH - cardH) * 0.45);
+  const clampedPanX = allowForegroundMotion ? Math.max(-maxPanX, Math.min(maxPanX, panX)) : 0;
+  const clampedPanY = allowForegroundMotion ? Math.max(-maxPanY, Math.min(maxPanY, panY)) : 0;
+  const drawX = (dstW - drawW) / 2 + clampedPanX;
+  const drawY = (dstH - drawH) / 2 + clampedPanY;
 
   ctx.save();
-  if (hasFilter) {
-    ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
-  }
   ctx.shadowColor = 'rgba(0,0,0,0.65)';
   ctx.shadowBlur = Math.min(dstW, dstH) * 0.04;
   ctx.shadowOffsetY = Math.min(dstW, dstH) * 0.015;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(cardX, cardY, cardW, cardH);
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(cardX, cardY, cardW, cardH);
+  ctx.clip();
+  if (hasFilter) {
+    ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
+  }
   if (!hasFilter && config.mediaBlur > 0.4) {
     drawDownscaledBlurFallback(
       ctx,
       source,
       srcW,
       srcH,
-      x,
-      y,
+      drawX,
+      drawY,
       drawW,
       drawH,
       config.mediaBlur,
@@ -348,13 +373,18 @@ function drawFitBlurBackdrop(
       false
     );
   } else {
-    ctx.drawImage(source as CanvasImageSource, x, y, drawW, drawH);
+    ctx.drawImage(source as CanvasImageSource, drawX, drawY, drawW, drawH);
   }
   if (!hasFilter) {
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
-    ctx.shadowOffsetY = 0;
-    applyFallbackColorAndBrightness(ctx, x, y, drawW, drawH, config.mediaFilter, config.mediaBrightness);
+    applyFallbackColorAndBrightness(
+      ctx,
+      cardX,
+      cardY,
+      cardW,
+      cardH,
+      config.mediaFilter,
+      config.mediaBrightness
+    );
   }
   ctx.restore();
 }
@@ -510,7 +540,19 @@ function drawSingleClipLayer(
   }
 
   if (config.framingMode === 'fit_blur') {
-    drawFitBlurBackdrop(ctx, drawSource, drawSrcW, drawSrcH, width, height, pulseScale, config);
+    drawFitBlurBackdrop(
+      ctx,
+      drawSource,
+      drawSrcW,
+      drawSrcH,
+      width,
+      height,
+      totalScale,
+      panX,
+      panY,
+      config,
+      media.kind === 'image'
+    );
   } else {
     const baseScale = pulseScale > 0.01 ? totalScale / pulseScale : totalScale;
     const safeHeadroom = Math.max(0, baseScale - 1);

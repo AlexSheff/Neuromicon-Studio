@@ -2537,6 +2537,7 @@ export interface AutoClipGenerateConfig {
   targetDurationSec: number | null; // null = auto / full available span
   avoidAdjacentRepeat: boolean;
   shuffleOrder: boolean;
+  beatCenteredTransitions?: boolean;
   excludeEdgeSec?: number;
   variationSeed?: number;
 }
@@ -2742,6 +2743,7 @@ export const DEFAULT_AUTO_CLIP_CONFIG: AutoClipGenerateConfig = {
   targetDurationSec: null,
   avoidAdjacentRepeat: true,
   shuffleOrder: true,
+  beatCenteredTransitions: true,
   excludeEdgeSec: 5,
 };
 
@@ -3380,13 +3382,30 @@ export function generateAutoClipPlan(
   const startOffsetSec = Math.max(0, Number((options.startOffsetSec ?? 0).toFixed(3)));
 
   // Prepare media pool up-front so Stage 1 & Stage 2 share exact knowledge of mixed photo + video assets
+  const getAssetContentKey = (b: MediaBinItem): string => {
+    const cleanName = (b.fileName || '').trim().toLowerCase();
+    if (b.kind === 'image') {
+      return cleanName ? `img:${cleanName}:${b.width}x${b.height}` : `url:${b.url}`;
+    }
+    const durKey = Math.round((b.videoDuration ?? b.defaultDurationSec ?? 0) * 10);
+    const sKey =
+      b.defaultSourceStartSec !== undefined ? Number(b.defaultSourceStartSec.toFixed(1)) : '';
+    const eKey =
+      b.defaultSourceEndSec !== undefined ? Number(b.defaultSourceEndSec.toFixed(1)) : '';
+    return cleanName
+      ? `vid:${cleanName}:${durKey}:${b.width}x${b.height}:${sKey}:${eKey}`
+      : `url:${b.url}`;
+  };
+
   interface PoolImage {
     kind: 'image';
     binItem: MediaBinItem;
+    contentKey: string;
   }
   interface PoolVideo {
     kind: 'video';
     binItem: MediaBinItem;
+    contentKey: string;
     rate: number;
     initStart: number;
     initEnd: number;
@@ -3395,22 +3414,43 @@ export function generateAutoClipPlan(
   }
   type PoolAsset = PoolImage | PoolVideo;
 
-  const urlFreeRanges = new Map<string, Array<[number, number]>>();
-  const usedImageUrls = new Set<string>(options.excludeUsedUrls ?? []);
-  const seqCursorByUrl = new Map<string, number>();
-  const usedSlicesByUrl = new Map<string, Array<[number, number]>>();
-  const usageCountByUrl = new Map<string, number>();
-  const lastSlotIdxByUrl = new Map<string, number>();
-  const placedIndicesByUrl = new Map<string, number[]>();
+  const freeRangesByKey = new Map<string, Array<[number, number]>>();
+  const usedImageKeys = new Set<string>();
+  const seqCursorByKey = new Map<string, number>();
+  const usedSlicesByKey = new Map<string, Array<[number, number]>>();
+  const usageCountByKey = new Map<string, number>();
+  const lastSlotIdxByKey = new Map<string, number>();
+  const placedIndicesByKey = new Map<string, number[]>();
   const SLICE_BUCKET_COUNT = 48;
-  const sliceBucketsByUrl = new Map<
+  const sliceBucketsByKey = new Map<
     string,
     { counts: Float32Array; lastUsed: Int32Array; initStart: number; initEnd: number }
   >();
   let placementSeq = 0;
 
-  const getMinSlotDist = (url: string, slotIdx: number): number => {
-    const list = placedIndicesByUrl.get(url);
+  // Map URL-based external exclusions onto canonical content keys so duplicate files in bin also honor them
+  const urlToKey = new Map<string, string>();
+  for (const b of binItems) {
+    urlToKey.set(b.url, getAssetContentKey(b));
+  }
+  const excludedImgKeys = new Set<string>();
+  if (options.excludeUsedUrls) {
+    for (const u of options.excludeUsedUrls) {
+      excludedImgKeys.add(urlToKey.get(u) ?? `url:${u}`);
+    }
+  }
+  const excludedRangesByKey = new Map<string, Array<[number, number]>>();
+  if (options.excludeVideoRangesByUrl) {
+    for (const [u, list] of options.excludeVideoRangesByUrl.entries()) {
+      const k = urlToKey.get(u) ?? `url:${u}`;
+      const merged = excludedRangesByKey.get(k) ?? [];
+      merged.push(...list);
+      excludedRangesByKey.set(k, merged);
+    }
+  }
+
+  const getMinSlotDist = (key: string, slotIdx: number): number => {
+    const list = placedIndicesByKey.get(key);
     if (!list || list.length === 0) return 9999;
     let best = Infinity;
     for (let k = 0; k < list.length; k++) {
@@ -3424,39 +3464,39 @@ export function generateAutoClipPlan(
   const slicePad = 0.06;
 
   const initPoolAndRanges = (respectExclusions: boolean): PoolAsset[] => {
-    urlFreeRanges.clear();
-    usedImageUrls.clear();
-    if (respectExclusions && options.excludeUsedUrls) {
-      for (const u of options.excludeUsedUrls) usedImageUrls.add(u);
+    freeRangesByKey.clear();
+    usedImageKeys.clear();
+    if (respectExclusions) {
+      for (const k of excludedImgKeys) usedImageKeys.add(k);
     }
     const assets: PoolAsset[] = [];
     for (const b of binItems) {
+      const cKey = getAssetContentKey(b);
       if (b.kind === 'image') {
-        if (!usedImageUrls.has(b.url)) {
-          assets.push({ kind: 'image', binItem: b });
+        if (!usedImageKeys.has(cKey)) {
+          assets.push({ kind: 'image', binItem: b, contentKey: cKey });
         }
       } else {
         const safe = resolveSafeVideoSourceRange(b, excludeEdgeSec);
         const rate = Math.max(0.25, Math.min(4, b.defaultPlaybackRate ?? 1.0));
-        if (!urlFreeRanges.has(b.url)) {
+        if (!freeRangesByKey.has(cKey)) {
           const baseRange: [number, number] = [safe.sourceStartSec, safe.sourceEndSec];
-          const excluded = respectExclusions
-            ? options.excludeVideoRangesByUrl?.get(b.url) ?? []
-            : [];
+          const excluded = respectExclusions ? excludedRangesByKey.get(cKey) ?? [] : [];
           const ranges =
             excluded.length > 0
               ? subtractUsedIntervals(baseRange, excluded, minSliceKeep)
               : baseRange[1] - baseRange[0] >= 0.25
                 ? [baseRange]
                 : [];
-          urlFreeRanges.set(b.url, ranges);
-          seqCursorByUrl.set(b.url, ranges.length > 0 ? ranges[0][0] : safe.sourceStartSec);
+          freeRangesByKey.set(cKey, ranges);
+          seqCursorByKey.set(cKey, ranges.length > 0 ? ranges[0][0] : safe.sourceStartSec);
         }
-        const availRanges = urlFreeRanges.get(b.url) ?? [];
+        const availRanges = freeRangesByKey.get(cKey) ?? [];
         if (availRanges.length > 0) {
           assets.push({
             kind: 'video',
             binItem: b,
+            contentKey: cKey,
             rate,
             initStart: safe.sourceStartSec,
             initEnd: safe.sourceEndSec,
@@ -3477,7 +3517,11 @@ export function generateAutoClipPlan(
 
   const poolVideos = pool.filter((e): e is PoolVideo => e.kind === 'video');
   const poolImages = pool.filter((e): e is PoolImage => e.kind === 'image');
-  const hasMixedPool = poolVideos.length > 0 && poolImages.length > 0;
+  const hasUsableVideos = poolVideos.some(
+    (v) => (freeRangesByKey.get(v.contentKey) ?? []).length > 0
+  );
+  const hasUsableImages = poolImages.some((img) => !excludedImgKeys.has(img.contentKey));
+  const hasMixedPool = hasUsableVideos && hasUsableImages;
   const shortBeatMaxSec = Math.max(1.4, Math.min(2.6, beatSec * 3.1));
 
   const estimateNoAudioBinSpan = (): number => {
@@ -3524,7 +3568,7 @@ export function generateAutoClipPlan(
   const enforceBarGrid =
     (rhythm === 'auto' || rhythm === 'smooth' || rhythm === 'beats_4') &&
     maxClipBound >= beatSec * 3.8;
-  const uniqueFileCount = Math.max(1, new Set(binItems.map((b) => b.url)).size);
+  const uniqueFileCount = Math.max(1, new Set(binItems.map((b) => getAssetContentKey(b))).size);
   const avgTargetPerFile = totalSpanSec / uniqueFileCount;
 
   // =========================================================================
@@ -3718,15 +3762,37 @@ export function generateAutoClipPlan(
       } else if (isShortSpan) {
         preferredOrder = [4, 6, 8, 2];
       } else if (editorialProfile === 'groove') {
-        preferredOrder = takeSyncopationPref > 0.5 ? [4, 6, 8, 2] : [6, 4, 8, 12];
+        preferredOrder =
+          section === 'drop' || rawEnergy >= 0.68
+            ? [4, 6, 2, 8]
+            : takeSyncopationPref > 0.5
+              ? [4, 6, 8, 2]
+              : [6, 4, 8, 12];
       } else {
         preferredOrder = avgTargetPerFile >= 8 ? [12, 8, 6, 16, 4] : [8, 4, 12, 6, 16];
       }
     } else if (rhythm === 'smooth' || editorialProfile === 'acoustic' || editorialProfile === 'dream') {
       if (isShortSpan) {
-        preferredOrder = energy > 0.72 ? [4, 6, 8] : [8, 12, 6, 4];
+        preferredOrder =
+          editorialProfile === 'dream'
+            ? [12, 8, 16]
+            : energy > 0.72
+              ? [4, 6, 8]
+              : [8, 12, 6, 4];
+      } else if (editorialProfile === 'dream') {
+        preferredOrder =
+          section === 'beatless' || section === 'intro' || section === 'outro'
+            ? [24, 20, 16]
+            : [20, 24, 16, 12];
+      } else if (editorialProfile === 'acoustic') {
+        preferredOrder =
+          section === 'beatless' || section === 'intro' || section === 'outro'
+            ? [16, 12, 8]
+            : curMelody >= 0.58 || energy > 0.64
+              ? [8, 12, 6, 16]
+              : [12, 8, 16, 6];
       } else if (section === 'beatless' || section === 'intro' || section === 'outro') {
-        preferredOrder = editorialProfile === 'dream' ? [20, 24, 16, 12] : [16, 20, 12, 24];
+        preferredOrder = [16, 20, 12, 24];
       } else {
         preferredOrder = energy > 0.72 ? [12, 8, 16, 20] : [16, 24, 12, 20, 8];
       }
@@ -3736,16 +3802,23 @@ export function generateAutoClipPlan(
     } else if (section === 'beatless' && !isShortSpan) {
       // No-beat / breakdown / ambient pocket: hold calm wide shots until chord shift / drop entry
       const slowCalm =
-        editorialProfile === 'crescendo' || editorialProfile === 'cinema_flow';
+        editorialProfile === 'crescendo' ||
+        editorialProfile === 'cinema_flow' ||
+        editorialProfile === 'trailer';
       preferredOrder = slowCalm ? [16, 12, 8, 20] : [8, 12, 6, 4];
     } else if (isBuildupBeforeDrop && section === 'buildup') {
       // Crescendo / buildup: progressive staircase acceleration heading into drop
       if (nextDropDelta > 0 && nextDropDelta <= 2) {
         preferredOrder = [nextDropDelta, 2, 1];
       } else if (nextDropDelta > 2 && nextDropDelta <= 4) {
-        preferredOrder = [2, nextDropDelta, 4];
+        preferredOrder = editorialProfile === 'trailer' ? [2, 1, nextDropDelta] : [2, nextDropDelta, 4];
       } else {
-        preferredOrder = isShortSpan ? [4, 2, 6] : [4, 2, 6, 8];
+        preferredOrder =
+          editorialProfile === 'trailer'
+            ? [4, 2, 1, 6]
+            : isShortSpan
+              ? [4, 2, 6]
+              : [4, 2, 6, 8];
       }
     } else if (isShortSpan) {
       if (section === 'intro' || section === 'outro' || section === 'beatless' || rawEnergy < 0.38) {
@@ -3758,18 +3831,23 @@ export function generateAutoClipPlan(
     } else {
       // Full-track narrative phrasing adapted per section & editorial profile
       const isSlowEditorial =
-        editorialProfile === 'crescendo' || editorialProfile === 'cinema_flow';
+        editorialProfile === 'crescendo' ||
+        editorialProfile === 'cinema_flow' ||
+        editorialProfile === 'trailer';
       if (allowShortPhotoPunch) {
         preferredOrder =
           rawEnergy >= 0.68 && beatSec >= 0.45 ? [2, 1, 4, 6] : [2, 4, 6, 8];
       } else if (section === 'intro') {
-        preferredOrder = isSlowEditorial
-          ? [16, 12, 8]
-          : hasRealAudioSignals && rawEnergy < 0.34
-            ? takeOpeningRoll > 0.5
-              ? [12, 8, 16, 6]
-              : [8, 12, 6, 16]
-            : [8, 6, 4, 12];
+        preferredOrder =
+          editorialProfile === 'edm_drop'
+            ? [8, 6, 4, 12]
+            : isSlowEditorial
+              ? [16, 12, 8]
+              : hasRealAudioSignals && rawEnergy < 0.34
+                ? takeOpeningRoll > 0.5
+                  ? [12, 8, 16, 6]
+                  : [8, 12, 6, 16]
+                : [8, 6, 4, 12];
       } else if (section === 'outro') {
         preferredOrder = isSlowEditorial
           ? [12, 16, 8, 20]
@@ -3778,15 +3856,21 @@ export function generateAutoClipPlan(
             : [8, 6, 12, 4];
       } else if (section === 'drop') {
         preferredOrder =
-          editorialProfile === 'edm_drop' || editorialProfile === 'trailer'
-            ? [4, 2, 6, 8]
-            : takeSyncopationPref > 0.55
-              ? [4, 6, 8, 2]
-              : [6, 4, 8, 12];
+          editorialProfile === 'edm_drop'
+            ? [2, 4, 6, 1]
+            : editorialProfile === 'trailer'
+              ? [4, 2, 6, 8]
+              : takeSyncopationPref > 0.55
+                ? [4, 6, 8, 2]
+                : [6, 4, 8, 12];
       } else if (editorialProfile === 'crescendo') {
         const trackProg = (beatTimes[bIdx] - startOffsetSec) / Math.max(1, totalSpanSec);
         preferredOrder =
           trackProg < 0.35 ? [12, 16, 8] : trackProg < 0.68 ? [8, 6, 12, 4] : [4, 6, 2, 8];
+      } else if (editorialProfile === 'trailer') {
+        preferredOrder = rawEnergy >= 0.55 ? [4, 6, 2, 8] : [12, 8, 16, 6];
+      } else if (editorialProfile === 'edm_drop') {
+        preferredOrder = rawEnergy >= 0.52 ? [4, 2, 6, 8] : [6, 4, 8, 2];
       } else if (rawEnergy < 0.36) {
         preferredOrder = isSlowEditorial
           ? [12, 16, 8, 20]
@@ -4000,8 +4084,16 @@ export function generateAutoClipPlan(
       const isShortDrop = totalSpanSec < 26 && (energy >= 0.66 || section === 'drop') && rhythm === 'auto';
       const minAllow =
         isShortDrop || (allowShortPhotoPunch && stepCount <= 2) || section === 'buildup'
-          ? Math.max(0.36, Math.min(beatSec * 0.85, targetLimit - cursorSec))
-          : Math.max(0.45, Math.min(minClipBound * 0.85, targetLimit - cursorSec));
+          ? Math.max(
+              0.36,
+              fillToTargetEnd ? Math.min(beatSec * 0.85, targetLimit - cursorSec) : beatSec * 0.85
+            )
+          : Math.max(
+              0.45,
+              fillToTargetEnd
+                ? Math.min(minClipBound * 0.85, targetLimit - cursorSec)
+                : minClipBound * 0.93
+            );
       if (dur < minAllow) continue;
       const cutImpact =
         (onsetAccent[nextIdx] ?? hitStrength) * 0.55 + (melodicNovelty[nextIdx] ?? 0.4) * 0.45;
@@ -4188,12 +4280,12 @@ export function generateAutoClipPlan(
     preferTrimmedSlice: boolean,
     sequentialCursor: boolean
   ): boolean => {
-    if (entry.kind === 'image') return !usedImageUrls.has(entry.binItem.url);
+    if (entry.kind === 'image') return !usedImageKeys.has(entry.contentKey);
     if (!isTrimmedOk(entry, dur, preferTrimmedSlice)) return false;
     const mediaNeed = dur * entry.rate;
-    const ranges = urlFreeRanges.get(entry.binItem.url) ?? [];
+    const ranges = freeRangesByKey.get(entry.contentKey) ?? [];
     if (sequentialCursor) {
-      const cursor = seqCursorByUrl.get(entry.binItem.url) ?? entry.initStart;
+      const cursor = seqCursorByKey.get(entry.contentKey) ?? entry.initStart;
       return ranges.some(([rs, re]) => re - Math.max(rs, cursor) >= mediaNeed - 0.01);
     }
     return ranges.some(([rs, re]) => re - rs >= mediaNeed - 0.01);
@@ -4202,17 +4294,17 @@ export function generateAutoClipPlan(
   const hasAnyUnusedFootage = (minVideoSpan = splitFloor): boolean => {
     for (const entry of pool) {
       if (entry.kind === 'image') {
-        if (!usedImageUrls.has(entry.binItem.url)) return true;
+        if (!usedImageKeys.has(entry.contentKey)) return true;
       } else {
-        const ranges = urlFreeRanges.get(entry.binItem.url) ?? [];
+        const ranges = freeRangesByKey.get(entry.contentKey) ?? [];
         if (ranges.some(([rs, re]) => re - rs >= minVideoSpan)) return true;
       }
     }
     return false;
   };
 
-  const ensureVideoBuckets = (url: string, initStart: number, initEnd: number) => {
-    let bucket = sliceBucketsByUrl.get(url);
+  const ensureVideoBuckets = (cKey: string, initStart: number, initEnd: number) => {
+    let bucket = sliceBucketsByKey.get(cKey);
     if (!bucket) {
       bucket = {
         counts: new Float32Array(SLICE_BUCKET_COUNT),
@@ -4220,31 +4312,31 @@ export function generateAutoClipPlan(
         initStart,
         initEnd: Math.max(initStart + 0.25, initEnd),
       };
-      sliceBucketsByUrl.set(url, bucket);
+      sliceBucketsByKey.set(cKey, bucket);
     }
     return bucket;
   };
 
   const recordUsedSlice = (
-    url: string,
+    cKey: string,
     srcStart: number,
     srcEnd: number,
     slotOrderIdx: number,
     initStart?: number,
     initEnd?: number
   ) => {
-    const list = usedSlicesByUrl.get(url) ?? [];
+    const list = usedSlicesByKey.get(cKey) ?? [];
     list.push([srcStart, srcEnd]);
-    usedSlicesByUrl.set(url, list);
-    usageCountByUrl.set(url, (usageCountByUrl.get(url) ?? 0) + 1);
-    lastSlotIdxByUrl.set(url, slotOrderIdx);
-    const idxs = placedIndicesByUrl.get(url) ?? [];
+    usedSlicesByKey.set(cKey, list);
+    usageCountByKey.set(cKey, (usageCountByKey.get(cKey) ?? 0) + 1);
+    lastSlotIdxByKey.set(cKey, slotOrderIdx);
+    const idxs = placedIndicesByKey.get(cKey) ?? [];
     idxs.push(slotOrderIdx);
-    placedIndicesByUrl.set(url, idxs);
+    placedIndicesByKey.set(cKey, idxs);
 
     const bStart = initStart ?? srcStart;
     const bEnd = initEnd ?? Math.max(bStart + 0.25, srcEnd);
-    const bucket = ensureVideoBuckets(url, bStart, bEnd);
+    const bucket = ensureVideoBuckets(cKey, bStart, bEnd);
     const span = Math.max(0.25, bucket.initEnd - bucket.initStart);
     const seq = ++placementSeq;
     const normLo = Math.max(0, Math.min(1, (srcStart - bucket.initStart) / span));
@@ -4264,23 +4356,23 @@ export function generateAutoClipPlan(
     slotOrderIdx: number
   ): { sourceStartSec: number; rate: number } => {
     if (entry.kind === 'image') {
-      usedImageUrls.add(entry.binItem.url);
-      usageCountByUrl.set(entry.binItem.url, (usageCountByUrl.get(entry.binItem.url) ?? 0) + 1);
-      lastSlotIdxByUrl.set(entry.binItem.url, slotOrderIdx);
-      const idxs = placedIndicesByUrl.get(entry.binItem.url) ?? [];
+      usedImageKeys.add(entry.contentKey);
+      usageCountByKey.set(entry.contentKey, (usageCountByKey.get(entry.contentKey) ?? 0) + 1);
+      lastSlotIdxByKey.set(entry.contentKey, slotOrderIdx);
+      const idxs = placedIndicesByKey.get(entry.contentKey) ?? [];
       idxs.push(slotOrderIdx);
-      placedIndicesByUrl.set(entry.binItem.url, idxs);
+      placedIndicesByKey.set(entry.contentKey, idxs);
       return { sourceStartSec: 0, rate: 1.0 };
     }
 
     const mediaNeed = dur * entry.rate;
-    const ranges = urlFreeRanges.get(entry.binItem.url) ?? [];
+    const ranges = freeRangesByKey.get(entry.contentKey) ?? [];
     let srcStart = entry.initStart;
     let srcEnd =
       entry.initStart + Math.min(mediaNeed, Math.max(0.25, entry.initEnd - entry.initStart));
 
     if (sequentialCursor) {
-      const cursor = seqCursorByUrl.get(entry.binItem.url) ?? entry.initStart;
+      const cursor = seqCursorByKey.get(entry.contentKey) ?? entry.initStart;
       let picked: [number, number] | null = null;
       for (const [rs, re] of ranges) {
         const startAt = Math.max(rs, cursor);
@@ -4293,9 +4385,10 @@ export function generateAutoClipPlan(
       const clampedNeed = Math.min(mediaNeed, Math.max(0.25, re - rs));
       srcStart = Number(rs.toFixed(2));
       srcEnd = Number((srcStart + clampedNeed).toFixed(2));
-      seqCursorByUrl.set(entry.binItem.url, Number((srcEnd + slicePad).toFixed(2)));
+      seqCursorByKey.set(entry.contentKey, Number((srcEnd + slicePad).toFixed(2)));
     } else {
-      const transHeadroom = transitionStyle === 'cuts_only' ? 0 : Math.min(0.4, dur * 0.14) * entry.rate;
+      const transHeadroom =
+        transitionStyle === 'cuts_only' ? 0 : Math.min(0.4, dur * 0.14) * entry.rate;
       const fittingWithHeadroom: Array<[number, number]> =
         transHeadroom > 0
           ? ranges.filter(([rs, re]) => re - rs >= mediaNeed + transHeadroom)
@@ -4309,8 +4402,8 @@ export function generateAutoClipPlan(
       const clampedNeed = Math.min(mediaNeed, Math.max(0.25, re - rs));
       const slack = Math.max(0, re - rs - clampedNeed);
       const safeTailMargin = slack > transHeadroom + 0.1 ? Math.min(transHeadroom, slack * 0.5) : 0;
+      const prior = usedSlicesByKey.get(entry.contentKey) ?? [];
       if (slack >= Math.max(4.5, clampedNeed * 1.45)) {
-        const prior = usedSlicesByUrl.get(entry.binItem.url) ?? [];
         const minEdgeBuf = Math.max(0.9, minSliceKeep + slicePad);
         let bestOffset = Number((rs + rng() * Math.max(0, slack - safeTailMargin)).toFixed(2));
         let bestScore = -Infinity;
@@ -4343,9 +4436,30 @@ export function generateAutoClipPlan(
         }
         srcStart = bestOffset;
         srcEnd = Number((srcStart + clampedNeed).toFixed(2));
+      } else if (slack > 0.15) {
+        // Sample endpoints + interior offsets so moderate-slack cuts spread cleanly away from prior slices
+        const maxRangeOff = Math.max(0, slack - safeTailMargin * 0.5);
+        let bestOffset = Number((rs + rng() * maxRangeOff).toFixed(2));
+        let bestScore = -Infinity;
+        for (let k = 0; k < 5; k++) {
+          const frac = k === 0 ? 0 : k === 4 ? 1 : (k + rng() * 0.5) / 5;
+          const cand = Number(Math.max(rs, Math.min(re - clampedNeed, rs + frac * maxRangeOff)).toFixed(2));
+          const candEnd = cand + clampedNeed;
+          let minDist = prior.length === 0 ? slack : Infinity;
+          for (const [ps, pe] of prior) {
+            const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
+            if (d < minDist) minDist = d;
+          }
+          const score = minDist + rng() * 0.35;
+          if (score > bestScore) {
+            bestScore = score;
+            bestOffset = cand;
+          }
+        }
+        srcStart = bestOffset;
+        srcEnd = Number((srcStart + clampedNeed).toFixed(2));
       } else {
-        const takeFromEnd = slack > 0.15 && rng() >= 0.45;
-        srcStart = takeFromEnd ? Number((re - clampedNeed).toFixed(2)) : Number(rs.toFixed(2));
+        srcStart = Number(rs.toFixed(2));
         srcEnd = Number((srcStart + clampedNeed).toFixed(2));
       }
     }
@@ -4353,22 +4467,23 @@ export function generateAutoClipPlan(
     const updated = subtractUsedIntervals(
       [entry.initStart, entry.initEnd],
       [
-        ...(usedSlicesByUrl.get(entry.binItem.url) ?? []).map(
+        ...(usedSlicesByKey.get(entry.contentKey) ?? []).map(
           ([us, ue]): [number, number] => [Math.max(entry.initStart, us - slicePad), ue + slicePad]
         ),
         [Math.max(entry.initStart, srcStart - slicePad), srcEnd + slicePad],
-        ...(options.excludeVideoRangesByUrl?.get(entry.binItem.url) ?? []),
+        ...(excludedRangesByKey.get(entry.contentKey) ?? []),
       ],
       minSliceKeep
     );
-    urlFreeRanges.set(entry.binItem.url, updated);
-    recordUsedSlice(entry.binItem.url, srcStart, srcEnd, slotOrderIdx, entry.initStart, entry.initEnd);
+    freeRangesByKey.set(entry.contentKey, updated);
+    recordUsedSlice(entry.contentKey, srcStart, srcEnd, slotOrderIdx, entry.initStart, entry.initEnd);
 
     return { sourceStartSec: srcStart, rate: entry.rate };
   };
 
   // Exhaustion fallback strictly clamped inside [initStart .. initEnd]
-  const reuseSeqCursorByUrl = new Map<string, number>();
+  const reuseSeqCursorByKey = new Map<string, number>();
+  const reusePassByKey = new Map<string, number>();
   const takeExhaustedFallbackSlice = (
     entry: PoolAsset,
     dur: number,
@@ -4376,28 +4491,49 @@ export function generateAutoClipPlan(
     slotOrderIdx: number
   ): { sourceStartSec: number; rate: number } => {
     if (entry.kind === 'image') {
-      usageCountByUrl.set(entry.binItem.url, (usageCountByUrl.get(entry.binItem.url) ?? 0) + 1);
-      lastSlotIdxByUrl.set(entry.binItem.url, slotOrderIdx);
-      const idxs = placedIndicesByUrl.get(entry.binItem.url) ?? [];
+      usageCountByKey.set(entry.contentKey, (usageCountByKey.get(entry.contentKey) ?? 0) + 1);
+      lastSlotIdxByKey.set(entry.contentKey, slotOrderIdx);
+      const idxs = placedIndicesByKey.get(entry.contentKey) ?? [];
       idxs.push(slotOrderIdx);
-      placedIndicesByUrl.set(entry.binItem.url, idxs);
+      placedIndicesByKey.set(entry.contentKey, idxs);
       return { sourceStartSec: 0, rate: 1.0 };
     }
     const mediaNeed = dur * entry.rate;
     const availSpan = Math.max(0.25, entry.initEnd - entry.initStart);
     if (sequentialOrder) {
-      const cur = reuseSeqCursorByUrl.get(entry.binItem.url) ?? entry.initStart;
-      const clampedCur = cur >= entry.initStart && cur + Math.min(mediaNeed, availSpan) <= entry.initEnd + 0.02
-        ? cur
-        : entry.initStart;
+      const clampedNeed = Math.min(mediaNeed, availSpan);
+      const maxOff = Math.max(0, availSpan - clampedNeed);
+      const passCount = reusePassByKey.get(entry.contentKey) ?? 1;
+      const storedCur = reuseSeqCursorByKey.get(entry.contentKey);
+      const initFallbackShift = Math.min(
+        maxOff,
+        ((passCount * 0.381966) % 0.85) * Math.min(maxOff, Math.max(0.8, clampedNeed * 0.75))
+      );
+      const cur = storedCur ?? entry.initStart + initFallbackShift;
+      const validCur =
+        cur >= entry.initStart && cur + clampedNeed <= entry.initEnd + 0.02
+          ? cur
+          : entry.initStart + initFallbackShift;
       const srcStart = Number(
-        Math.max(entry.initStart, Math.min(entry.initEnd - 0.25, clampedCur)).toFixed(2)
+        Math.max(entry.initStart, Math.min(entry.initEnd - 0.25, validCur)).toFixed(2)
       );
       const stepEnd = srcStart + Math.min(mediaNeed, entry.initEnd - srcStart) + slicePad;
-      const nextCur = stepEnd <= entry.initEnd - 0.25 ? stepEnd : entry.initStart;
-      reuseSeqCursorByUrl.set(entry.binItem.url, Number(nextCur.toFixed(2)));
+      if (stepEnd <= entry.initEnd - 0.25) {
+        reuseSeqCursorByKey.set(entry.contentKey, Number(stepEnd.toFixed(2)));
+      } else {
+        const nextPass = passCount + 1;
+        reusePassByKey.set(entry.contentKey, nextPass);
+        const phaseShift = Math.min(
+          maxOff,
+          (((nextPass * 0.381966) % 0.85) * Math.min(maxOff, Math.max(0.8, clampedNeed * 0.75)))
+        );
+        reuseSeqCursorByKey.set(
+          entry.contentKey,
+          Number((entry.initStart + phaseShift).toFixed(2))
+        );
+      }
       recordUsedSlice(
-        entry.binItem.url,
+        entry.contentKey,
         srcStart,
         Number((srcStart + Math.min(mediaNeed, entry.initEnd - srcStart)).toFixed(2)),
         slotOrderIdx,
@@ -4409,27 +4545,38 @@ export function generateAutoClipPlan(
 
     const clampedNeed = Math.min(mediaNeed, availSpan);
     const maxOff = Math.max(0, availSpan - clampedNeed);
-    const prior = usedSlicesByUrl.get(entry.binItem.url) ?? [];
-    const bucket = ensureVideoBuckets(entry.binItem.url, entry.initStart, entry.initEnd);
+    const prior = usedSlicesByKey.get(entry.contentKey) ?? [];
+    const bucket = ensureVideoBuckets(entry.contentKey, entry.initStart, entry.initEnd);
     let bestOffset = Number((entry.initStart + rng() * maxOff).toFixed(2));
     if (maxOff > 0.2) {
       const cands: number[] = [];
-      const GRID_STEPS = 24;
+      const GRID_STEPS = 32;
+      const binWidth = maxOff / GRID_STEPS;
+      const phaseShift = (((prior.length * 0.61803398875 + rng() * 0.35) % 1) * binWidth);
       for (let g = 0; g <= GRID_STEPS; g++) {
-        cands.push(Number((entry.initStart + (g / GRID_STEPS) * maxOff).toFixed(2)));
+        const base = entry.initStart + (g / GRID_STEPS) * maxOff;
+        cands.push(Number(base.toFixed(2)));
+        if (g < GRID_STEPS) {
+          cands.push(
+            Number(Math.min(entry.initStart + maxOff, base + phaseShift).toFixed(2))
+          );
+        }
+      }
+      for (let k = 0; k < 6; k++) {
+        const phiFrac = ((prior.length + k + 1) * 0.61803398875 + rng() * 0.18) % 1;
+        cands.push(Number((entry.initStart + phiFrac * maxOff).toFixed(2)));
       }
       for (const [ps, pe] of prior) {
-        if (ps - clampedNeed >= entry.initStart) cands.push(Number((ps - clampedNeed - 0.02).toFixed(2)));
-        if (pe + 0.02 <= entry.initStart + maxOff) cands.push(Number((pe + 0.02).toFixed(2)));
+        if (ps - clampedNeed >= entry.initStart) cands.push(Number((ps - clampedNeed - 0.04).toFixed(2)));
+        if (pe + 0.04 <= entry.initStart + maxOff) cands.push(Number((pe + 0.04).toFixed(2)));
       }
-      const lastSlice = prior.length > 0 ? prior[prior.length - 1] : null;
       const span = Math.max(0.25, bucket.initEnd - bucket.initStart);
+      const startDupThreshold = Math.max(0.75, clampedNeed * 0.45);
+      const recentStartIdx = Math.max(0, prior.length - 8);
+      const distWindowIdx = Math.max(0, prior.length - 4);
+      const normSeq = Math.max(1, placementSeq);
 
-      let bestAvgCount = Infinity;
-      let bestMaxCount = Infinity;
-      let bestAvgLast = Infinity;
-      let bestRecencyDist = -Infinity;
-      let bestTie = -Infinity;
+      let bestCost = Infinity;
 
       for (const rawCand of cands) {
         const cand = Number(
@@ -4452,37 +4599,52 @@ export function generateAutoClipPlan(
         }
         const avgCount = sumCount / bLen;
         const avgLast = sumLast / bLen;
-        const recencyDist = lastSlice
-          ? candEnd <= lastSlice[0]
-            ? lastSlice[0] - candEnd
-            : cand >= lastSlice[1]
-              ? cand - lastSlice[1]
-              : -Math.min(candEnd - lastSlice[0], lastSlice[1] - cand)
-          : maxOff;
-        const tie = rng();
 
-        const better =
-          avgCount < bestAvgCount - 0.05 ||
-          (Math.abs(avgCount - bestAvgCount) <= 0.05 &&
-            (maxCount < bestMaxCount - 0.05 ||
-              (Math.abs(maxCount - bestMaxCount) <= 0.05 &&
-                (avgLast < bestAvgLast - 0.5 ||
-                  (Math.abs(avgLast - bestAvgLast) <= 0.5 &&
-                    (recencyDist > bestRecencyDist + 0.15 ||
-                      (Math.abs(recencyDist - bestRecencyDist) <= 0.15 && tie > bestTie)))))));
+        // Score against ALL prior slices of this source footage to prevent A->B->A->B frame loops
+        let nearStartPenalty = 0;
+        let weightedOverlap = 0;
+        let recentWeightedDist = prior.length === 0 ? maxOff : Infinity;
+        let globalMinStartGap = prior.length === 0 ? maxOff : Infinity;
 
-        if (better) {
-          bestAvgCount = avgCount;
-          bestMaxCount = maxCount;
-          bestAvgLast = avgLast;
-          bestRecencyDist = recencyDist;
-          bestTie = tie;
+        for (let pIdx = 0; pIdx < prior.length; pIdx++) {
+          const [ps, pe] = prior[pIdx];
+          const age = prior.length - 1 - pIdx;
+          const recencyWeight = age < 3 ? 3.5 / (1 + age * 0.6) : 1 / (1 + age * 0.35);
+          const startGap = Math.abs(cand - ps);
+          if (startGap < globalMinStartGap) globalMinStartGap = startGap;
+          if (startGap < startDupThreshold) {
+            const sev = 1 - startGap / startDupThreshold;
+            nearStartPenalty += sev * (pIdx >= recentStartIdx ? 2.2 * recencyWeight : 0.8);
+          }
+          const overlapSec = Math.max(0, Math.min(candEnd, pe) - Math.max(cand, ps));
+          if (overlapSec > 0) {
+            weightedOverlap += (overlapSec / Math.max(0.25, clampedNeed)) * recencyWeight;
+          }
+          if (pIdx >= distWindowIdx) {
+            const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : -overlapSec;
+            const adjDist = d - age * 0.15;
+            if (adjDist < recentWeightedDist) recentWeightedDist = adjDist;
+          }
+        }
+
+        const cost =
+          avgCount * 12.0 +
+          maxCount * 5.0 +
+          nearStartPenalty * 6.5 +
+          weightedOverlap * 4.5 +
+          (avgLast / normSeq) * 2.5 -
+          Math.min(maxOff, Math.max(-clampedNeed, recentWeightedDist)) * 0.35 -
+          Math.min(maxOff, globalMinStartGap) * 0.45 -
+          rng() * 0.25;
+
+        if (cost < bestCost) {
+          bestCost = cost;
           bestOffset = cand;
         }
       }
     }
     recordUsedSlice(
-      entry.binItem.url,
+      entry.contentKey,
       bestOffset,
       Number((bestOffset + Math.min(mediaNeed, entry.initEnd - bestOffset)).toFixed(2)),
       slotOrderIdx,
@@ -4522,6 +4684,15 @@ export function generateAutoClipPlan(
         trType = 'dip_black';
       } else if (slot.section === 'beatless' || (slot.section === 'intro' && slot.dur >= 2.8)) {
         trType = 'crossfade';
+      } else if (editorialProfile === 'groove') {
+        trType =
+          slot.cutImpact >= 0.72
+            ? slotIdx % 2 === 0
+              ? 'slide'
+              : 'wipe_right'
+            : slotIdx % 3 === 1
+              ? 'cut'
+              : 'slide';
       } else {
         trType =
           slot.cutImpact >= 0.72
@@ -4560,7 +4731,7 @@ export function generateAutoClipPlan(
     ) {
       trType = asset.binItem.defaultTransitionOut;
     } else if (mode === 'sequential') {
-      trType = (isCalmSection || (slot.dur >= 2.8 && slot.energy < 0.45)) ? 'crossfade' : 'cut';
+      trType = isCalmSection || (slot.dur >= 2.8 && slot.energy < 0.45) ? 'crossfade' : 'cut';
     } else if (rhythm === 'smooth') {
       trType = 'crossfade';
     } else {
@@ -4591,7 +4762,8 @@ export function generateAutoClipPlan(
       rhythm === 'smooth' ||
       editorialProfile === 'dream' ||
       editorialProfile === 'acoustic';
-    const maxDissolveSec = allowLongDissolve ? 0.78 : 0.45;
+    const maxDissolveSec =
+      editorialProfile === 'dream' ? 0.95 : allowLongDissolve ? 0.78 : 0.45;
 
     const idealTrans =
       trType === 'cut'
@@ -4602,7 +4774,7 @@ export function generateAutoClipPlan(
             ? Number(
                 Math.max(
                   0.18,
-                  Math.min(maxDissolveSec, beatSec * 1.05, slot.dur * 0.32)
+                  Math.min(maxDissolveSec, beatSec * (editorialProfile === 'dream' ? 1.35 : 1.05), slot.dur * 0.32)
                 ).toFixed(3)
               )
             : Number(
@@ -4618,7 +4790,8 @@ export function generateAutoClipPlan(
         ? slot.dur >= 2.0
           ? 1.015
           : 1.0
-        : (mode === 'auto_rhythm' || rhythm === 'auto') && (isCalmSection || slot.energy < 0.38)
+        : editorialProfile === 'dream' ||
+            ((mode === 'auto_rhythm' || rhythm === 'auto') && (isCalmSection || slot.energy < 0.38))
           ? 1.012
           : 1.0;
     } else if (motionLevel === 'dynamic') {
@@ -4711,14 +4884,18 @@ export function generateAutoClipPlan(
     const placements: AutoBeatSlicePlacement[] = [];
     let sIdx = 0;
     let seqPoolPointer = 0;
-    let lastBinId: string | null = null;
+    let lastContentKey: string | null = null;
     let splitGuard = 0;
+    const uniqueKeyCount = new Set(pool.map((e) => e.contentKey)).size;
 
     while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
       const slot = workingSlots[sIdx];
       let matchedIdx = -1;
       for (let off = 0; off < pool.length; off++) {
         const idx = (seqPoolPointer + off) % pool.length;
+        if (avoidAdjacentRepeat && uniqueKeyCount > 1 && pool[idx].contentKey === lastContentKey) {
+          continue;
+        }
         if (canAssetFitUnused(pool[idx], slot.dur, true, true)) {
           matchedIdx = idx;
           break;
@@ -4726,7 +4903,14 @@ export function generateAutoClipPlan(
       }
 
       if (matchedIdx < 0) {
-        if (hasAnyUnusedFootage(splitFloor) && splitGuard < Math.max(400, workingSlots.length)) {
+        const hasNonAdjUnused = pool.some(
+          (e) =>
+            (!avoidAdjacentRepeat || uniqueKeyCount <= 1 || e.contentKey !== lastContentKey) &&
+            (e.kind === 'image'
+              ? !usedImageKeys.has(e.contentKey)
+              : (freeRangesByKey.get(e.contentKey) ?? []).some(([rs, re]) => re - rs >= splitFloor))
+        );
+        if (hasNonAdjUnused && splitGuard < Math.max(400, workingSlots.length)) {
           const pair = splitSlotAtBeat(slot);
           if (pair) {
             splitGuard++;
@@ -4736,6 +4920,9 @@ export function generateAutoClipPlan(
         }
         for (let off = 0; off < pool.length; off++) {
           const idx = (seqPoolPointer + off) % pool.length;
+          if (avoidAdjacentRepeat && uniqueKeyCount > 1 && pool[idx].contentKey === lastContentKey) {
+            continue;
+          }
           if (canAssetFitUnused(pool[idx], slot.dur, false, true)) {
             matchedIdx = idx;
             break;
@@ -4745,36 +4932,52 @@ export function generateAutoClipPlan(
 
       if (matchedIdx < 0) {
         if (!fillToTargetEnd) {
-          break;
-        }
-        let fbIdx = -1;
-        for (const pt of [true, false]) {
           for (let off = 0; off < pool.length; off++) {
             const idx = (seqPoolPointer + off) % pool.length;
-            const cand = pool[idx];
-            if (avoidAdjacentRepeat && pool.length > 1 && cand.binItem.id === lastBinId) continue;
-            if (cand.kind === 'image' || isTrimmedOk(cand, slot.dur, pt)) {
-              fbIdx = idx;
+            if (canAssetFitUnused(pool[idx], slot.dur, true, true) || canAssetFitUnused(pool[idx], slot.dur, false, true)) {
+              matchedIdx = idx;
               break;
             }
           }
-          if (fbIdx >= 0) break;
+          if (matchedIdx < 0) break;
+        } else {
+          let fbIdx = -1;
+          for (const pt of [true, false]) {
+            for (let off = 0; off < pool.length; off++) {
+              const idx = (seqPoolPointer + off) % pool.length;
+              const cand = pool[idx];
+              if (avoidAdjacentRepeat && uniqueKeyCount > 1 && cand.contentKey === lastContentKey) {
+                continue;
+              }
+              if (cand.kind === 'image' || isTrimmedOk(cand, slot.dur, pt)) {
+                fbIdx = idx;
+                break;
+              }
+            }
+            if (fbIdx >= 0) break;
+          }
+          if (fbIdx < 0) {
+            for (let off = 0; off < pool.length; off++) {
+              const idx = (seqPoolPointer + off) % pool.length;
+              if (!avoidAdjacentRepeat || uniqueKeyCount <= 1 || pool[idx].contentKey !== lastContentKey) {
+                fbIdx = idx;
+                break;
+              }
+            }
+          }
+          if (fbIdx < 0) {
+            fbIdx = seqPoolPointer % pool.length;
+          }
+          const chosen = pool[fbIdx];
+          seqPoolPointer = (fbIdx + 1) % pool.length;
+          const { sourceStartSec, rate } = canAssetFitUnused(chosen, slot.dur, false, true)
+            ? takeUnusedSlice(chosen, slot.dur, true, placements.length)
+            : takeExhaustedFallbackSlice(chosen, slot.dur, true, placements.length);
+          placements.push(buildPlacementForSlot(slot, placements.length, chosen, sourceStartSec, rate));
+          lastContentKey = chosen.contentKey;
+          sIdx++;
+          continue;
         }
-        if (fbIdx < 0) {
-          fbIdx = seqPoolPointer % pool.length;
-        }
-        const chosen = pool[fbIdx];
-        seqPoolPointer = (fbIdx + 1) % pool.length;
-        const { sourceStartSec, rate } = takeExhaustedFallbackSlice(
-          chosen,
-          slot.dur,
-          true,
-          placements.length
-        );
-        placements.push(buildPlacementForSlot(slot, placements.length, chosen, sourceStartSec, rate));
-        lastBinId = chosen.binItem.id;
-        sIdx++;
-        continue;
       }
 
       const chosen = pool[matchedIdx];
@@ -4783,7 +4986,7 @@ export function generateAutoClipPlan(
       placements.push(
         buildPlacementForSlot(slot, placements.length, chosen, sourceStartSec, rate)
       );
-      lastBinId = chosen.binItem.id;
+      lastContentKey = chosen.contentKey;
       sIdx++;
     }
 
@@ -4798,16 +5001,16 @@ export function generateAutoClipPlan(
     slot: MusicalSlot,
     strictVideoOnLongSlots: boolean,
     ctx: {
-      prevUrl?: string | null;
-      nextUrl?: string | null;
+      prevKey?: string | null;
+      nextKey?: string | null;
       isFallbackPass?: boolean;
       reserveShortForPhotos?: boolean;
     } = {}
   ): PoolAsset[] => {
     if (!hasMixedPool || list.length === 0) return list;
     const basePool =
-      avoidAdjacentRepeat && list.length > 1 && (ctx.prevUrl || ctx.nextUrl)
-        ? list.filter((e) => e.binItem.url !== ctx.prevUrl && e.binItem.url !== ctx.nextUrl)
+      avoidAdjacentRepeat && list.length > 1 && (ctx.prevKey || ctx.nextKey)
+        ? list.filter((e) => e.contentKey !== ctx.prevKey && e.contentKey !== ctx.nextKey)
         : list;
     const activeList = basePool.length > 0 ? basePool : list;
 
@@ -4821,15 +5024,19 @@ export function generateAutoClipPlan(
 
     const videos = activeList.filter((e) => e.kind === 'video');
     if (videos.length > 0) return videos;
-    // Allow non-adjacent images on long slots in fallback when only <=1 video exists (must alternate)
-    // or in rigid bar-grid presets (e.g. beats_4 where all slots are >=2s).
     const isAutoRhythmPool = mode === 'auto_rhythm' || rhythm === 'auto';
     const nonAdjImages = activeList.filter((e) => e.kind === 'image');
+    const uniqueVideoKeys = new Set(poolVideos.map((v) => v.contentKey)).size;
     if (
       ctx.isFallbackPass &&
       avoidAdjacentRepeat &&
       nonAdjImages.length > 0 &&
-      (poolVideos.length <= 1 || !isAutoRhythmPool)
+      (uniqueVideoKeys <= 1 ||
+        !isAutoRhythmPool ||
+        !list.some(
+          (v) =>
+            v.kind === 'video' && v.contentKey !== ctx.prevKey && v.contentKey !== ctx.nextKey
+        ))
     ) {
       return nonAdjImages;
     }
@@ -4846,34 +5053,42 @@ export function generateAutoClipPlan(
     eligible: PoolAsset[],
     slot: MusicalSlot,
     slotIdx: number,
-    prevUrl: string | null,
-    nextUrl: string | null,
-    prev2Url: string | null = null,
-    next2Url: string | null = null
+    prevKey: string | null,
+    nextKey: string | null,
+    prev2Key: string | null = null,
+    next2Key: string | null = null,
+    prev3Key: string | null = null,
+    next3Key: string | null = null
   ): PoolAsset => {
     const nonAdj = avoidAdjacentRepeat
-      ? eligible.filter((e) => e.binItem.url !== prevUrl && e.binItem.url !== nextUrl)
+      ? eligible.filter((e) => e.contentKey !== prevKey && e.contentKey !== nextKey)
       : eligible;
     const poolStage1 = nonAdj.length > 0 ? nonAdj : eligible;
 
-    const minUsage = Math.min(...poolStage1.map((e) => usageCountByUrl.get(e.binItem.url) ?? 0));
+    const minUsage = Math.min(...poolStage1.map((e) => usageCountByKey.get(e.contentKey) ?? 0));
     const strictlyLeastUsed = poolStage1.filter(
-      (e) => (usageCountByUrl.get(e.binItem.url) ?? 0) === minUsage
+      (e) => (usageCountByKey.get(e.contentKey) ?? 0) === minUsage
     );
     const poolLeast = strictlyLeastUsed.length > 0 ? strictlyLeastUsed : poolStage1;
-    const nonPingPong =
+    const nonPingPong2 =
       poolLeast.length > 1
-        ? poolLeast.filter((e) => e.binItem.url !== prev2Url && e.binItem.url !== next2Url)
+        ? poolLeast.filter((e) => e.contentKey !== prev2Key && e.contentKey !== next2Key)
         : poolLeast;
-    const poolToPick = nonPingPong.length > 0 ? nonPingPong : poolLeast;
+    const stage2Pool = nonPingPong2.length > 0 ? nonPingPong2 : poolLeast;
+    const nonPingPong3 =
+      stage2Pool.length > 1 && (prev3Key || next3Key)
+        ? stage2Pool.filter((e) => e.contentKey !== prev3Key && e.contentKey !== next3Key)
+        : stage2Pool;
+    const poolToPick = nonPingPong3.length > 0 ? nonPingPong3 : stage2Pool;
 
     if (minUsage > 0 && poolToPick.length > 1) {
-      // Maximize slot-index cooldown gap against EVERY existing placement of this source file
       const cooled = [...poolToPick].sort(
-        (a, b) => getMinSlotDist(b.binItem.url, slotIdx) - getMinSlotDist(a.binItem.url, slotIdx)
+        (a, b) => getMinSlotDist(b.contentKey, slotIdx) - getMinSlotDist(a.contentKey, slotIdx)
       );
-      const topCooled = cooled.slice(0, Math.max(1, Math.ceil(cooled.length * 0.5)));
-      return topCooled[Math.floor(rng() * topCooled.length)];
+      const bestDist = getMinSlotDist(cooled[0].contentKey, slotIdx);
+      const topCooled = cooled.filter((c) => getMinSlotDist(c.contentKey, slotIdx) >= bestDist - 1);
+      const pickPool = topCooled.length > 0 ? topCooled : cooled.slice(0, 1);
+      return pickPool[Math.floor(rng() * pickPool.length)];
     }
 
     if ((mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.4 && poolToPick.length > 1) {
@@ -4881,11 +5096,11 @@ export function generateAutoClipPlan(
         const aSpan =
           a.kind === 'image'
             ? 2
-            : Math.max(...(urlFreeRanges.get(a.binItem.url) ?? []).map(([rs, re]) => re - rs), 0);
+            : Math.max(...(freeRangesByKey.get(a.contentKey) ?? []).map(([rs, re]) => re - rs), 0);
         const bSpan =
           b.kind === 'image'
             ? 2
-            : Math.max(...(urlFreeRanges.get(b.binItem.url) ?? []).map(([rs, re]) => re - rs), 0);
+            : Math.max(...(freeRangesByKey.get(b.contentKey) ?? []).map(([rs, re]) => re - rs), 0);
         return bSpan - aSpan;
       });
       const topHalf = calmSorted.slice(0, Math.max(1, Math.ceil(calmSorted.length * 0.6)));
@@ -4898,13 +5113,14 @@ export function generateAutoClipPlan(
   if (!fillToTargetEnd) {
     const placements: AutoBeatSlicePlacement[] = [];
     let sIdx = 0;
-    let lastUrl: string | null = null;
-    let last2Url: string | null = null;
+    let lastKey: string | null = null;
+    let last2Key: string | null = null;
+    let last3Key: string | null = null;
     let splitGuard = 0;
     while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
       const slot = workingSlots[sIdx];
       let rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
-      let eligible = filterByMixedPriority(rawEligible, slot, false, { prevUrl: lastUrl });
+      let eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
       if (eligible.length === 0) {
         if (hasAnyUnusedFootage(splitFloor) && splitGuard < Math.max(300, workingSlots.length)) {
           const pair = splitSlotAtBeat(slot);
@@ -4915,16 +5131,27 @@ export function generateAutoClipPlan(
           }
         }
         rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
-        eligible = filterByMixedPriority(rawEligible, slot, false, { prevUrl: lastUrl });
+        eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
       }
       if (eligible.length === 0) {
         break;
       }
-      const chosen = pickShuffledAsset(eligible, slot, placements.length, lastUrl, null, last2Url, null);
+      const chosen = pickShuffledAsset(
+        eligible,
+        slot,
+        placements.length,
+        lastKey,
+        null,
+        last2Key,
+        null,
+        last3Key,
+        null
+      );
       const { sourceStartSec, rate } = takeUnusedSlice(chosen, slot.dur, false, placements.length);
       placements.push(buildPlacementForSlot(slot, placements.length, chosen, sourceStartSec, rate));
-      last2Url = lastUrl;
-      lastUrl = chosen.binItem.url;
+      last3Key = last2Key;
+      last2Key = lastKey;
+      lastKey = chosen.contentKey;
       sIdx++;
     }
     return placements;
@@ -4932,10 +5159,13 @@ export function generateAutoClipPlan(
 
   // Pass A (fillToTargetEnd === true): Showcase every unique source file first,
   // reserving longer bar slots for videos and keeping short beat punches for photos when mixed media is present.
-  const binUrlById = new Map(pool.map((p) => [p.binItem.id, p.binItem.url]));
+  const binKeyById = new Map(pool.map((p) => [p.binItem.id, p.contentKey]));
   const assigned: Array<AutoBeatSlicePlacement | null> = new Array(workingSlots.length).fill(null);
   let splitGuard = 0;
   const maxSplitBudget = Math.max(400, workingSlots.length * 2);
+  const uniquePoolVideosCount = new Set(poolVideos.map((v) => v.contentKey)).size;
+  const uniqueAssetKeyCount = new Set(pool.map((e) => e.contentKey)).size;
+
   for (const allowUntrimmed of [false, true]) {
     let madeProgress = true;
     while (madeProgress) {
@@ -4947,10 +5177,10 @@ export function generateAutoClipPlan(
       if (unassignedIndices.length === 0) break;
 
       const anyUnusedLeft = pool.some(
-        (e) => (usageCountByUrl.get(e.binItem.url) ?? 0) === 0
+        (e) => (usageCountByKey.get(e.contentKey) ?? 0) === 0
       );
       unassignedIndices.sort((a, b) => {
-        if (anyUnusedLeft || poolVideos.length <= 2) {
+        if (anyUnusedLeft || uniqueAssetKeyCount <= 2 || uniquePoolVideosCount <= 2) {
           return a - b;
         }
         const diff = workingSlots[b].dur - workingSlots[a].dur;
@@ -4959,35 +5189,55 @@ export function generateAutoClipPlan(
       });
 
       for (const idx of unassignedIndices) {
+        if (uniqueAssetKeyCount <= 2 && idx > 0 && assigned[idx - 1] === null) {
+          break;
+        }
         const slot = workingSlots[idx];
         const prevId = idx > 0 ? assigned[idx - 1]?.binItemId ?? null : null;
         const nextId = idx + 1 < assigned.length ? assigned[idx + 1]?.binItemId ?? null : null;
         const prev2Id = idx > 1 ? assigned[idx - 2]?.binItemId ?? null : null;
         const next2Id = idx + 2 < assigned.length ? assigned[idx + 2]?.binItemId ?? null : null;
-        const prevUrl = prevId ? binUrlById.get(prevId) ?? null : null;
-        const nextUrl = nextId ? binUrlById.get(nextId) ?? null : null;
-        const prev2Url = prev2Id ? binUrlById.get(prev2Id) ?? null : null;
-        const next2Url = next2Id ? binUrlById.get(next2Id) ?? null : null;
+        const prev3Id = idx > 2 ? assigned[idx - 3]?.binItemId ?? null : null;
+        const next3Id = idx + 3 < assigned.length ? assigned[idx + 3]?.binItemId ?? null : null;
+        const prevKey = prevId ? binKeyById.get(prevId) ?? null : null;
+        const nextKey = nextId ? binKeyById.get(nextId) ?? null : null;
+        const prev2Key = prev2Id ? binKeyById.get(prev2Id) ?? null : null;
+        const next2Key = next2Id ? binKeyById.get(next2Id) ?? null : null;
+        const prev3Key = prev3Id ? binKeyById.get(prev3Id) ?? null : null;
+        const next3Key = next3Id ? binKeyById.get(next3Id) ?? null : null;
 
         const rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, !allowUntrimmed, false));
         const eligible = filterByMixedPriority(rawEligible, slot, !allowUntrimmed, {
-          prevUrl,
-          nextUrl,
+          prevKey,
+          nextKey,
           reserveShortForPhotos: hasMixedPool,
         });
         if (eligible.length > 0) {
           const wouldForceAdjRepeat =
             avoidAdjacentRepeat &&
-            pool.length > 1 &&
-            eligible.every((e) => e.binItem.url === prevUrl || e.binItem.url === nextUrl) &&
-            pool.some((e) => e.binItem.url !== prevUrl && e.binItem.url !== nextUrl);
+            uniqueAssetKeyCount > 1 &&
+            eligible.every((e) => e.contentKey === prevKey || e.contentKey === nextKey) &&
+            pool.some((e) => e.contentKey !== prevKey && e.contentKey !== nextKey);
           if (wouldForceAdjRepeat) {
+            if (uniqueAssetKeyCount <= 2) break;
             continue;
           }
-          const chosen = pickShuffledAsset(eligible, slot, idx, prevUrl, nextUrl, prev2Url, next2Url);
+          const chosen = pickShuffledAsset(
+            eligible,
+            slot,
+            idx,
+            prevKey,
+            nextKey,
+            prev2Key,
+            next2Key,
+            prev3Key,
+            next3Key
+          );
           const { sourceStartSec, rate } = takeUnusedSlice(chosen, slot.dur, false, idx);
           assigned[idx] = buildPlacementForSlot(slot, idx, chosen, sourceStartSec, rate);
           madeProgress = true;
+        } else if (uniqueAssetKeyCount <= 2) {
+          break;
         }
       }
 
@@ -5021,21 +5271,22 @@ export function generateAutoClipPlan(
     const nextId = i + 1 < assigned.length ? assigned[i + 1]?.binItemId ?? null : null;
     const prev2Id = i > 1 ? assigned[i - 2]?.binItemId ?? null : null;
     const next2Id = i + 2 < assigned.length ? assigned[i + 2]?.binItemId ?? null : null;
-    const prevUrl = prevId ? binUrlById.get(prevId) ?? null : null;
-    const nextUrl = nextId ? binUrlById.get(nextId) ?? null : null;
-    const prev2Url = prev2Id ? binUrlById.get(prev2Id) ?? null : null;
-    const next2Url = next2Id ? binUrlById.get(next2Id) ?? null : null;
+    const prev3Id = i > 2 ? assigned[i - 3]?.binItemId ?? null : null;
+    const next3Id = i + 3 < assigned.length ? assigned[i + 3]?.binItemId ?? null : null;
+    const prevKey = prevId ? binKeyById.get(prevId) ?? null : null;
+    const nextKey = nextId ? binKeyById.get(nextId) ?? null : null;
+    const prev2Key = prev2Id ? binKeyById.get(prev2Id) ?? null : null;
+    const next2Key = next2Id ? binKeyById.get(next2Id) ?? null : null;
+    const prev3Key = prev3Id ? binKeyById.get(prev3Id) ?? null : null;
+    const next3Key = next3Id ? binKeyById.get(next3Id) ?? null : null;
 
-    // If a long auto_rhythm slot is sandwiched between two videos covering the whole video pool
-    // (e.g. vid-2 [slot] vid-1 with 2 videos), split off a 1..2 beat tail photo punch so videos stay long
-    // and photos sit strictly on short beats with zero adjacent repeats.
     if (
       hasMixedPool &&
       avoidAdjacentRepeat &&
       (mode === 'auto_rhythm' || rhythm === 'auto') &&
       !isShortBeatSlot(slot) &&
-      poolVideos.length >= 2 &&
-      poolVideos.every((v) => v.binItem.url === prevUrl || v.binItem.url === nextUrl) &&
+      uniquePoolVideosCount >= 2 &&
+      poolVideos.every((v) => v.contentKey === prevKey || v.contentKey === nextKey) &&
       slot.beatEndIdx - slot.beatStartIdx >= 3 &&
       passBSplitCount < workingSlots.length
     ) {
@@ -5085,8 +5336,8 @@ export function generateAutoClipPlan(
     for (const pt of [true, false]) {
       const fitting = pool.filter((e) => e.kind === 'image' || isTrimmedOk(e, slot.dur, pt));
       const prioritized = filterByMixedPriority(fitting, slot, false, {
-        prevUrl,
-        nextUrl,
+        prevKey,
+        nextKey,
         isFallbackPass: true,
       });
       if (prioritized.length > 0) {
@@ -5096,28 +5347,83 @@ export function generateAutoClipPlan(
     }
     if (candidates.length === 0) {
       candidates = filterByMixedPriority(pool, slot, false, {
-        prevUrl,
-        nextUrl,
+        prevKey,
+        nextKey,
         isFallbackPass: true,
       });
     }
 
     const nonAdj = avoidAdjacentRepeat
-      ? candidates.filter((e) => e.binItem.url !== prevUrl && e.binItem.url !== nextUrl)
+      ? candidates.filter((e) => e.contentKey !== prevKey && e.contentKey !== nextKey)
       : candidates;
+    if (
+      avoidAdjacentRepeat &&
+      uniqueAssetKeyCount >= 2 &&
+      nonAdj.length === 0 &&
+      slot.beatEndIdx - slot.beatStartIdx >= 2 &&
+      passBSplitCount < workingSlots.length
+    ) {
+      const midBeatIdx = Math.floor((slot.beatStartIdx + slot.beatEndIdx) / 2);
+      if (midBeatIdx > slot.beatStartIdx && midBeatIdx < slot.beatEndIdx) {
+        const splitT = Number(beatTimes[midBeatIdx].toFixed(3));
+        const leftDur = Number((splitT - slot.startSec).toFixed(3));
+        const rightDur = Number((slot.startSec + slot.dur - splitT).toFixed(3));
+        if (leftDur >= 0.4 && rightDur >= 0.4) {
+          passBSplitCount++;
+          const midImpact =
+            (onsetAccent[midBeatIdx] ?? slot.cutImpact) * 0.55 +
+            (melodicNovelty[midBeatIdx] ?? 0.4) * 0.45;
+          workingSlots.splice(
+            i,
+            1,
+            {
+              startSec: slot.startSec,
+              dur: leftDur,
+              beatStartIdx: slot.beatStartIdx,
+              beatEndIdx: midBeatIdx,
+              energy: slot.energy,
+              cutImpact: midImpact,
+              section: slot.section,
+              isPreDrop: dropImpactSet.has(midBeatIdx),
+            },
+            {
+              startSec: splitT,
+              dur: rightDur,
+              beatStartIdx: midBeatIdx,
+              beatEndIdx: slot.beatEndIdx,
+              energy: phraseEnergy[midBeatIdx] ?? slot.energy,
+              cutImpact: slot.cutImpact,
+              section: beatSections[midBeatIdx] ?? slot.section,
+              isPreDrop: slot.isPreDrop,
+            }
+          );
+          assigned.splice(i, 1, null, null);
+          i--;
+          continue;
+        }
+      }
+    }
     const poolStage1 = nonAdj.length > 0 ? nonAdj : candidates;
-    const minUsage = Math.min(...poolStage1.map((e) => usageCountByUrl.get(e.binItem.url) ?? 0));
+    const minUsage = Math.min(...poolStage1.map((e) => usageCountByKey.get(e.contentKey) ?? 0));
     const leastUsed = poolStage1
-      .filter((e) => (usageCountByUrl.get(e.binItem.url) ?? 0) === minUsage)
-      .sort((a, b) => getMinSlotDist(b.binItem.url, i) - getMinSlotDist(a.binItem.url, i));
-    const nonPingPong = leastUsed.filter(
-      (e) => e.binItem.url !== prev2Url && e.binItem.url !== next2Url
+      .filter((e) => (usageCountByKey.get(e.contentKey) ?? 0) === minUsage)
+      .sort((a, b) => getMinSlotDist(b.contentKey, i) - getMinSlotDist(a.contentKey, i));
+    const nonPingPong2 = leastUsed.filter(
+      (e) => e.contentKey !== prev2Key && e.contentKey !== next2Key
     );
-    const pickSource = nonPingPong.length > 0 ? nonPingPong : leastUsed;
-    const topCooled = pickSource.slice(0, Math.max(1, Math.ceil(pickSource.length * 0.5)));
+    const stage2Pool = nonPingPong2.length > 0 ? nonPingPong2 : leastUsed;
+    const nonPingPong3 =
+      stage2Pool.length > 1 && (prev3Key || next3Key)
+        ? stage2Pool.filter((e) => e.contentKey !== prev3Key && e.contentKey !== next3Key)
+        : stage2Pool;
+    const pickSource = nonPingPong3.length > 0 ? nonPingPong3 : stage2Pool;
+    const bestDist = pickSource.length > 0 ? getMinSlotDist(pickSource[0].contentKey, i) : 0;
+    const topCooled = pickSource.filter((c) => getMinSlotDist(c.contentKey, i) >= bestDist - 1);
     const finalPickPool = topCooled.length > 0 ? topCooled : poolStage1;
     const chosen = finalPickPool[Math.floor(rng() * finalPickPool.length)];
-    const { sourceStartSec, rate } = takeExhaustedFallbackSlice(chosen, slot.dur, false, i);
+    const { sourceStartSec, rate } = canAssetFitUnused(chosen, slot.dur, false, false)
+      ? takeUnusedSlice(chosen, slot.dur, false, i)
+      : takeExhaustedFallbackSlice(chosen, slot.dur, false, i);
     assigned[i] = buildPlacementForSlot(slot, i, chosen, sourceStartSec, rate);
   }
 

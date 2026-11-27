@@ -2470,11 +2470,15 @@ export default function App() {
       setSelectedClipId(builtClips[0].id);
       setSelectedClipIds([builtClips[0].id]);
       setSelectedFxId(null);
-      if (cfg.slideshowMode !== 'manual' || !cfg.beatCenteredTransitions) {
+      const desiredCentered = autoCfg.beatCenteredTransitions ?? true;
+      if (
+        cfg.slideshowMode !== 'manual' ||
+        Boolean(cfg.beatCenteredTransitions) !== desiredCentered
+      ) {
         setConfig((prev) => ({
           ...prev,
           slideshowMode: 'manual',
-          beatCenteredTransitions: prev.beatCenteredTransitions ?? true,
+          beatCenteredTransitions: desiredCentered,
         }));
       }
       const focusLocal = isAppend ? startOffsetSec : 0;
@@ -3345,8 +3349,12 @@ export default function App() {
         }
         return updated;
       });
-      if (configRef.current.slideshowMode !== 'manual') {
-        setConfig((prev) => ({ ...prev, slideshowMode: 'custom_durations' }));
+      if (configRef.current.slideshowMode !== 'manual' || applyMotionAndTrans) {
+        setConfig((prev) => ({
+          ...prev,
+          slideshowMode: prev.slideshowMode === 'manual' ? 'manual' : 'custom_durations',
+          ...(applyMotionAndTrans ? { beatCenteredTransitions: true } : {}),
+        }));
       }
       setAutoTimelineZoomSignal({
         nonce: Date.now(),
@@ -3610,14 +3618,6 @@ export default function App() {
     [getEffectiveTimelineBounds, pushImmediateHistory]
   );
 
-  const handleMoveVisual = useCallback(
-    (index: number, direction: -1 | 1) => {
-      const target = index + direction;
-      if (target < 0 || target >= mediaItemsRef.current.length) return;
-      handleReorderClip(index, target);
-    },
-    [handleReorderClip]
-  );
 
   const handleSplitClipAtPlayhead = useCallback(() => {
     const items = mediaItemsRef.current;
@@ -5529,7 +5529,6 @@ export default function App() {
               onSelectClip={handleSelectClip}
               onInspectClip={handleInspectClip}
               onDuplicateClip={handleDuplicateClip}
-              onMoveVisual={handleMoveVisual}
               onReverseClips={handleReverseClips}
               onRemoveVisual={handleRemoveVisual}
               onClearVisuals={handleClearVisuals}

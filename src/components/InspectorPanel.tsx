@@ -697,6 +697,50 @@ export function InspectorPanel({
                             className="w-full studio-slider"
                           />
                         </label>
+                        <label className="space-y-0.5 block">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorBeatReactLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {Math.round(
+                                (clipGenParams.beatReact ?? config.generatorBeatReact) * 100
+                              )}
+                              %
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={2.0}
+                            step={0.05}
+                            value={clipGenParams.beatReact ?? config.generatorBeatReact}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ beatReact: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
+                        <label className="space-y-0.5 block col-span-2">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-400">{t.generatorRotSpeedLabel}</span>
+                            <span className="font-mono text-gray-200">
+                              {(
+                                clipGenParams.rotationSpeed ?? config.generatorRotationSpeed
+                              ).toFixed(2)}
+                              ×
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={-1.5}
+                            max={1.5}
+                            step={0.05}
+                            value={clipGenParams.rotationSpeed ?? config.generatorRotationSpeed}
+                            onChange={(e) =>
+                              updateSelectedGenParams({ rotationSpeed: Number(e.target.value) })
+                            }
+                            className="w-full studio-slider"
+                          />
+                        </label>
                       </div>
                     </div>
                   </div>

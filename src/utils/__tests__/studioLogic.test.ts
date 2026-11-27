@@ -2309,6 +2309,177 @@ test('resolveActiveSlideshowSlice supports beat-centered transitions peaking dea
   assert.ok(Math.abs((justAfterEnd.slideLocalTime - justBeforeEnd.slideLocalTime) - 0.02) < 1e-6);
 });
 
+test('generateAutoClipPlan avoids A->B->A->B frame loops on long multi-pass 2-video timelines', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const bin = [mkV('alpha', 34), mkV('beta', 34)];
+  const totalSec = 140;
+  const beats = Array.from({ length: 280 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const plan = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    editorialProfile: 'story_arc',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    avoidAdjacentRepeat: true,
+    shuffleOrder: true,
+    variationSeed: 4242,
+  });
+
+  assert.ok(plan.length >= 24, `Expected >=24 clips on 140s timeline, got ${plan.length}`);
+  for (let i = 1; i < plan.length; i++) {
+    assert.notEqual(plan[i].binItemId, plan[i - 1].binItemId);
+  }
+
+  for (const id of ['alpha', 'beta']) {
+    const starts = plan.filter((p) => p.binItemId === id).map((p) => p.sourceStartSec);
+    assert.ok(starts.length >= 10);
+    for (let k = 1; k < starts.length; k++) {
+      assert.ok(
+        Math.abs(starts[k] - starts[k - 1]) >= 0.35,
+        `Detected consecutive near-identical frame reuse for ${id} at k=${k}: ${starts[k - 1]} -> ${starts[k]}`
+      );
+      if (k >= 2) {
+        assert.ok(
+          Math.abs(starts[k] - starts[k - 2]) >= 0.35,
+          `Detected A->B->A->B loop for ${id} at k=${k}: ${starts[k - 2]} -> ${starts[k - 1]} -> ${starts[k]}`
+        );
+      }
+    }
+    const spanUsed = Math.max(...starts) - Math.min(...starts);
+    assert.ok(spanUsed >= 10, `Expected broad span utilization for ${id}, got ${spanUsed.toFixed(2)}s`);
+  }
+});
+
+test('generateAutoClipPlan treats duplicate mediaBin uploads as shared content without adjacent/range repeats', () => {
+  const mkV = (id: string, fileName: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const bin = [
+    mkV('dup1', 'hero_shot.mp4', 40),
+    mkV('dup2', 'hero_shot.mp4', 40),
+    mkV('other', 'broll_city.mp4', 40),
+  ];
+  const totalSec = 36;
+  const beats = Array.from({ length: 72 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const plan = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_2',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    avoidAdjacentRepeat: true,
+    shuffleOrder: false,
+    variationSeed: 777,
+  });
+
+  assert.ok(plan.length >= 6);
+  const binMap = new Map(bin.map((b) => [b.id, b]));
+  for (let i = 1; i < plan.length; i++) {
+    const prevName = binMap.get(plan[i - 1].binItemId)?.fileName;
+    const curName = binMap.get(plan[i].binItemId)?.fileName;
+    assert.notEqual(curName, prevName, `Duplicate file placed back-to-back at index ${i}`);
+  }
+
+  const heroSlices = plan
+    .filter((p) => binMap.get(p.binItemId)?.fileName === 'hero_shot.mp4')
+    .map((p) => [p.sourceStartSec, p.sourceStartSec + p.durationSec * p.playbackRate] as const);
+  for (let i = 0; i < heroSlices.length; i++) {
+    for (let j = i + 1; j < heroSlices.length; j++) {
+      const overlap =
+        Math.min(heroSlices[i][1], heroSlices[j][1]) - Math.max(heroSlices[i][0], heroSlices[j][0]);
+      assert.ok(
+        overlap <= 0.1,
+        `Duplicate file entries shared overlapping slice: [${heroSlices[i]}] vs [${heroSlices[j]}]`
+      );
+    }
+  }
+});
+
+test('all 12 AUTO_CLIP_PRESETS produce valid non-repeating plans and distinct cinematic/genre phrasing', () => {
+  assert.equal(AUTO_CLIP_PRESETS.length, 12);
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const mkImg = (id: string): MediaBinItem => ({
+    id,
+    kind: 'image',
+    fileName: `${id}.jpg`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    defaultDurationSec: 4,
+  });
+  const bin = [mkV('v1', 35), mkV('v2', 35), mkV('v3', 35), mkImg('p1'), mkImg('p2')];
+  const totalSec = 60;
+  const sr = 8000;
+  const mono = new Float32Array(totalSec * sr);
+  const beats = Array.from({ length: 120 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  for (let i = 0; i < beats.length; i++) {
+    const t = beats[i];
+    const amp = t < 12 ? 0.22 : t < 24 ? 0.25 + ((t - 12) / 12) * 0.55 : t < 44 ? 0.96 : 0.25;
+    const s0 = Math.floor(t * sr);
+    for (let j = 0; j < 400 && s0 + j < mono.length; j++) {
+      mono[s0 + j] += Math.sin((j / sr) * 2 * Math.PI * 60) * Math.exp(-j / 130) * amp;
+    }
+  }
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const plansByPreset = new Map<string, ReturnType<typeof generateAutoClipPlan>>();
+  for (const preset of AUTO_CLIP_PRESETS) {
+    const plan = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+      ...preset.config,
+      fillToTargetEnd: true,
+      hasAudio: true,
+      monoData: mono,
+      sampleRate: sr,
+      variationSeed: 12345,
+    });
+    assert.ok(plan.length >= 4, `Preset ${preset.id} produced too few placements (${plan.length})`);
+    for (let i = 1; i < plan.length; i++) {
+      assert.notEqual(plan[i].binItemId, plan[i - 1].binItemId, `Adjacent repeat in preset ${preset.id}`);
+    }
+    plansByPreset.set(preset.id, plan);
+  }
+
+  const sig = (id: string) =>
+    (plansByPreset.get(id) || [])
+      .map((p) => `${p.durationSec}:${p.transitionOut}:${p.playbackRate}`)
+      .join('|');
+  assert.notEqual(sig('cinema_flow'), sig('acoustic_breath'));
+  assert.notEqual(sig('cinema_flow'), sig('slow_dream'));
+  assert.notEqual(sig('cinema_trailer'), sig('dynamic_drop'));
+  assert.ok(
+    (plansByPreset.get('slow_dream')?.length || 0) < (plansByPreset.get('dynamic_drop')?.length || 0),
+    'slow_dream should have fewer, longer holds than dynamic_drop'
+  );
+});
+
 
 
 
