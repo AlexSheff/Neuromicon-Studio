@@ -10,6 +10,7 @@ import {
   Orbit,
   Palette,
   Play,
+  RefreshCw,
   RotateCcw,
   Sliders,
   SlidersHorizontal,
@@ -89,6 +90,7 @@ interface InspectorPanelProps {
   ) => void;
   onMoveClipOverlayToFxTrack: (clipId: string) => void;
   onDuplicateClip: (id: string) => void;
+  onAutoReplaceClip?: (id: string) => void;
   onRemoveVisual: (id: string) => void;
   onSetClipTransition: (id: string, tr: SlideTransitionType, applyAll?: boolean) => void;
   onUpdateConfig: (patch: Partial<StudioConfig>) => void;
@@ -149,6 +151,7 @@ export function InspectorPanel({
   onApplyClipOverlay,
   onMoveClipOverlayToFxTrack,
   onDuplicateClip,
+  onAutoReplaceClip,
   onRemoveVisual,
   onSetClipTransition,
   onUpdateConfig,
@@ -368,6 +371,17 @@ export function InspectorPanel({
                         </option>
                       ))}
                     </select>
+                    {onAutoReplaceClip && (
+                      <button
+                        type="button"
+                        onClick={() => onAutoReplaceClip(selectedClip.id)}
+                        title={t.autoReplaceClipTitle}
+                        aria-label={t.autoReplaceClipBtn}
+                        className="p-1.5 rounded-md border border-[#262B38] bg-[#141821] hover:border-cyan-500/60 text-cyan-300 hover:text-cyan-200 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => onDuplicateClip(selectedClip.id)}

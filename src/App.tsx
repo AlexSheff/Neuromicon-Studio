@@ -51,6 +51,7 @@ import {
   getTimelineSpanSec,
   insertManualClipAtAnchor,
   moveManualClipGroup,
+  pickAutoReplacementForTimelineClip,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
   resolveCalibratedBeatGrid,
@@ -2980,6 +2981,73 @@ export default function App() {
     [getEffectiveTimelineBounds, pushImmediateHistory]
   );
 
+  const handleAutoReplaceClip = useCallback(
+    (id: string) => {
+      const prev = mediaItemsRef.current;
+      const idx = prev.findIndex((item) => item.id === id);
+      if (idx === -1) return;
+
+      const binList = mediaBinRef.current;
+      if (binList.length === 0) {
+        showUndoToast(tFor(langRef.current).autoReplaceNoAltToast);
+        return;
+      }
+
+      const orig = prev[idx];
+      const timelineOrdered =
+        configRef.current.slideshowMode === 'manual'
+          ? [...prev].sort((a, b) => (a.startSec ?? 0) - (b.startSec ?? 0))
+          : prev;
+
+      const picked = pickAutoReplacementForTimelineClip(orig, timelineOrdered, binList, 5);
+      if (!picked) {
+        showUndoToast(tFor(langRef.current).autoReplaceNoAltToast);
+        return;
+      }
+
+      pushImmediateHistory();
+      if (orig.kind === 'video') {
+        detachClipVideoElement(orig.videoElement);
+      }
+
+      const hasMasterAudio = Boolean(audioRef.current);
+      const built = buildClipFromBinItem(picked.binItem, {
+        startSec: orig.startSec,
+        durationSec: orig.durationSec,
+        sourceStartSec: picked.sourceStartSec,
+        playbackRate: picked.playbackRate,
+        clipAudioMuted: hasMasterAudio ? true : orig.clipAudioMuted,
+      });
+
+      if (built.kind === 'video' && built.videoElement && built.url) {
+        if (!built.videoElement.getAttribute('src')) {
+          built.videoElement.src = built.url;
+        }
+        built.videoElement.preload = 'auto';
+      }
+
+      const replacement: VisualMediaState = {
+        ...built,
+        transitionOut: orig.transitionOut,
+        transitionDurationSec: orig.transitionDurationSec,
+        overlayEffect: orig.overlayEffect
+          ? {
+              ...orig.overlayEffect,
+              params: orig.overlayEffect.params ? { ...orig.overlayEffect.params } : undefined,
+            }
+          : undefined,
+      };
+
+      const next = prev.map((c) => (c.id === id ? replacement : c));
+      setMediaItems(next);
+      setSelectedClipId(replacement.id);
+      setSelectedClipIds([replacement.id]);
+      setSelectedFxId(null);
+      showUndoToast(`${tFor(langRef.current).autoReplaceClipToast}: ${replacement.fileName}`);
+    },
+    [buildClipFromBinItem, pushImmediateHistory, showUndoToast]
+  );
+
   const handleAddFxOverlay = useCallback(
     (
       effect: Exclude<GeneratorEffectId, 'none'>,
@@ -5627,6 +5695,7 @@ export default function App() {
               onApplyClipOverlay={handleApplyClipOverlay}
               onMoveClipOverlayToFxTrack={handleMoveClipOverlayToFxTrack}
               onDuplicateClip={handleDuplicateClip}
+              onAutoReplaceClip={handleAutoReplaceClip}
               onRemoveVisual={handleRemoveVisual}
               onSetClipTransition={handleSetClipTransition}
               onUpdateConfig={handleUpdateConfig}
@@ -5675,6 +5744,7 @@ export default function App() {
         onApplyClipOverlay={handleApplyClipOverlay}
         onVisualFiles={handleVisualFiles}
         onDuplicateClip={handleDuplicateClip}
+        onAutoReplaceClip={handleAutoReplaceClip}
         onReorderClip={handleReorderClip}
         onReverseClips={handleReverseClips}
         onCycleClipTransition={handleCycleClipTransition}

@@ -15,6 +15,7 @@ import {
   MoreHorizontal,
   Orbit,
   Plus,
+  RefreshCw,
   Scissors,
   SlidersHorizontal,
   Sparkles,
@@ -90,6 +91,7 @@ interface TimelineDockProps {
   ) => void;
   onVisualFiles: (files: File[]) => void;
   onDuplicateClip: (id: string) => void;
+  onAutoReplaceClip?: (id: string) => void;
   onReorderClip: (fromIdx: number, toIdx: number) => void;
   onReverseClips: () => void;
   onCycleClipTransition: (id: string) => void;
@@ -303,6 +305,7 @@ export function TimelineDock({
   onApplyClipOverlay,
   onVisualFiles,
   onDuplicateClip,
+  onAutoReplaceClip,
   onReorderClip,
   onReverseClips,
   onSetClipTransition,
@@ -1245,6 +1248,23 @@ export function TimelineDock({
           )}
 
           {/* Core NLE Edit Tools */}
+          {!selectedFx && onAutoReplaceClip && (
+            <button
+              type="button"
+              onClick={() => {
+                const targetId = selectedClipId || mediaItems[0]?.id;
+                if (targetId) onAutoReplaceClip(targetId);
+              }}
+              disabled={mediaItems.length === 0}
+              title={t.autoReplaceClipTitle}
+              aria-label={t.autoReplaceClipBtn}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[#262B38] bg-[#141821] hover:border-cyan-500/60 hover:text-cyan-200 disabled:opacity-35 text-[11px] font-medium text-gray-200 cursor-pointer transition-colors"
+            >
+              <RefreshCw className="w-3 h-3 text-cyan-400" aria-hidden="true" />
+              <span className="hidden lg:inline">{t.autoReplaceClipBtn}</span>
+            </button>
+          )}
+
           {!selectedFx && (
             <button
               type="button"

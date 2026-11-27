@@ -2497,12 +2497,14 @@ export interface TrackStructureAnalysis {
 
 export function createSeededRng(seed: number): () => number {
   let state = (seed >>> 0) || 1;
-  return () => {
+  const next = () => {
     state = (state + 0x6d2b79f5) >>> 0;
     let t = Math.imul(state ^ (state >>> 15), 1 | state);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+  for (let i = 0; i < 4; i++) next();
+  return next;
 }
 
 export function getDefaultBoundsForAutoClipRhythm(
@@ -3515,8 +3517,18 @@ export function generateAutoClipPlan(
   }
   if (pool.length === 0) return [];
 
+  if (shouldShuffle && pool.length > 1) {
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = pool[i];
+      pool[i] = pool[j];
+      pool[j] = tmp;
+    }
+  }
+
   const poolVideos = pool.filter((e): e is PoolVideo => e.kind === 'video');
   const poolImages = pool.filter((e): e is PoolImage => e.kind === 'image');
+  const uniqueVideoContentKeysCount = new Set(poolVideos.map((v) => v.contentKey)).size;
   const hasUsableVideos = poolVideos.some(
     (v) => (freeRangesByKey.get(v.contentKey) ?? []).length > 0
   );
@@ -3718,24 +3730,29 @@ export function generateAutoClipPlan(
       hasMixedPool &&
       shouldShuffle &&
       section !== 'beatless' &&
-      section !== 'intro' &&
       (rhythm === 'auto' || rhythm === 'beats_4') &&
       maxClipBound >= beatSec * 1.8 &&
       recentSteps.length > 0 &&
       prevStep1 >= 4 &&
-      (isShortSpan
-        ? hasRealAudioSignals
-          ? energy >= 0.5 || hitStrength >= 0.58 || (prevStep2 >= 4 && curOnset >= 0.5)
-          : prevStep2 >= 4 || stage1SlotOrd % 2 === 1
-        : rhythm === 'auto'
-          ? (prevStep2 >= 4 || energy >= 0.65 || section === 'drop') &&
-            (hasRealAudioSignals
-              ? energy >= 0.48 || hitStrength >= 0.56 || stage1SlotOrd % 4 === 3
-              : stage1SlotOrd % 2 === 1)
-          : prevStep2 >= 4 &&
-            (hasRealAudioSignals
-              ? stage1SlotOrd % 3 === 2 || hitStrength >= 0.56
-              : stage1SlotOrd % 3 === 2));
+      (section === 'intro'
+        ? (uniqueVideoContentKeysCount <= 2 && stage1SlotOrd >= 1) ||
+          (stage1SlotOrd >= 2 && takeOpeningRoll > 0.4 && curOnset >= 0.45)
+        : isShortSpan
+          ? hasRealAudioSignals
+            ? energy >= 0.5 || hitStrength >= 0.58 || (prevStep2 >= 4 && curOnset >= 0.5)
+            : prevStep2 >= 4 || stage1SlotOrd % 2 === 1
+          : rhythm === 'auto'
+            ? (prevStep2 >= 4 ||
+                energy >= 0.65 ||
+                section === 'drop' ||
+                uniqueVideoContentKeysCount <= 2) &&
+              (hasRealAudioSignals
+                ? energy >= 0.48 || hitStrength >= 0.56 || stage1SlotOrd % 4 === 3
+                : stage1SlotOrd % 2 === 1)
+            : prevStep2 >= 4 &&
+              (hasRealAudioSignals
+                ? stage1SlotOrd % 3 === 2 || hitStrength >= 0.56
+                : stage1SlotOrd % 3 === 2));
 
     let preferredOrder: number[];
     const effectiveRhythm =
@@ -3840,14 +3857,28 @@ export function generateAutoClipPlan(
       } else if (section === 'intro') {
         preferredOrder =
           editorialProfile === 'edm_drop'
-            ? [8, 6, 4, 12]
+            ? takeOpeningRoll < 0.34
+              ? [6, 8, 4, 12]
+              : takeOpeningRoll < 0.68
+                ? [8, 6, 4, 12]
+                : [4, 8, 6, 12]
             : isSlowEditorial
-              ? [16, 12, 8]
+              ? takeOpeningRoll < 0.34
+                ? [12, 16, 8]
+                : takeOpeningRoll < 0.68
+                  ? [16, 12, 8]
+                  : [8, 12, 16]
               : hasRealAudioSignals && rawEnergy < 0.34
-                ? takeOpeningRoll > 0.5
+                ? takeOpeningRoll < 0.34
                   ? [12, 8, 16, 6]
-                  : [8, 12, 6, 16]
-                : [8, 6, 4, 12];
+                  : takeOpeningRoll < 0.68
+                    ? [8, 12, 6, 16]
+                    : [6, 8, 12, 16]
+                : takeOpeningRoll < 0.34
+                  ? [8, 6, 4, 12]
+                  : takeOpeningRoll < 0.68
+                    ? [6, 8, 12, 4]
+                    : [12, 8, 6, 4];
       } else if (section === 'outro') {
         preferredOrder = isSlowEditorial
           ? [12, 16, 8, 20]
@@ -3939,12 +3970,13 @@ export function generateAutoClipPlan(
     const isRigidBeatFlash = rhythm === 'beats_1';
     const hasCustomBarMode = rhythm !== 'auto' && rhythm !== 'smooth';
 
-    // Pre-draw tiny RNG jitter per candidate step when shouldShuffle is active so
+    // Draw meaningful RNG jitter per candidate step when shouldShuffle is active so
     // multiple regenerations genuinely vary cut rhythm without violating musical phrasing.
     const jitterByStep = new Map<number, number>();
     if (shouldShuffle && !isRigidBeatFlash && candidates.length > 1) {
+      const openingBoost = bIdx < 12 ? 0.26 : 0;
       for (const s of candidates) {
-        jitterByStep.set(s, (rng() - 0.5) * 0.24);
+        jitterByStep.set(s, (rng() - 0.5) * (0.54 + openingBoost));
       }
     }
 
@@ -4403,15 +4435,23 @@ export function generateAutoClipPlan(
       const slack = Math.max(0, re - rs - clampedNeed);
       const safeTailMargin = slack > transHeadroom + 0.1 ? Math.min(transHeadroom, slack * 0.5) : 0;
       const prior = usedSlicesByKey.get(entry.contentKey) ?? [];
-      if (slack >= Math.max(4.5, clampedNeed * 1.45)) {
+      const maxRangeOff = Math.max(0, slack - safeTailMargin);
+      if (prior.length === 0 && maxRangeOff > 0.15) {
+        // First slice of a video in shuffled mode: sample uniformly across the whole safe span
+        // so consecutive regenerations do not always open at rs = 5.0s.
+        const bucketIdx = Math.floor(rng() * 5);
+        const rawOff = ((bucketIdx + rng()) / 5) * maxRangeOff;
+        srcStart = Number(Math.max(rs, Math.min(re - clampedNeed, rs + rawOff)).toFixed(2));
+        srcEnd = Number((srcStart + clampedNeed).toFixed(2));
+      } else if (slack >= Math.max(4.5, clampedNeed * 1.45)) {
         const minEdgeBuf = Math.max(0.9, minSliceKeep + slicePad);
-        let bestOffset = Number((rs + rng() * Math.max(0, slack - safeTailMargin)).toFixed(2));
+        let bestOffset = Number((rs + rng() * maxRangeOff).toFixed(2));
         let bestScore = -Infinity;
         for (let k = 0; k < 7; k++) {
           let cand: number;
-          if (k === 0 && rng() < 0.3) {
+          if (k === 0 && rng() < 0.22) {
             cand = rs;
-          } else if (k === 1 && rng() < 0.3) {
+          } else if (k === 1 && rng() < 0.22) {
             cand = re - clampedNeed - safeTailMargin;
           } else {
             const innerLo = rs + minEdgeBuf;
@@ -4428,7 +4468,7 @@ export function generateAutoClipPlan(
             const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
             if (d < minDist) minDist = d;
           }
-          const score = minDist + rng() * 0.6;
+          const score = minDist + rng() * 0.85;
           if (score > bestScore) {
             bestScore = score;
             bestOffset = cand;
@@ -4437,20 +4477,21 @@ export function generateAutoClipPlan(
         srcStart = bestOffset;
         srcEnd = Number((srcStart + clampedNeed).toFixed(2));
       } else if (slack > 0.15) {
-        // Sample endpoints + interior offsets so moderate-slack cuts spread cleanly away from prior slices
-        const maxRangeOff = Math.max(0, slack - safeTailMargin * 0.5);
-        let bestOffset = Number((rs + rng() * maxRangeOff).toFixed(2));
+        // Sample endpoints + interior offsets with jitter so moderate-slack cuts do not snap to rs = 5.0s
+        const modMaxOff = Math.max(0, slack - safeTailMargin * 0.5);
+        let bestOffset = Number((rs + rng() * modMaxOff).toFixed(2));
         let bestScore = -Infinity;
-        for (let k = 0; k < 5; k++) {
-          const frac = k === 0 ? 0 : k === 4 ? 1 : (k + rng() * 0.5) / 5;
-          const cand = Number(Math.max(rs, Math.min(re - clampedNeed, rs + frac * maxRangeOff)).toFixed(2));
+        const tieNoise = Math.min(1.6, Math.max(0.45, modMaxOff * 0.35));
+        for (let k = 0; k < 8; k++) {
+          const frac = (k + rng() * 0.75) / 8;
+          const cand = Number(Math.max(rs, Math.min(re - clampedNeed, rs + frac * modMaxOff)).toFixed(2));
           const candEnd = cand + clampedNeed;
           let minDist = prior.length === 0 ? slack : Infinity;
           for (const [ps, pe] of prior) {
             const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
             if (d < minDist) minDist = d;
           }
-          const score = minDist + rng() * 0.35;
+          const score = minDist + rng() * tieNoise;
           if (score > bestScore) {
             bestScore = score;
             bestOffset = cand;
@@ -5085,26 +5126,11 @@ export function generateAutoClipPlan(
       const cooled = [...poolToPick].sort(
         (a, b) => getMinSlotDist(b.contentKey, slotIdx) - getMinSlotDist(a.contentKey, slotIdx)
       );
-      const bestDist = getMinSlotDist(cooled[0].contentKey, slotIdx);
-      const topCooled = cooled.filter((c) => getMinSlotDist(c.contentKey, slotIdx) >= bestDist - 1);
-      const pickPool = topCooled.length > 0 ? topCooled : cooled.slice(0, 1);
+      // Allow top ~72% cooled non-adjacent/non-ping-pong candidates so Pass 2+ reshuffles order
+      // genuinely instead of locking into a fixed FIFO queue [A, B, C, D -> A, B, C, D].
+      const keepCount = Math.max(2, Math.ceil(cooled.length * 0.72));
+      const pickPool = cooled.slice(0, Math.min(cooled.length, keepCount));
       return pickPool[Math.floor(rng() * pickPool.length)];
-    }
-
-    if ((mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.4 && poolToPick.length > 1) {
-      const calmSorted = [...poolToPick].sort((a, b) => {
-        const aSpan =
-          a.kind === 'image'
-            ? 2
-            : Math.max(...(freeRangesByKey.get(a.contentKey) ?? []).map(([rs, re]) => re - rs), 0);
-        const bSpan =
-          b.kind === 'image'
-            ? 2
-            : Math.max(...(freeRangesByKey.get(b.contentKey) ?? []).map(([rs, re]) => re - rs), 0);
-        return bSpan - aSpan;
-      });
-      const topHalf = calmSorted.slice(0, Math.max(1, Math.ceil(calmSorted.length * 0.6)));
-      return topHalf[Math.floor(rng() * topHalf.length)];
     }
 
     return poolToPick[Math.floor(rng() * poolToPick.length)];
@@ -5417,9 +5443,11 @@ export function generateAutoClipPlan(
         ? stage2Pool.filter((e) => e.contentKey !== prev3Key && e.contentKey !== next3Key)
         : stage2Pool;
     const pickSource = nonPingPong3.length > 0 ? nonPingPong3 : stage2Pool;
-    const bestDist = pickSource.length > 0 ? getMinSlotDist(pickSource[0].contentKey, i) : 0;
-    const topCooled = pickSource.filter((c) => getMinSlotDist(c.contentKey, i) >= bestDist - 1);
-    const finalPickPool = topCooled.length > 0 ? topCooled : poolStage1;
+    const cooledPool =
+      pickSource.length > 2
+        ? pickSource.slice(0, Math.max(2, Math.ceil(pickSource.length * 0.72)))
+        : pickSource;
+    const finalPickPool = cooledPool.length > 0 ? cooledPool : poolStage1;
     const chosen = finalPickPool[Math.floor(rng() * finalPickPool.length)];
     const { sourceStartSec, rate } = canAssetFitUnused(chosen, slot.dur, false, false)
       ? takeUnusedSlice(chosen, slot.dur, false, i)
@@ -5461,6 +5489,182 @@ export function generateRandomBeatAutoClips(
     { ...options, mode: 'random', fillToTargetEnd: false }
   );
 }
+
+export interface AutoReplaceClipResult {
+  binItem: MediaBinItem;
+  sourceStartSec: number;
+  playbackRate: number;
+}
+
+export function getMediaContentSignature(
+  item: Pick<
+    MediaBinItem | VisualMediaState,
+    'kind' | 'fileName' | 'url' | 'width' | 'height' | 'videoDuration'
+  > & {
+    defaultDurationSec?: number;
+    generatorId?: string;
+  }
+): string {
+  if (item.kind === 'generator') {
+    return `gen:${item.generatorId || item.fileName || 'fx'}`;
+  }
+  const cleanName = (item.fileName || '').trim().toLowerCase();
+  if (item.kind === 'image') {
+    return cleanName ? `img:${cleanName}:${item.width}x${item.height}` : `url:${item.url}`;
+  }
+  const durKey = Math.round((item.videoDuration ?? item.defaultDurationSec ?? 0) * 10);
+  return cleanName ? `vid:${cleanName}:${durKey}:${item.width}x${item.height}` : `url:${item.url}`;
+}
+
+/**
+ * Picks an automatic replacement clip from Media Bin for a timeline clip,
+ * avoiding both the current clip and adjacent timeline neighbors while
+ * selecting an unused/distant source segment for video clips.
+ */
+export function pickAutoReplacementForTimelineClip(
+  targetClip: VisualMediaState,
+  timelineItems: VisualMediaState[],
+  binItems: MediaBinItem[],
+  excludeEdgeSec = 5,
+  rng: () => number = Math.random
+): AutoReplaceClipResult | null {
+  if (binItems.length === 0) return null;
+  const targetIdx = timelineItems.findIndex((c) => c.id === targetClip.id);
+  const targetSig = getMediaContentSignature(targetClip);
+  const prevClip = targetIdx > 0 ? timelineItems[targetIdx - 1] : null;
+  const nextClip =
+    targetIdx >= 0 && targetIdx + 1 < timelineItems.length ? timelineItems[targetIdx + 1] : null;
+  const prev2Clip = targetIdx > 1 ? timelineItems[targetIdx - 2] : null;
+  const next2Clip =
+    targetIdx >= 0 && targetIdx + 2 < timelineItems.length ? timelineItems[targetIdx + 2] : null;
+  const prevSig = prevClip ? getMediaContentSignature(prevClip) : null;
+  const nextSig = nextClip ? getMediaContentSignature(nextClip) : null;
+  const prev2Sig = prev2Clip ? getMediaContentSignature(prev2Clip) : null;
+  const next2Sig = next2Clip ? getMediaContentSignature(next2Clip) : null;
+
+  const usageBySig = new Map<string, number>();
+  const usedSlicesBySig = new Map<string, Array<[number, number]>>();
+  for (const item of timelineItems) {
+    if (item.id === targetClip.id) continue;
+    const sig = getMediaContentSignature(item);
+    usageBySig.set(sig, (usageBySig.get(sig) ?? 0) + 1);
+    if (item.kind === 'video') {
+      const list = usedSlicesBySig.get(sig) ?? [];
+      const s = Math.max(0, item.sourceStartSec || 0);
+      const e = s + Math.max(0.4, item.durationSec || 4) * Math.max(0.25, item.playbackRate || 1);
+      list.push([s, e]);
+      usedSlicesBySig.set(sig, list);
+    }
+  }
+  if (targetClip.kind === 'video') {
+    const list = usedSlicesBySig.get(targetSig) ?? [];
+    const s = Math.max(0, targetClip.sourceStartSec || 0);
+    const e =
+      s + Math.max(0.4, targetClip.durationSec || 4) * Math.max(0.25, targetClip.playbackRate || 1);
+    list.push([s, e]);
+    usedSlicesBySig.set(targetSig, list);
+  }
+
+  // Deduplicate identical bin uploads by content signature so duplicate files don't bias weight
+  const uniqueBySig = new Map<string, MediaBinItem>();
+  for (const b of binItems) {
+    const sig = getMediaContentSignature(b);
+    if (!uniqueBySig.has(sig)) uniqueBySig.set(sig, b);
+  }
+  const uniquePool = Array.from(uniqueBySig.values());
+
+  const diffCurrent = uniquePool.filter((b) => getMediaContentSignature(b) !== targetSig);
+  const stage1 = diffCurrent.length > 0 ? diffCurrent : uniquePool;
+  const nonAdj = stage1.filter((b) => {
+    const sig = getMediaContentSignature(b);
+    return sig !== prevSig && sig !== nextSig;
+  });
+  const stage2 = nonAdj.length > 0 ? nonAdj : stage1;
+  const nonPingPong =
+    stage2.length > 1
+      ? stage2.filter((b) => {
+          const sig = getMediaContentSignature(b);
+          return sig !== prev2Sig && sig !== next2Sig;
+        })
+      : stage2;
+  const stage3 = nonPingPong.length > 0 ? nonPingPong : stage2;
+
+  const slotDur = Math.max(0.4, targetClip.durationSec || 4);
+  const preferVideo = slotDur > 2.6;
+  const minUsage = Math.min(...stage3.map((b) => usageBySig.get(getMediaContentSignature(b)) ?? 0));
+  const leastUsed = stage3.filter(
+    (b) => (usageBySig.get(getMediaContentSignature(b)) ?? 0) <= minUsage + 1
+  );
+  const scoredPool = (leastUsed.length > 0 ? leastUsed : stage3).map((b) => {
+    const sig = getMediaContentSignature(b);
+    const uses = usageBySig.get(sig) ?? 0;
+    let score = -uses * 2.0 + rng() * 1.4;
+    if (preferVideo && b.kind === 'video') {
+      const safe = resolveSafeVideoSourceRange(b, excludeEdgeSec);
+      const rate = Math.max(0.25, Math.min(4, b.defaultPlaybackRate ?? 1.0));
+      score += safe.usableSpanSec / rate >= slotDur ? 2.2 : 0.8;
+    } else if (!preferVideo && b.kind === 'image') {
+      score += 1.2;
+    }
+    return { item: b, score };
+  });
+  scoredPool.sort((a, b) => b.score - a.score);
+  const chosen = scoredPool[0].item;
+  const chosenSig = getMediaContentSignature(chosen);
+
+  if (chosen.kind !== 'video') {
+    return {
+      binItem: chosen,
+      sourceStartSec: 0,
+      playbackRate: 1.0,
+    };
+  }
+
+  const rate = Math.max(0.25, Math.min(4, chosen.defaultPlaybackRate ?? 1.0));
+  const safe = resolveSafeVideoSourceRange(chosen, excludeEdgeSec);
+  const need = slotDur * rate;
+  const maxOff = Math.max(0, safe.usableSpanSec - Math.min(need, safe.usableSpanSec));
+  const prior = usedSlicesBySig.get(chosenSig) ?? [];
+
+  let bestStart = safe.sourceStartSec;
+  if (maxOff > 0.2) {
+    if (prior.length === 0) {
+      bestStart = Number((safe.sourceStartSec + rng() * maxOff).toFixed(2));
+    } else {
+      let bestScore = -Infinity;
+      const STEPS = 18;
+      for (let k = 0; k <= STEPS; k++) {
+        const cand = Number(
+          (
+            safe.sourceStartSec +
+            Math.min(maxOff, Math.max(0, ((k + rng() * 0.65) / (STEPS + 1)) * maxOff))
+          ).toFixed(2)
+        );
+        const candEnd = cand + Math.min(need, safe.usableSpanSec);
+        let minDist = Infinity;
+        let totalOverlap = 0;
+        for (const [ps, pe] of prior) {
+          const overlap = Math.max(0, Math.min(candEnd, pe) - Math.max(cand, ps));
+          totalOverlap += overlap;
+          const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : -overlap;
+          if (d < minDist) minDist = d;
+        }
+        const score = minDist - totalOverlap * 4 + rng() * 0.55;
+        if (score > bestScore) {
+          bestScore = score;
+          bestStart = cand;
+        }
+      }
+    }
+  }
+
+  return {
+    binItem: chosen,
+    sourceStartSec: bestStart,
+    playbackRate: rate,
+  };
+}
+
 
 
 

@@ -41,6 +41,10 @@ export const TRANSLATIONS = {
     clipTransDurationLabel: 'Длительность перехода (с)',
     clipGeneratorSceneLabel: 'Эффект сцены',
     duplicateClipLabel: 'Дублировать клип',
+    autoReplaceClipBtn: 'Автозамена',
+    autoReplaceClipTitle: 'Автозамена на другой клип из медиатеки без повтора соседей',
+    autoReplaceClipToast: 'Клип заменён',
+    autoReplaceNoAltToast: 'Нет медиафайлов в медиатеке для замены',
     fitClipsToAudioBtn: 'Растянуть под аудио',
 
     // Multi-media sequence
@@ -600,6 +604,10 @@ export const TRANSLATIONS = {
     clipTransDurationLabel: 'Transition Duration (s)',
     clipGeneratorSceneLabel: 'Scene Effect',
     duplicateClipLabel: 'Duplicate Clip',
+    autoReplaceClipBtn: 'Auto-Replace',
+    autoReplaceClipTitle: 'Auto-replace with another Media Bin clip without repeating neighbors',
+    autoReplaceClipToast: 'Clip replaced',
+    autoReplaceNoAltToast: 'No Media Bin files available to replace clip',
     fitClipsToAudioBtn: 'Fit Clips to Audio',
 
     sequenceSectionTitle: 'Timeline Sequencing',

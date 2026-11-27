@@ -26,6 +26,7 @@ import {
   insertManualClipAtAnchor,
   moveManualClipGroup,
   packTimelineLanes,
+  pickAutoReplacementForTimelineClip,
   resizeManualClipDuration,
   resolveActiveSlideshowSlice,
   resolveCalibratedBeatGrid,
@@ -2479,6 +2480,148 @@ test('all 12 AUTO_CLIP_PRESETS produce valid non-repeating plans and distinct ci
     'slow_dream should have fewer, longer holds than dynamic_drop'
   );
 });
+
+test('consecutive auto-generations vary opening clips, timestamps, and break FIFO cycle lock across 6 takes', () => {
+  const beats = Array.from({ length: 128 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = {
+    bpm: 120,
+    exactBpm: 120,
+    beatSec: 0.5,
+    beats,
+    downbeatOffset: 0,
+    beatStrengths: beats.map((_, i) => (i % 4 === 0 ? 0.95 : i % 2 === 0 ? 0.65 : 0.45)),
+    confidence: 0.92,
+    source: 'auto' as const,
+  };
+  const videos5: MediaBinItem[] = Array.from({ length: 5 }, (_, i) => ({
+    id: `v${i + 1}`,
+    kind: 'video',
+    fileName: `video_${i + 1}.mp4`,
+    url: `blob:v${i + 1}`,
+    width: 1080,
+    height: 1920,
+    videoDuration: 28,
+    defaultDurationSec: 28,
+    defaultPlaybackRate: 1,
+  }));
+
+  const firstIds = new Set<string>();
+  const firstStarts = new Set<number>();
+  const openingSigs = new Set<string>();
+  let cycleBrokenCount = 0;
+
+  for (let take = 1; take <= 6; take++) {
+    const plan = generateAutoClipPlan(videos5, grid, [], 0, 58, {
+      mode: 'auto_rhythm',
+      rhythm: 'beats_4',
+      shuffleOrder: true,
+      avoidAdjacentRepeat: true,
+      fillToTargetEnd: true,
+      hasAudio: true,
+      excludeEdgeSec: 5,
+      variationSeed: ((take * 2654435761) ^ (1700000000 + take * 999)) >>> 0,
+    });
+    assert.ok(plan.length >= 10, `Take ${take} expected >= 10 placements`);
+    firstIds.add(plan[0].binItemId);
+    firstStarts.add(Number(plan[0].sourceStartSec.toFixed(1)));
+    openingSigs.add(plan.slice(0, 4).map((p) => p.binItemId).join(','));
+
+    const cycle1 = plan.slice(0, 5).map((p) => p.binItemId).join(',');
+    const cycle2 = plan.slice(5, 10).map((p) => p.binItemId).join(',');
+    if (cycle1 !== cycle2) cycleBrokenCount++;
+    for (let i = 1; i < plan.length; i++) {
+      assert.notEqual(plan[i].binItemId, plan[i - 1].binItemId);
+    }
+  }
+
+  assert.ok(firstIds.size >= 2, `Expected multiple distinct opening clips across 6 takes, got ${Array.from(firstIds).join(',')}`);
+  assert.ok(firstStarts.size >= 4, `Expected varied first sourceStartSec (not stuck at 5.0s), got ${Array.from(firstStarts).join(',')}`);
+  assert.ok(openingSigs.size >= 5, `Expected distinct opening permutations across 6 takes, got ${openingSigs.size}`);
+  assert.ok(cycleBrokenCount >= 4, `Expected cycle 2 to reshuffle instead of locking FIFO queue, broken=${cycleBrokenCount}/6`);
+
+  const mixed: MediaBinItem[] = [
+    ...videos5.slice(0, 4).map((v) => ({ ...v, videoDuration: 18, defaultDurationSec: 18 })),
+    ...Array.from({ length: 4 }, (_, i) => ({
+      id: `p${i + 1}`,
+      kind: 'image' as const,
+      fileName: `photo_${i + 1}.jpg`,
+      url: `blob:p${i + 1}`,
+      width: 1080,
+      height: 1920,
+      defaultDurationSec: 4,
+    })),
+  ];
+  const mixedOpenings = new Set<string>();
+  for (let take = 1; take <= 6; take++) {
+    const plan = generateAutoClipPlan(mixed, grid, [], 0, 58, {
+      mode: 'auto_rhythm',
+      rhythm: 'auto',
+      shuffleOrder: true,
+      avoidAdjacentRepeat: true,
+      fillToTargetEnd: true,
+      hasAudio: true,
+      excludeEdgeSec: 5,
+      variationSeed: ((take * 2654435761) ^ (1700000000 + take * 999)) >>> 0,
+    });
+    assert.ok(plan.length >= 10);
+    mixedOpenings.add(plan.slice(0, 5).map((p) => `${p.binItemId}:${p.durationSec}`).join('|'));
+  }
+  assert.ok(mixedOpenings.size >= 5, `Mixed 4V+4P openings must vary across 6 takes, got ${mixedOpenings.size}`);
+});
+
+test('pickAutoReplacementForTimelineClip replaces without repeating current clip or neighbors and shifts video slice', () => {
+  const mkBinV = (id: string, dur = 32): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+    defaultPlaybackRate: 1,
+  });
+  const bin = [mkBinV('v1'), mkBinV('v2'), mkBinV('v3'), mkBinV('v4')];
+  const mkTl = (id: string, name: string, startSec: number, dur: number, srcStart = 5): VisualMediaState => ({
+    id,
+    kind: 'video',
+    fileName: `${name}.mp4`,
+    url: `blob:${name}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: 32,
+    startSec,
+    durationSec: dur,
+    sourceStartSec: srcStart,
+    playbackRate: 1,
+    transitionOut: 'cut',
+    transitionDurationSec: 0,
+    transform: { ...DEFAULT_CLIP_TRANSFORM },
+    clipAudioVolume: 0,
+    clipAudioMuted: true,
+  });
+
+  // Timeline: v1 -> v2 -> v3 -> v1; replacing #1 (v2) must avoid v2 (current), v1 (prev), and v3 (next) => must pick v4!
+  const timeline = [
+    mkTl('c0', 'v1', 0, 4, 6),
+    mkTl('c1', 'v2', 4, 4, 8),
+    mkTl('c2', 'v3', 8, 4, 10),
+    mkTl('c3', 'v1', 12, 4, 15),
+  ];
+  const res = pickAutoReplacementForTimelineClip(timeline[1], timeline, bin, 5, () => 0.37);
+  assert.ok(res);
+  assert.equal(res.binItem.id, 'v4');
+  assert.ok(res.sourceStartSec >= 5);
+
+  // Single-file bin fallback shifts sourceStartSec cleanly away from existing slice
+  const soloBin = [mkBinV('v1', 40)];
+  const soloTimeline = [{ ...mkTl('c0', 'v1', 0, 4, 6), videoDuration: 40 }];
+  const soloRes = pickAutoReplacementForTimelineClip(soloTimeline[0], soloTimeline, soloBin, 5, () => 0.5);
+  assert.ok(soloRes);
+  assert.equal(soloRes.binItem.id, 'v1');
+  assert.ok(Math.abs(soloRes.sourceStartSec - 6) >= 4, `Expected shifted slice away from 6s, got ${soloRes.sourceStartSec}s`);
+});
+
 
 
 
