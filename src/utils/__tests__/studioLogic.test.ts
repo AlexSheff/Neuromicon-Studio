@@ -2053,6 +2053,124 @@ test('mixed photo + video generateAutoClipPlan prioritizes videos for longer sho
   }
 });
 
+test('detectTrackBpmAndBeats keeps 22050Hz downsampled long tracks phase-locked within 10ms mean error and zero drift', () => {
+  const synth22k = (bpm: number, dur: number, quietIntroSec = 0): Float32Array => {
+    const sr = 22050;
+    const mono = new Float32Array(Math.floor(sr * dur));
+    const bs = 60 / bpm;
+    for (let b = 0; b * bs < dur; b++) {
+      const bt = b * bs;
+      if (bt < quietIntroSec) continue;
+      const s0 = Math.round(bt * sr);
+      const amp = b % 4 === 0 ? 0.95 : 0.65;
+      for (let j = 0; j < Math.floor(sr * 0.08) && s0 + j < mono.length; j++) {
+        mono[s0 + j] += Math.sin((j / sr) * 2 * Math.PI * 62) * Math.exp(-j / (sr * 0.02)) * amp;
+      }
+    }
+    return mono;
+  };
+
+  for (const tc of [
+    { bpm: 128, dur: 150, quietIntroSec: 0, minHitRate: 0.99 },
+    { bpm: 118.5, dur: 150, quietIntroSec: 0, minHitRate: 0.99 },
+    { bpm: 122, dur: 90, quietIntroSec: 4.0, minHitRate: 0.94 },
+  ]) {
+    const mono = synth22k(tc.bpm, tc.dur, tc.quietIntroSec);
+    const grid = detectTrackBpmAndBeats(mono, 22050, 0, tc.dur, 1.0);
+    assert.ok(
+      Math.abs((grid.exactBpm ?? grid.bpm) - tc.bpm) <= 0.15,
+      `Expected exact BPM ~${tc.bpm}, got ${grid.exactBpm ?? grid.bpm}`
+    );
+    const trueBs = 60 / tc.bpm;
+    const errs = grid.beats.map((b) => Math.abs(b - Math.round(b / trueBs) * trueBs) * 1000);
+    const meanErr = errs.reduce((a, b) => a + b, 0) / Math.max(1, errs.length);
+    const hitRate = errs.filter((e) => e <= 25).length / Math.max(1, errs.length);
+    assert.ok(meanErr <= 10, `Expected <=10ms mean beat error for ${tc.bpm} BPM, got ${meanErr.toFixed(2)}ms`);
+    assert.ok(
+      hitRate >= tc.minHitRate,
+      `Expected >=${(tc.minHitRate * 100).toFixed(0)}% beats within 25ms for ${tc.bpm} BPM, got ${(hitRate * 100).toFixed(1)}%`
+    );
+  }
+});
+
+test('generateAutoClipPlan eliminates adjacent repeats and distributes fallback video timestamps across 1v+6p, 3v+4p, and beats_4 timelines', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const mkP = (id: string): MediaBinItem => ({
+    id,
+    kind: 'image',
+    fileName: `${id}.jpg`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    defaultDurationSec: 4,
+  });
+  const mkGrid = (bpm: number, dur: number) => {
+    const bs = 60 / bpm;
+    const beats: number[] = [];
+    for (let i = 0; i * bs < dur; i++) beats.push(Number((i * bs).toFixed(3)));
+    return { bpm, exactBpm: bpm, beatSec: bs, anchorSec: 0, downbeatOffset: 0, beats };
+  };
+  let seed = 9001;
+  const rng = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+
+  // 1) 1 video + 6 photos on 120s track: zero adjacent video repeats and all photos active
+  const bin1v6p = [mkV('v1', 35), mkP('p1'), mkP('p2'), mkP('p3'), mkP('p4'), mkP('p5'), mkP('p6')];
+  const planB = generateAutoClipPlan(bin1v6p, mkGrid(128, 120), [], 0, 120, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    rng,
+  });
+  for (let i = 1; i < planB.length; i++) {
+    assert.notEqual(planB[i].binItemId, planB[i - 1].binItemId, `1v+6p adjacent repeat at slot ${i}`);
+  }
+  for (const id of ['v1', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6']) {
+    assert.ok(planB.filter((p) => p.binItemId === id).length >= 3, `Expected ${id} >= 3 placements in 1v+6p`);
+  }
+
+  // 2) 3 videos x 20s + 4 photos on 150s track: zero adjacent repeats & wide fallback slice spread
+  const bin3v4p = [mkV('v1', 20), mkV('v2', 20), mkV('v3', 20), mkP('p1'), mkP('p2'), mkP('p3'), mkP('p4')];
+  const planA = generateAutoClipPlan(bin3v4p, mkGrid(128, 150), [], 0, 150, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    rng,
+  });
+  for (let i = 1; i < planA.length; i++) {
+    assert.notEqual(planA[i].binItemId, planA[i - 1].binItemId, `3v+4p adjacent repeat at slot ${i}`);
+  }
+  const v1Starts = planA.filter((p) => p.binItemId === 'v1').map((p) => p.sourceStartSec);
+  const v1DistinctBins = new Set(v1Starts.map((s) => Math.floor(s)));
+  assert.ok(v1DistinctBins.size >= 4, `Expected v1 fallback starts to span >= 4 distinct seconds, got ${v1DistinctBins.size}`);
+
+  // 3) 2 videos + 2 photos on 180s beats_4 track: photos still punch short beats cleanly throughout
+  const bin2v2p = [mkV('v1', 20), mkV('v2', 20), mkP('p1'), mkP('p2')];
+  const planC = generateAutoClipPlan(bin2v2p, mkGrid(120, 180), [], 0, 180, {
+    mode: 'random',
+    rhythm: 'beats_4',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    rng,
+  });
+  for (let i = 1; i < planC.length; i++) {
+    assert.notEqual(planC[i].binItemId, planC[i - 1].binItemId, `beats_4 adjacent repeat at slot ${i}`);
+  }
+  assert.ok(planC.filter((p) => p.binItemId === 'p1').length >= 4, 'Expected p1 active across 180s beats_4');
+  assert.ok(planC.filter((p) => p.binItemId === 'p2').length >= 4, 'Expected p2 active across 180s beats_4');
+});
+
+
 
 
 

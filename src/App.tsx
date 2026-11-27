@@ -765,10 +765,10 @@ export default function App() {
         }
         const upcoming = items[s.clipIndex];
         if (!upcoming || upcoming.kind !== 'video') continue;
-        if (dt <= 3.6 || upcomingVideoCount < 5) {
+        if (dt <= 4.8 || upcomingVideoCount < 6) {
           preloadWindowIds.add(upcoming.id);
           keepAttachedIds.add(upcoming.id);
-          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 4 && dt <= 3.2) {
+          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 6 && dt <= 4.5) {
             const vDur = upcoming.videoDuration || 1;
             const maxSafe = Math.max(0, vDur - 0.04);
             prewarmTargets.set(
@@ -883,7 +883,7 @@ export default function App() {
             if (v.paused) {
               if (v.readyState < 1) {
                 applySafeSeek(targetSec);
-              } else if (Math.abs(v.currentTime - targetSec) > 0.06 && !v.seeking) {
+              } else if (Math.abs(v.currentTime - targetSec) > 0.18 && !v.seeking) {
                 v.currentTime = targetSec;
               }
               v.play().catch(() => {});

@@ -1242,7 +1242,6 @@ export function detectTrackBpmAndBeats(
   }
 
   const hopSec = 0.01; // 100 Hz (10ms transient & tempo precision)
-  const sampleWin = Math.max(64, Math.floor(sampleRate * hopSec));
   const startIdx = Math.max(0, Math.floor(trimStart * sampleRate));
   const totalSteps = Math.max(16, Math.floor(clipDuration / hopSec));
   const rawOnsets = new Float32Array(totalSteps);
@@ -1259,9 +1258,10 @@ export function detectTrackBpmAndBeats(
   let maxRawOnset = 0;
 
   for (let s = 0; s < totalSteps; s++) {
-    const base = startIdx + s * sampleWin;
+    // Exact fractional sample boundaries eliminate integer truncation drift at 22050/11025 Hz
+    const base = startIdx + Math.round(s * sampleRate * hopSec);
     if (base >= mono.length) break;
-    const end = Math.min(mono.length, base + sampleWin);
+    const end = Math.min(mono.length, Math.max(base + 1, startIdx + Math.round((s + 1) * sampleRate * hopSec)));
     const count = Math.max(1, end - base);
 
     let lowSq = 0;
@@ -1374,40 +1374,44 @@ export function detectTrackBpmAndBeats(
 
   const coarseBpm = Math.max(60, Math.min(188, 60 / (refinedLag * hopSec)));
 
-  // Pass 1: Period + phase comb sweep (±2.4 BPM in 0.15 BPM steps), weighted toward center-hop kick & onset peaks
+  const scoreCombInterp = (candBeatSec: number, phaseStartSec: number): number => {
+    let score = 0;
+    let hits = 0;
+    for (let t = phaseStartSec; t < clipDuration; t += candBeatSec) {
+      const fIdx = Math.max(0, Math.min(totalSteps - 1.001, t / hopSec));
+      const i0 = Math.floor(fIdx);
+      const frac = fIdx - i0;
+      const i1 = Math.min(totalSteps - 1, i0 + 1);
+      const oCenter = onsets[i0] * (1 - frac) + onsets[i1] * frac;
+      const lCenter = lowOnsets[i0] * (1 - frac) + lowOnsets[i1] * frac;
+      const centerHit = oCenter * 0.62 + lCenter * 0.58;
+      const iPrev = Math.max(0, i0 - 1);
+      const iNext = Math.min(totalSteps - 1, i0 + 1);
+      const neighborHit = Math.max(
+        onsets[iPrev] * 0.62 + lowOnsets[iPrev] * 0.58,
+        onsets[iNext] * 0.62 + lowOnsets[iNext] * 0.58
+      );
+      score += Math.max(centerHit, neighborHit * 0.55);
+      hits++;
+    }
+    return hits > 0 ? score / hits : 0;
+  };
+
+  // Pass 1: Full-phase 10ms comb sweep (±2.4 BPM in 0.15 BPM steps) across [0 .. beatSec)
   let lockedBpm = coarseBpm;
   let bestPhase = 0;
   let bestCombScore = -1;
   const fineStepCount = 16;
   const fineDeltaBpm = 0.15;
   const approxBeatSec = 60 / coarseBpm;
-  const phaseSteps = Math.max(1, Math.min(totalSteps, Math.round((approxBeatSec * 1.15) / hopSec)));
-  const phaseStride = phaseSteps > 64 ? 2 : 1;
-
-  const scoreComb = (candBeatSec: number, phaseStartSec: number): number => {
-    let score = 0;
-    let hits = 0;
-    for (let t = phaseStartSec; t < clipDuration; t += candBeatSec) {
-      const idx = Math.min(totalSteps - 1, Math.round(t / hopSec));
-      const idxPrev = Math.max(0, idx - 1);
-      const idxNext = Math.min(totalSteps - 1, idx + 1);
-      const centerHit = onsets[idx] * 0.62 + lowOnsets[idx] * 0.58;
-      const neighborHit = Math.max(
-        onsets[idxPrev] * 0.62 + lowOnsets[idxPrev] * 0.58,
-        onsets[idxNext] * 0.62 + lowOnsets[idxNext] * 0.58
-      );
-      score += Math.max(centerHit, neighborHit * 0.65);
-      hits++;
-    }
-    return hits > 0 ? score / hits : 0;
-  };
+  const phaseSteps = Math.max(1, Math.min(totalSteps, Math.round(approxBeatSec / hopSec)));
 
   for (let bi = -fineStepCount; bi <= fineStepCount; bi++) {
     const candBpm = Math.max(60, Math.min(188, coarseBpm + bi * fineDeltaBpm));
     const candBeatSec = 60 / candBpm;
-    for (let ph = 0; ph < phaseSteps; ph += phaseStride) {
+    for (let ph = 0; ph < phaseSteps; ph++) {
       const phSec = ph * hopSec;
-      const avgScore = scoreComb(candBeatSec, phSec);
+      const avgScore = scoreCombInterp(candBeatSec, phSec);
       if (avgScore > bestCombScore) {
         bestCombScore = avgScore;
         bestPhase = phSec;
@@ -1416,17 +1420,16 @@ export function detectTrackBpmAndBeats(
     }
   }
 
-  // Pass 2: Ultra-fine 0.02 BPM & single-hop phase lock (±0.32 BPM) to eliminate multi-minute drift
+  // Pass 2: Ultra-fine 0.01 BPM & 2ms interpolated phase lock (±0.28 BPM) to eliminate multi-minute drift
   const ultraCenterBpm = lockedBpm;
-  const ultraCenterPh = Math.round(bestPhase / hopSec);
+  const ultraCenterPh = bestPhase;
   let ultraBestScore = -1;
-  for (let bi = -16; bi <= 16; bi++) {
-    const candBpm = Math.max(60, Math.min(188, ultraCenterBpm + bi * 0.02));
+  for (let bi = -28; bi <= 28; bi++) {
+    const candBpm = Math.max(60, Math.min(188, ultraCenterBpm + bi * 0.01));
     const candBeatSec = 60 / candBpm;
-    for (let d = -2; d <= 2; d++) {
-      const phIdx = Math.max(0, Math.min(phaseSteps - 1, ultraCenterPh + d));
-      const phSec = phIdx * hopSec;
-      const avgScore = scoreComb(candBeatSec, phSec);
+    for (let dMs = -14; dMs <= 14; dMs += 2) {
+      const phSec = ((ultraCenterPh + dMs * 0.001) % candBeatSec + candBeatSec) % candBeatSec;
+      const avgScore = scoreCombInterp(candBeatSec, phSec);
       if (avgScore > ultraBestScore) {
         ultraBestScore = avgScore;
         lockedBpm = candBpm;
@@ -1438,12 +1441,17 @@ export function detectTrackBpmAndBeats(
   const lockedBeatSec = Number((60 / lockedBpm).toFixed(5));
   const bpm = Math.round(lockedBpm);
   const beatSec = lockedBeatSec;
+  bestPhase = Number((bestPhase % beatSec).toFixed(3));
 
   // Adaptive transient-locked PLL tracker tightly anchored to global phase lattice to eliminate cumulative drift
   const beats: number[] = [];
-  const pllMaxDrift = Math.min(0.045, beatSec * 0.10);
+  const pllMaxDrift = Math.min(0.04, beatSec * 0.09);
   const searchRadiusSteps = Math.max(2, Math.round(pllMaxDrift / hopSec));
   const pllSteerThreshold = Math.max(0.015, activeOnsetMean * 0.72);
+  // If ultra-fine phase wrapped slightly negative across modulo beatSec right near t=0 while t=0 has an onset, anchor at 0
+  if (bestPhase > beatSec * 0.85 && onsets[0] >= pllSteerThreshold * 0.6) {
+    bestPhase = 0;
+  }
   let expectedT = bestPhase;
 
   while (expectedT < clipDuration - 0.04) {
@@ -1469,15 +1477,27 @@ export function detectTrackBpmAndBeats(
       }
     }
 
-    const snapped = Number((bestPeakIdx * hopSec).toFixed(3));
+    // Sub-hop parabolic peak refinement for 2-3ms beat precision
+    let subStep = bestPeakIdx;
+    if (bestPeakIdx > 0 && bestPeakIdx < totalSteps - 1 && bestPeakRaw >= pllSteerThreshold) {
+      const y0 = onsets[bestPeakIdx - 1] * 0.65 + lowOnsets[bestPeakIdx - 1] * 0.5;
+      const y1 = onsets[bestPeakIdx] * 0.65 + lowOnsets[bestPeakIdx] * 0.5;
+      const y2 = onsets[bestPeakIdx + 1] * 0.65 + lowOnsets[bestPeakIdx + 1] * 0.5;
+      const denom = 2 * (y0 - 2 * y1 + y2);
+      if (Math.abs(denom) > 1e-8 && denom < 0) {
+        subStep += Math.max(-0.45, Math.min(0.45, (y0 - y2) / denom));
+      }
+    }
+
+    const snapped = Number(Math.max(0, subStep * hopSec).toFixed(3));
     if (beats.length === 0 || snapped - beats[beats.length - 1] > beatSec * 0.48) {
       beats.push(snapped);
     }
 
-    const anchorPull = (gridAnchor - boundedCenter) * 0.48;
+    const anchorPull = (gridAnchor - boundedCenter) * 0.52;
     if (bestPeakRaw >= pllSteerThreshold) {
       const err = snapped - boundedCenter;
-      expectedT = boundedCenter + beatSec + err * 0.16 + anchorPull;
+      expectedT = boundedCenter + beatSec + err * 0.14 + anchorPull;
     } else {
       expectedT = boundedCenter + beatSec + anchorPull;
     }
@@ -1494,7 +1514,8 @@ export function detectTrackBpmAndBeats(
       if (lowOnsets[idx] > kickPeak) kickPeak = lowOnsets[idx];
       if (onsets[idx] > totalPeak) totalPeak = onsets[idx];
     }
-    barScores[i % 4] += kickPeak * 1.65 + totalPeak * 0.45;
+    const midHighExcess = Math.max(0, totalPeak - kickPeak);
+    barScores[i % 4] += kickPeak * 1.9 - midHighExcess * 0.25;
   }
   let downbeatOffset = 0;
   for (let k = 1; k < 4; k++) {
@@ -2848,6 +2869,24 @@ export function generateAutoClipPlan(
   const usedSlicesByUrl = new Map<string, Array<[number, number]>>();
   const usageCountByUrl = new Map<string, number>();
   const lastSlotIdxByUrl = new Map<string, number>();
+  const placedIndicesByUrl = new Map<string, number[]>();
+  const SLICE_BUCKET_COUNT = 48;
+  const sliceBucketsByUrl = new Map<
+    string,
+    { counts: Float32Array; lastUsed: Int32Array; initStart: number; initEnd: number }
+  >();
+  let placementSeq = 0;
+
+  const getMinSlotDist = (url: string, slotIdx: number): number => {
+    const list = placedIndicesByUrl.get(url);
+    if (!list || list.length === 0) return 9999;
+    let best = Infinity;
+    for (let k = 0; k < list.length; k++) {
+      const d = Math.abs(slotIdx - list[k]);
+      if (d < best) best = d;
+    }
+    return best;
+  };
 
   const minSliceKeep = 0.35;
   const slicePad = 0.06;
@@ -3052,6 +3091,7 @@ export function generateAutoClipPlan(
     ((idx - barAnchorIdx) % 4 + 4) % 4 === 0;
 
   const recentSteps: number[] = [];
+  let stage1SlotOrd = 0;
   const hasRealAudioSignals = Boolean(
     options.monoData && options.monoData.length > 0 && options.sampleRate && options.sampleRate > 0
   );
@@ -3069,13 +3109,23 @@ export function generateAutoClipPlan(
     const allowShortPhotoPunch =
       hasMixedPool &&
       shouldShuffle &&
-      rhythm === 'auto' &&
+      (rhythm === 'auto' || rhythm === 'beats_4') &&
       maxClipBound >= beatSec * 1.8 &&
       recentSteps.length > 0 &&
       prevStep1 >= 4 &&
-      (hasRealAudioSignals
-        ? energy >= 0.52 || hitStrength >= 0.60 || (prevStep2 >= 4 && curOnset >= 0.52)
-        : prevStep2 >= 4 || recentSteps.length % 2 === 1);
+      (isShortSpan
+        ? hasRealAudioSignals
+          ? energy >= 0.50 || hitStrength >= 0.58 || (prevStep2 >= 4 && curOnset >= 0.5)
+          : prevStep2 >= 4 || stage1SlotOrd % 2 === 1
+        : rhythm === 'auto'
+          ? (prevStep2 >= 4 || energy >= 0.68) &&
+            (hasRealAudioSignals
+              ? energy >= 0.48 || hitStrength >= 0.56 || stage1SlotOrd % 4 === 3
+              : stage1SlotOrd % 2 === 1)
+          : prevStep2 >= 4 &&
+            (hasRealAudioSignals
+              ? stage1SlotOrd % 3 === 2 || hitStrength >= 0.56
+              : stage1SlotOrd % 3 === 2));
 
     let preferredOrder: number[];
     if (rhythm === 'beats_1') {
@@ -3083,7 +3133,9 @@ export function generateAutoClipPlan(
     } else if (rhythm === 'beats_2') {
       preferredOrder = beatSec < 0.48 ? [2, 4, 3, 1] : [2, 4, 1, 3];
     } else if (rhythm === 'beats_4') {
-      if (isShortSpan) {
+      if (allowShortPhotoPunch) {
+        preferredOrder = [2, 4, 6, 8];
+      } else if (isShortSpan) {
         preferredOrder = [4, 6, 8, 2];
       } else {
         preferredOrder = avgTargetPerFile >= 8 ? [12, 8, 6, 16, 4] : [8, 4, 12, 6, 16];
@@ -3107,7 +3159,7 @@ export function generateAutoClipPlan(
       // Standard full track ('auto'): mix varied bar & half-bar phrase lengths,
       // carving 1-2 beat punch slots when mixed photos + videos are present.
       if (allowShortPhotoPunch) {
-        preferredOrder = energy >= 0.64 && beatSec >= 0.45 ? [2, 1, 4, 6] : [2, 4, 6, 8];
+        preferredOrder = energy >= 0.68 && beatSec >= 0.45 ? [2, 1, 4, 6] : [2, 4, 6, 8];
       } else if (energy < 0.36) {
         preferredOrder = avgTargetPerFile >= 9 ? [16, 12, 24, 8, 20] : [12, 16, 8, 20, 6];
       } else if (energy < 0.64) {
@@ -3118,7 +3170,7 @@ export function generateAutoClipPlan(
     }
 
     const effectiveMinBound = allowShortPhotoPunch
-      ? Math.min(minClipBound, beatSec >= 0.45 && energy >= 0.64 ? beatSec : beatSec * 2)
+      ? Math.min(minClipBound, beatSec >= 0.45 && energy >= 0.68 ? beatSec : beatSec * 2)
       : minClipBound;
     const minSteps = Math.max(1, Math.ceil(effectiveMinBound / beatSec - 0.05));
     const maxSteps = Math.max(minSteps, Math.floor(maxClipBound / beatSec + 0.05));
@@ -3327,6 +3379,7 @@ export function generateAutoClipPlan(
     const stepSpan = Math.max(1, chosenSlot.beatEndIdx - chosenSlot.beatStartIdx);
     recentSteps.push(stepSpan);
     if (recentSteps.length > 4) recentSteps.shift();
+    stage1SlotOrd++;
     workingSlots.push(chosenSlot);
     beatIdx = chosenSlot.beatEndIdx;
   }
@@ -3414,6 +3467,7 @@ export function generateAutoClipPlan(
         const stepSpan = Math.max(1, endBeat - startBeatIdx);
         recentSteps.push(stepSpan);
         if (recentSteps.length > 4) recentSteps.shift();
+        stage1SlotOrd++;
         workingSlots.push({
           startSec: tailEnd,
           dur: Math.max(0.4, sliceDur),
@@ -3481,12 +3535,50 @@ export function generateAutoClipPlan(
     return false;
   };
 
-  const recordUsedSlice = (url: string, srcStart: number, srcEnd: number, slotOrderIdx: number) => {
+  const ensureVideoBuckets = (url: string, initStart: number, initEnd: number) => {
+    let bucket = sliceBucketsByUrl.get(url);
+    if (!bucket) {
+      bucket = {
+        counts: new Float32Array(SLICE_BUCKET_COUNT),
+        lastUsed: new Int32Array(SLICE_BUCKET_COUNT),
+        initStart,
+        initEnd: Math.max(initStart + 0.25, initEnd),
+      };
+      sliceBucketsByUrl.set(url, bucket);
+    }
+    return bucket;
+  };
+
+  const recordUsedSlice = (
+    url: string,
+    srcStart: number,
+    srcEnd: number,
+    slotOrderIdx: number,
+    initStart?: number,
+    initEnd?: number
+  ) => {
     const list = usedSlicesByUrl.get(url) ?? [];
     list.push([srcStart, srcEnd]);
     usedSlicesByUrl.set(url, list);
     usageCountByUrl.set(url, (usageCountByUrl.get(url) ?? 0) + 1);
     lastSlotIdxByUrl.set(url, slotOrderIdx);
+    const idxs = placedIndicesByUrl.get(url) ?? [];
+    idxs.push(slotOrderIdx);
+    placedIndicesByUrl.set(url, idxs);
+
+    const bStart = initStart ?? srcStart;
+    const bEnd = initEnd ?? Math.max(bStart + 0.25, srcEnd);
+    const bucket = ensureVideoBuckets(url, bStart, bEnd);
+    const span = Math.max(0.25, bucket.initEnd - bucket.initStart);
+    const seq = ++placementSeq;
+    const normLo = Math.max(0, Math.min(1, (srcStart - bucket.initStart) / span));
+    const normHi = Math.max(normLo, Math.min(1, (srcEnd - bucket.initStart) / span));
+    const lo = Math.max(0, Math.min(SLICE_BUCKET_COUNT - 1, Math.floor(normLo * SLICE_BUCKET_COUNT)));
+    const hi = Math.max(lo, Math.min(SLICE_BUCKET_COUNT - 1, Math.ceil(normHi * SLICE_BUCKET_COUNT) - 1));
+    for (let b = lo; b <= hi; b++) {
+      bucket.counts[b] += 1;
+      bucket.lastUsed[b] = seq;
+    }
   };
 
   const takeUnusedSlice = (
@@ -3499,6 +3591,9 @@ export function generateAutoClipPlan(
       usedImageUrls.add(entry.binItem.url);
       usageCountByUrl.set(entry.binItem.url, (usageCountByUrl.get(entry.binItem.url) ?? 0) + 1);
       lastSlotIdxByUrl.set(entry.binItem.url, slotOrderIdx);
+      const idxs = placedIndicesByUrl.get(entry.binItem.url) ?? [];
+      idxs.push(slotOrderIdx);
+      placedIndicesByUrl.set(entry.binItem.url, idxs);
       return { sourceStartSec: 0, rate: 1.0 };
     }
 
@@ -3582,7 +3677,7 @@ export function generateAutoClipPlan(
       minSliceKeep
     );
     urlFreeRanges.set(entry.binItem.url, updated);
-    recordUsedSlice(entry.binItem.url, srcStart, srcEnd, slotOrderIdx);
+    recordUsedSlice(entry.binItem.url, srcStart, srcEnd, slotOrderIdx, entry.initStart, entry.initEnd);
 
     return { sourceStartSec: srcStart, rate: entry.rate };
   };
@@ -3598,6 +3693,9 @@ export function generateAutoClipPlan(
     if (entry.kind === 'image') {
       usageCountByUrl.set(entry.binItem.url, (usageCountByUrl.get(entry.binItem.url) ?? 0) + 1);
       lastSlotIdxByUrl.set(entry.binItem.url, slotOrderIdx);
+      const idxs = placedIndicesByUrl.get(entry.binItem.url) ?? [];
+      idxs.push(slotOrderIdx);
+      placedIndicesByUrl.set(entry.binItem.url, idxs);
       return { sourceStartSec: 0, rate: 1.0 };
     }
     const mediaNeed = dur * entry.rate;
@@ -3617,7 +3715,9 @@ export function generateAutoClipPlan(
         entry.binItem.url,
         srcStart,
         Number((srcStart + Math.min(mediaNeed, entry.initEnd - srcStart)).toFixed(2)),
-        slotOrderIdx
+        slotOrderIdx,
+        entry.initStart,
+        entry.initEnd
       );
       return { sourceStartSec: srcStart, rate: entry.rate };
     }
@@ -3625,32 +3725,73 @@ export function generateAutoClipPlan(
     const clampedNeed = Math.min(mediaNeed, availSpan);
     const maxOff = Math.max(0, availSpan - clampedNeed);
     const prior = usedSlicesByUrl.get(entry.binItem.url) ?? [];
+    const bucket = ensureVideoBuckets(entry.binItem.url, entry.initStart, entry.initEnd);
     let bestOffset = Number((entry.initStart + rng() * maxOff).toFixed(2));
-    if (maxOff > 0.2 && prior.length > 0) {
-      const cands: number[] = [entry.initStart, Number((entry.initStart + maxOff).toFixed(2))];
+    if (maxOff > 0.2) {
+      const cands: number[] = [];
+      const GRID_STEPS = 24;
+      for (let g = 0; g <= GRID_STEPS; g++) {
+        cands.push(Number((entry.initStart + (g / GRID_STEPS) * maxOff).toFixed(2)));
+      }
       for (const [ps, pe] of prior) {
         if (ps - clampedNeed >= entry.initStart) cands.push(Number((ps - clampedNeed - 0.02).toFixed(2)));
         if (pe + 0.02 <= entry.initStart + maxOff) cands.push(Number((pe + 0.02).toFixed(2)));
       }
-      for (let k = 0; k < 10; k++) {
-        cands.push(
-          Number((entry.initStart + (k === 0 ? rng() : (k - 1 + rng()) / 9) * maxOff).toFixed(2))
-        );
-      }
-      let bestScore = -Infinity;
+      const lastSlice = prior.length > 0 ? prior[prior.length - 1] : null;
+      const span = Math.max(0.25, bucket.initEnd - bucket.initStart);
+
+      let bestAvgCount = Infinity;
+      let bestMaxCount = Infinity;
+      let bestAvgLast = Infinity;
+      let bestRecencyDist = -Infinity;
+      let bestTie = -Infinity;
+
       for (const rawCand of cands) {
         const cand = Number(
           Math.max(entry.initStart, Math.min(entry.initStart + maxOff, rawCand)).toFixed(2)
         );
         const candEnd = cand + clampedNeed;
-        let minOverlapDist = Infinity;
-        for (const [ps, pe] of prior) {
-          const dist =
-            candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : -Math.min(candEnd - ps, pe - cand);
-          if (dist < minOverlapDist) minOverlapDist = dist;
+        const normLo = Math.max(0, Math.min(1, (cand - bucket.initStart) / span));
+        const normHi = Math.max(normLo, Math.min(1, (candEnd - bucket.initStart) / span));
+        const lo = Math.max(0, Math.min(SLICE_BUCKET_COUNT - 1, Math.floor(normLo * SLICE_BUCKET_COUNT)));
+        const hi = Math.max(lo, Math.min(SLICE_BUCKET_COUNT - 1, Math.ceil(normHi * SLICE_BUCKET_COUNT) - 1));
+        let sumCount = 0;
+        let maxCount = 0;
+        let sumLast = 0;
+        const bLen = hi - lo + 1;
+        for (let b = lo; b <= hi; b++) {
+          const c = bucket.counts[b];
+          sumCount += c;
+          if (c > maxCount) maxCount = c;
+          sumLast += bucket.lastUsed[b];
         }
-        if (minOverlapDist > bestScore) {
-          bestScore = minOverlapDist;
+        const avgCount = sumCount / bLen;
+        const avgLast = sumLast / bLen;
+        const recencyDist = lastSlice
+          ? candEnd <= lastSlice[0]
+            ? lastSlice[0] - candEnd
+            : cand >= lastSlice[1]
+              ? cand - lastSlice[1]
+              : -Math.min(candEnd - lastSlice[0], lastSlice[1] - cand)
+          : maxOff;
+        const tie = rng();
+
+        const better =
+          avgCount < bestAvgCount - 0.05 ||
+          (Math.abs(avgCount - bestAvgCount) <= 0.05 &&
+            (maxCount < bestMaxCount - 0.05 ||
+              (Math.abs(maxCount - bestMaxCount) <= 0.05 &&
+                (avgLast < bestAvgLast - 0.5 ||
+                  (Math.abs(avgLast - bestAvgLast) <= 0.5 &&
+                    (recencyDist > bestRecencyDist + 0.15 ||
+                      (Math.abs(recencyDist - bestRecencyDist) <= 0.15 && tie > bestTie)))))));
+
+        if (better) {
+          bestAvgCount = avgCount;
+          bestMaxCount = maxCount;
+          bestAvgLast = avgLast;
+          bestRecencyDist = recencyDist;
+          bestTie = tie;
           bestOffset = cand;
         }
       }
@@ -3659,7 +3800,9 @@ export function generateAutoClipPlan(
       entry.binItem.url,
       bestOffset,
       Number((bestOffset + Math.min(mediaNeed, entry.initEnd - bestOffset)).toFixed(2)),
-      slotOrderIdx
+      slotOrderIdx,
+      entry.initStart,
+      entry.initEnd
     );
     return { sourceStartSec: bestOffset, rate: entry.rate };
   };
@@ -3695,9 +3838,9 @@ export function generateAutoClipPlan(
     } else if (mode === 'auto_rhythm' || rhythm === 'auto') {
       if (rhythm === 'smooth' || slot.energy < 0.38) {
         trType = 'crossfade';
-      } else if (slot.energy >= 0.60 || slot.cutImpact >= 0.60) {
+      } else if (slot.energy >= 0.45 || slot.cutImpact >= 0.52) {
         trType =
-          !isImage && slot.cutImpact >= 0.70 && slotIdx % 3 === 2 ? 'zoom_cross' : 'cut';
+          !isImage && slot.cutImpact >= 0.72 && slotIdx % 4 === 2 ? 'zoom_cross' : 'cut';
       } else if (
         asset.binItem.defaultTransitionOut &&
         asset.binItem.defaultTransitionOut !== 'crossfade' &&
@@ -3928,20 +4071,46 @@ export function generateAutoClipPlan(
   const filterByMixedPriority = (
     list: PoolAsset[],
     slot: MusicalSlot,
-    strictVideoOnLongSlots: boolean
+    strictVideoOnLongSlots: boolean,
+    ctx: {
+      prevUrl?: string | null;
+      nextUrl?: string | null;
+      isFallbackPass?: boolean;
+      reserveShortForPhotos?: boolean;
+    } = {}
   ): PoolAsset[] => {
     if (!hasMixedPool || list.length === 0) return list;
+    const basePool =
+      avoidAdjacentRepeat && list.length > 1 && (ctx.prevUrl || ctx.nextUrl)
+        ? list.filter((e) => e.binItem.url !== ctx.prevUrl && e.binItem.url !== ctx.nextUrl)
+        : list;
+    const activeList = basePool.length > 0 ? basePool : list;
+
     if (isShortBeatSlot(slot)) {
-      const photos = list.filter((e) => e.kind === 'image');
-      return photos.length > 0 ? photos : list;
+      const photos = activeList.filter((e) => e.kind === 'image');
+      if (photos.length > 0) return photos;
+      if (ctx.reserveShortForPhotos) return [];
+      const fallbackPhotos = list.filter((e) => e.kind === 'image');
+      return fallbackPhotos.length > 0 ? fallbackPhotos : activeList;
     }
-    const videos = list.filter((e) => e.kind === 'video');
+
+    const videos = activeList.filter((e) => e.kind === 'video');
     if (videos.length > 0) return videos;
-    return strictVideoOnLongSlots ? [] : list;
+    // In fallback pass, if only 1 video exists in the pool, alternate cleanly with an image
+    // on long slots rather than repeating the same video back-to-back.
+    if (ctx.isFallbackPass && avoidAdjacentRepeat && poolVideos.length <= 1) {
+      const nonAdjImages = activeList.filter((e) => e.kind === 'image');
+      if (nonAdjImages.length > 0) return nonAdjImages;
+    }
+    if (!strictVideoOnLongSlots) {
+      const allVideos = list.filter((e) => e.kind === 'video');
+      if (allVideos.length > 0) return allVideos;
+    }
+    return strictVideoOnLongSlots ? [] : activeList;
   };
 
   // Strictly prioritize unused files first (minUsage exact equality, zero +1 shortcut),
-  // and maximize distance since last appearance to prevent quick back-and-forth looping.
+  // and maximize distance since nearest timeline placement to prevent back-and-forth looping.
   const pickShuffledAsset = (
     eligible: PoolAsset[],
     slot: MusicalSlot,
@@ -3968,12 +4137,10 @@ export function generateAutoClipPlan(
     const poolToPick = nonPingPong.length > 0 ? nonPingPong : poolLeast;
 
     if (minUsage > 0 && poolToPick.length > 1) {
-      // Maximize cooldown gap since this source file last appeared
-      const cooled = [...poolToPick].sort((a, b) => {
-        const lastA = lastSlotIdxByUrl.get(a.binItem.url) ?? -999;
-        const lastB = lastSlotIdxByUrl.get(b.binItem.url) ?? -999;
-        return lastA - lastB;
-      });
+      // Maximize slot-index cooldown gap against EVERY existing placement of this source file
+      const cooled = [...poolToPick].sort(
+        (a, b) => getMinSlotDist(b.binItem.url, slotIdx) - getMinSlotDist(a.binItem.url, slotIdx)
+      );
       const topCooled = cooled.slice(0, Math.max(1, Math.ceil(cooled.length * 0.5)));
       return topCooled[Math.floor(rng() * topCooled.length)];
     }
@@ -3994,7 +4161,6 @@ export function generateAutoClipPlan(
       return topHalf[Math.floor(rng() * topHalf.length)];
     }
 
-    void slotIdx;
     return poolToPick[Math.floor(rng() * poolToPick.length)];
   };
 
@@ -4007,7 +4173,7 @@ export function generateAutoClipPlan(
     while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
       const slot = workingSlots[sIdx];
       let rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
-      let eligible = filterByMixedPriority(rawEligible, slot, false);
+      let eligible = filterByMixedPriority(rawEligible, slot, false, { prevUrl: lastUrl });
       if (eligible.length === 0) {
         if (hasAnyUnusedFootage(splitFloor) && splitGuard < Math.max(300, workingSlots.length)) {
           const pair = splitSlotAtBeat(slot);
@@ -4018,7 +4184,7 @@ export function generateAutoClipPlan(
           }
         }
         rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
-        eligible = filterByMixedPriority(rawEligible, slot, false);
+        eligible = filterByMixedPriority(rawEligible, slot, false, { prevUrl: lastUrl });
       }
       if (eligible.length === 0) {
         break;
@@ -4034,7 +4200,7 @@ export function generateAutoClipPlan(
   }
 
   // Pass A (fillToTargetEnd === true): Showcase every unique source file first,
-  // reserving longer bar slots for videos and short beat hits for photos when mixed media is present.
+  // reserving longer bar slots for videos and keeping short beat punches for photos when mixed media is present.
   const binUrlById = new Map(pool.map((p) => [p.binItem.id, p.binItem.url]));
   const assigned: Array<AutoBeatSlicePlacement | null> = new Array(workingSlots.length).fill(null);
   let splitGuard = 0;
@@ -4053,7 +4219,7 @@ export function generateAutoClipPlan(
         (e) => (usageCountByUrl.get(e.binItem.url) ?? 0) === 0
       );
       unassignedIndices.sort((a, b) => {
-        if (anyUnusedLeft) {
+        if (anyUnusedLeft || poolVideos.length <= 2) {
           return a - b;
         }
         const diff = workingSlots[b].dur - workingSlots[a].dur;
@@ -4063,17 +4229,22 @@ export function generateAutoClipPlan(
 
       for (const idx of unassignedIndices) {
         const slot = workingSlots[idx];
+        const prevId = idx > 0 ? assigned[idx - 1]?.binItemId ?? null : null;
+        const nextId = idx + 1 < assigned.length ? assigned[idx + 1]?.binItemId ?? null : null;
+        const prev2Id = idx > 1 ? assigned[idx - 2]?.binItemId ?? null : null;
+        const next2Id = idx + 2 < assigned.length ? assigned[idx + 2]?.binItemId ?? null : null;
+        const prevUrl = prevId ? binUrlById.get(prevId) ?? null : null;
+        const nextUrl = nextId ? binUrlById.get(nextId) ?? null : null;
+        const prev2Url = prev2Id ? binUrlById.get(prev2Id) ?? null : null;
+        const next2Url = next2Id ? binUrlById.get(next2Id) ?? null : null;
+
         const rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, !allowUntrimmed, false));
-        const eligible = filterByMixedPriority(rawEligible, slot, !allowUntrimmed);
+        const eligible = filterByMixedPriority(rawEligible, slot, !allowUntrimmed, {
+          prevUrl,
+          nextUrl,
+          reserveShortForPhotos: hasMixedPool,
+        });
         if (eligible.length > 0) {
-          const prevId = idx > 0 ? assigned[idx - 1]?.binItemId ?? null : null;
-          const nextId = idx + 1 < assigned.length ? assigned[idx + 1]?.binItemId ?? null : null;
-          const prev2Id = idx > 1 ? assigned[idx - 2]?.binItemId ?? null : null;
-          const next2Id = idx + 2 < assigned.length ? assigned[idx + 2]?.binItemId ?? null : null;
-          const prevUrl = prevId ? binUrlById.get(prevId) ?? null : null;
-          const nextUrl = nextId ? binUrlById.get(nextId) ?? null : null;
-          const prev2Url = prev2Id ? binUrlById.get(prev2Id) ?? null : null;
-          const next2Url = next2Id ? binUrlById.get(next2Id) ?? null : null;
           const wouldForceAdjRepeat =
             avoidAdjacentRepeat &&
             pool.length > 1 &&
@@ -4110,7 +4281,7 @@ export function generateAutoClipPlan(
   }
 
   // Pass B: Exhaustion fallback ONLY after unique footage is depleted; maintains video priority on long slots
-  // and photo priority on short beat punches while keeping least-used & most-cooled files.
+  // and photo priority on short beat punches while keeping least-used, max-distance cooled files and 0 adjacent repeats.
   for (let i = 0; i < workingSlots.length; i++) {
     if (assigned[i] !== null) continue;
     const slot = workingSlots[i];
@@ -4126,14 +4297,22 @@ export function generateAutoClipPlan(
     let candidates: PoolAsset[] = [];
     for (const pt of [true, false]) {
       const fitting = pool.filter((e) => e.kind === 'image' || isTrimmedOk(e, slot.dur, pt));
-      const prioritized = filterByMixedPriority(fitting, slot, false);
+      const prioritized = filterByMixedPriority(fitting, slot, false, {
+        prevUrl,
+        nextUrl,
+        isFallbackPass: true,
+      });
       if (prioritized.length > 0) {
         candidates = prioritized;
         break;
       }
     }
     if (candidates.length === 0) {
-      candidates = filterByMixedPriority(pool, slot, false);
+      candidates = filterByMixedPriority(pool, slot, false, {
+        prevUrl,
+        nextUrl,
+        isFallbackPass: true,
+      });
     }
 
     const nonAdj = avoidAdjacentRepeat
@@ -4143,7 +4322,7 @@ export function generateAutoClipPlan(
     const minUsage = Math.min(...poolStage1.map((e) => usageCountByUrl.get(e.binItem.url) ?? 0));
     const leastUsed = poolStage1
       .filter((e) => (usageCountByUrl.get(e.binItem.url) ?? 0) === minUsage)
-      .sort((a, b) => (lastSlotIdxByUrl.get(a.binItem.url) ?? -999) - (lastSlotIdxByUrl.get(b.binItem.url) ?? -999));
+      .sort((a, b) => getMinSlotDist(b.binItem.url, i) - getMinSlotDist(a.binItem.url, i));
     const nonPingPong = leastUsed.filter(
       (e) => e.binItem.url !== prev2Url && e.binItem.url !== next2Url
     );
