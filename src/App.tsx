@@ -29,6 +29,7 @@ import {
 import {
   alignBeatGridToTime,
   analyzeAudioAtTime,
+  analyzeMusicalStructure,
   AutoClipGenerateConfig,
   buildMonoAudioData,
   clampManualClipMove,
@@ -658,6 +659,20 @@ export default function App() {
 
   const trackBeatGridRef = useRef(trackBeatGrid);
   trackBeatGridRef.current = trackBeatGrid;
+
+  const songStructure = useMemo(() => {
+    if (!audio || trackBeatGrid.beats.length < 2) return null;
+    const clipDuration = Math.max(0.5, config.trimEnd - config.trimStart);
+    const beatList = [0, ...trackBeatGrid.beats.filter((b) => b > 0.05 && b < clipDuration - 0.05)];
+    return analyzeMusicalStructure(
+      beatList,
+      config.trimStart,
+      clipDuration,
+      monoDataRef.current,
+      audio.sampleRate,
+      trackBeatGrid.downbeatOffset ?? 0
+    );
+  }, [audio, config.trimEnd, config.trimStart, trackBeatGrid]);
 
   useEffect(() => {
     lastMetronomeBeatRef.current = -1;
@@ -2381,6 +2396,7 @@ export default function App() {
         {
           mode: autoCfg.mode,
           rhythm: autoCfg.rhythm,
+          editorialProfile: autoCfg.editorialProfile,
           transitionStyle: autoCfg.transitionStyle,
           motionLevel: autoCfg.motionLevel,
           minClipSec: autoCfg.minClipSec,
@@ -2396,6 +2412,7 @@ export default function App() {
           hasAudio: Boolean(aud),
           monoData: monoDataRef.current,
           sampleRate: aud?.sampleRate,
+          variationSeed: autoCfg.variationSeed,
         }
       );
       if (placements.length === 0) {
@@ -2453,8 +2470,12 @@ export default function App() {
       setSelectedClipId(builtClips[0].id);
       setSelectedClipIds([builtClips[0].id]);
       setSelectedFxId(null);
-      if (cfg.slideshowMode !== 'manual') {
-        setConfig((prev) => ({ ...prev, slideshowMode: 'manual' }));
+      if (cfg.slideshowMode !== 'manual' || !cfg.beatCenteredTransitions) {
+        setConfig((prev) => ({
+          ...prev,
+          slideshowMode: 'manual',
+          beatCenteredTransitions: prev.beatCenteredTransitions ?? true,
+        }));
       }
       const focusLocal = isAppend ? startOffsetSec : 0;
       const focusAbs = (aud ? bounds.trimBase : 0) + focusLocal;
@@ -2485,6 +2506,40 @@ export default function App() {
       stopPlayback,
       trackBeatGrid,
     ]
+  );
+
+  const handleMoveBinItem = useCallback(
+    (binItemId: string, direction: -1 | 1) => {
+      const list = mediaBinRef.current;
+      const idx = list.findIndex((b) => b.id === binItemId);
+      if (idx < 0) return;
+      const targetIdx = idx + direction;
+      if (targetIdx < 0 || targetIdx >= list.length) return;
+      pushImmediateHistory();
+      const next = [...list];
+      const [moved] = next.splice(idx, 1);
+      next.splice(targetIdx, 0, moved);
+      setMediaBin(next);
+    },
+    [pushImmediateHistory]
+  );
+
+  const handleReorderBinItem = useCallback(
+    (sourceId: string, targetId: string, position: 'before' | 'after') => {
+      if (sourceId === targetId) return;
+      const list = mediaBinRef.current;
+      const srcIdx = list.findIndex((b) => b.id === sourceId);
+      const tgtIdx = list.findIndex((b) => b.id === targetId);
+      if (srcIdx < 0 || tgtIdx < 0) return;
+      pushImmediateHistory();
+      const next = [...list];
+      const [moved] = next.splice(srcIdx, 1);
+      const updatedTgtIdx = next.findIndex((b) => b.id === targetId);
+      const insertAt = position === 'after' ? updatedTgtIdx + 1 : updatedTgtIdx;
+      next.splice(Math.max(0, Math.min(next.length, insertAt)), 0, moved);
+      setMediaBin(next);
+    },
+    [pushImmediateHistory]
   );
 
   const handleRemoveBinItem = useCallback(
@@ -5466,6 +5521,8 @@ export default function App() {
               onAddAllBinToTimeline={handleAddAllBinToTimeline}
               onUpdateBinItem={handleUpdateBinItem}
               onCreateRandomBeatAutoClip={handleCreateRandomBeatAutoClip}
+              onMoveBinItem={handleMoveBinItem}
+              onReorderBinItem={handleReorderBinItem}
               onRemoveBinItem={handleRemoveBinItem}
               onClearBin={handleClearBin}
               onAddGeneratorScene={handleAddGeneratorScene}
@@ -5481,6 +5538,7 @@ export default function App() {
               onAutoBeatSyncClips={handleAutoBeatSyncClips}
               trackBpm={trackBeatGrid.bpm}
               trackBeatGrid={trackBeatGrid}
+              songStructure={songStructure}
               rawTrackBpm={rawTrackBeatGrid.exactBpm || rawTrackBeatGrid.bpm}
               currentTime={currentTime}
               onSetBeat1AtPlayhead={handleSetBeat1AtPlayhead}

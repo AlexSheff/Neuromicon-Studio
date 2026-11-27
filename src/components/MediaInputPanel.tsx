@@ -1,6 +1,8 @@
 import {
   Activity,
   ArrowLeftRight,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Download,
   Eye,
@@ -54,7 +56,9 @@ import {
   getDefaultBoundsForAutoClipRhythm,
   getNormalizedManualClipIntervals,
   getTimelineSpanSec,
+  MusicalSectionType,
   TrackBeatGrid,
+  TrackStructureAnalysis,
 } from '../utils/audioAnalyzer';
 import { GENERATOR_EFFECTS } from '../utils/presets';
 import { MediaPreviewModal } from './MediaPreviewModal';
@@ -84,6 +88,8 @@ interface MediaInputPanelProps {
     syncPlacedClips?: boolean
   ) => void;
   onCreateRandomBeatAutoClip: (cfg: AutoClipGenerateConfig) => void;
+  onMoveBinItem: (binItemId: string, direction: -1 | 1) => void;
+  onReorderBinItem: (sourceId: string, targetId: string, position: 'before' | 'after') => void;
   onRemoveBinItem: (binItemId: string) => void;
   onClearBin: () => void;
   onAddGeneratorScene: (
@@ -102,6 +108,7 @@ interface MediaInputPanelProps {
   onAutoBeatSyncClips: (mode?: BeatSyncMode, applyMotionAndTrans?: boolean) => void;
   trackBpm: number;
   trackBeatGrid: TrackBeatGrid;
+  songStructure: TrackStructureAnalysis | null;
   rawTrackBpm: number;
   currentTime: number;
   onSetBeat1AtPlayhead: () => void;
@@ -147,6 +154,8 @@ export function MediaInputPanel({
   onAddAllBinToTimeline,
   onUpdateBinItem,
   onCreateRandomBeatAutoClip,
+  onMoveBinItem,
+  onReorderBinItem,
   onRemoveBinItem,
   onClearBin,
   onAddGeneratorScene,
@@ -160,6 +169,7 @@ export function MediaInputPanel({
   onAutoBeatSyncClips,
   trackBpm,
   trackBeatGrid,
+  songStructure,
   rawTrackBpm,
   currentTime,
   onSetBeat1AtPlayhead,
@@ -195,8 +205,11 @@ export function MediaInputPanel({
   const [panelFileDragOver, setPanelFileDragOver] = useState(false);
   const [expandedBinId, setExpandedBinId] = useState<string | null>(null);
   const [previewBinId, setPreviewBinId] = useState<string | null>(null);
+  const [draggingBinId, setDraggingBinId] = useState<string | null>(null);
+  const [binDropTarget, setBinDropTarget] = useState<{ id: string; position: 'before' | 'after' } | null>(null);
   const [autoClipCfg, setAutoClipCfg] = useState<AutoClipGenerateConfig>(DEFAULT_AUTO_CLIP_CONFIG);
   const [autoSettingsOpen, setAutoSettingsOpen] = useState(false);
+  const [variationTake, setVariationTake] = useState(1);
   const [beatCalibOpen, setBeatCalibOpen] = useState(true);
   const tapHistoryRef = useRef<number[]>([]);
   const tapResetTimerRef = useRef<number | null>(null);
@@ -269,6 +282,15 @@ export function MediaInputPanel({
     }));
   };
 
+  const handleTriggerAutoClipGenerate = () => {
+    const nextSeed = ((variationTake * 2654435761) ^ Date.now()) >>> 0;
+    setVariationTake((prev) => prev + 1);
+    onCreateRandomBeatAutoClip({
+      ...autoClipCfg,
+      variationSeed: nextSeed,
+    });
+  };
+
   const presetLabel = (id: AutoClipPresetId): string => {
     switch (id) {
       case 'music_story':
@@ -279,6 +301,14 @@ export function MediaInputPanel({
         return t.autoPresetDynamicDrop;
       case 'cinema_trailer':
         return t.autoPresetCinemaTrailer;
+      case 'crescendo_arc':
+        return t.autoPresetCrescendo;
+      case 'hiphop_groove':
+        return t.autoPresetGroove;
+      case 'acoustic_breath':
+        return t.autoPresetAcoustic;
+      case 'shorts_viral':
+        return t.autoPresetViral;
       case 'story_order':
         return t.autoPresetStoryOrder;
       case 'remix_shuffle':
@@ -287,6 +317,42 @@ export function MediaInputPanel({
         return t.autoPresetSlowDream;
       case 'beat_flash':
         return t.autoPresetBeatFlash;
+    }
+  };
+
+  const sectionLabel = (secType: MusicalSectionType): string => {
+    switch (secType) {
+      case 'intro':
+        return t.sectionIntro;
+      case 'beatless':
+        return t.sectionBeatless;
+      case 'buildup':
+        return t.sectionBuildup;
+      case 'drop':
+        return t.sectionDrop;
+      case 'outro':
+        return t.sectionOutro;
+      case 'verse':
+      default:
+        return t.sectionVerse;
+    }
+  };
+
+  const sectionColorClass = (secType: MusicalSectionType): string => {
+    switch (secType) {
+      case 'intro':
+        return 'bg-sky-500/75';
+      case 'beatless':
+        return 'bg-indigo-500/80';
+      case 'buildup':
+        return 'bg-amber-400/85';
+      case 'drop':
+        return 'bg-rose-500/85';
+      case 'outro':
+        return 'bg-slate-400/75';
+      case 'verse':
+      default:
+        return 'bg-emerald-500/75';
     }
   };
 
@@ -893,11 +959,13 @@ export function MediaInputPanel({
                 <div className="space-y-2">
                   <p className="text-[10px] text-gray-400 leading-tight">{t.binDragHint}</p>
                   <div className="space-y-1.5">
-                    {mediaBin.map((asset) => {
+                    {mediaBin.map((asset, binIdx) => {
                       const placedClips = timelineClipsByUrl.get(asset.url) || [];
                       const isUsed = placedClips.length > 0;
                       const isSelectedAsset = Boolean(selectedClip && selectedClip.url === asset.url);
                       const isExpanded = expandedBinId === asset.id;
+                      const isDropBefore = binDropTarget?.id === asset.id && binDropTarget.position === 'before';
+                      const isDropAfter = binDropTarget?.id === asset.id && binDropTarget.position === 'after';
                       const maxV = Math.max(0.5, asset.videoDuration || asset.defaultDurationSec || 10);
                       return (
                         <div
@@ -905,14 +973,47 @@ export function MediaInputPanel({
                           draggable
                           onDragStart={(e) => {
                             e.dataTransfer.setData('application/x-neuromicon-bin-id', asset.id);
-                            e.dataTransfer.effectAllowed = 'copy';
+                            e.dataTransfer.effectAllowed = 'copyMove';
+                            setDraggingBinId(asset.id);
+                          }}
+                          onDragEnd={() => {
+                            setDraggingBinId(null);
+                            setBinDropTarget(null);
+                          }}
+                          onDragOver={(e) => {
+                            if (!draggingBinId || draggingBinId === asset.id) return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const pos = e.clientY < rect.top + rect.height * 0.5 ? 'before' : 'after';
+                            if (binDropTarget?.id !== asset.id || binDropTarget?.position !== pos) {
+                              setBinDropTarget({ id: asset.id, position: pos });
+                            }
+                          }}
+                          onDrop={(e) => {
+                            if (!draggingBinId || draggingBinId === asset.id) return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const pos =
+                              binDropTarget?.id === asset.id ? binDropTarget.position : 'after';
+                            onReorderBinItem(draggingBinId, asset.id, pos);
+                            setDraggingBinId(null);
+                            setBinDropTarget(null);
                           }}
                           className={`rounded-md border transition-colors ${
-                            isSelectedAsset
-                              ? 'border-amber-400/80 bg-amber-500/10'
-                              : isUsed
-                                ? 'border-emerald-500/45 bg-emerald-950/15 hover:border-emerald-400/75'
-                                : 'border-[#262B38] bg-[#141821] hover:border-amber-500/55'
+                            draggingBinId === asset.id
+                              ? 'opacity-50 border-amber-400'
+                              : isSelectedAsset
+                                ? 'border-amber-400/80 bg-amber-500/10'
+                                : isUsed
+                                  ? 'border-emerald-500/45 bg-emerald-950/15 hover:border-emerald-400/75'
+                                  : 'border-[#262B38] bg-[#141821] hover:border-amber-500/55'
+                          } ${
+                            isDropBefore
+                              ? 'border-t-2 border-t-amber-400'
+                              : isDropAfter
+                                ? 'border-b-2 border-b-amber-400'
+                                : ''
                           }`}
                         >
                           <div className="p-1.5 flex items-center gap-1.5 cursor-grab active:cursor-grabbing group">
@@ -920,6 +1021,33 @@ export function MediaInputPanel({
                               className="w-3 h-3 text-gray-500 group-hover:text-amber-300 shrink-0"
                               aria-hidden="true"
                             />
+                            {mediaBin.length > 1 && (
+                              <div
+                                className="flex flex-col -my-0.5 shrink-0"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  disabled={binIdx === 0}
+                                  onClick={() => onMoveBinItem(asset.id, -1)}
+                                  aria-label={t.binMoveUpAria}
+                                  title={t.binMoveUpAria}
+                                  className="text-gray-500 hover:text-amber-300 disabled:opacity-25 disabled:pointer-events-none cursor-pointer leading-none p-0.2"
+                                >
+                                  <ChevronUp className="w-2.5 h-2.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={binIdx === mediaBin.length - 1}
+                                  onClick={() => onMoveBinItem(asset.id, 1)}
+                                  aria-label={t.binMoveDownAria}
+                                  title={t.binMoveDownAria}
+                                  className="text-gray-500 hover:text-amber-300 disabled:opacity-25 disabled:pointer-events-none cursor-pointer leading-none p-0.2"
+                                >
+                                  <ChevronDown className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            )}
                             <button
                               type="button"
                               onClick={(e) => {
@@ -1352,6 +1480,53 @@ export function MediaInputPanel({
                       </button>
                     </div>
 
+                    {/* Detected Musical Composition Bar */}
+                    {songStructure && songStructure.segments.length > 0 && audio && (
+                      <div className="space-y-1 rounded border border-[#262B38] bg-[#0B0D11]/80 px-2 py-1.5">
+                        <div className="flex items-center justify-between text-[9.5px] text-gray-400">
+                          <span>{t.songStructureTitle}</span>
+                          <span className="font-mono text-gray-500">
+                            {songStructure.segments.length}
+                          </span>
+                        </div>
+                        <div className="flex h-2 w-full rounded overflow-hidden bg-[#141821] gap-[1px]">
+                          {(() => {
+                            const totalSpan = Math.max(
+                              0.5,
+                              songStructure.segments[songStructure.segments.length - 1].endSec -
+                                songStructure.segments[0].startSec
+                            );
+                            return songStructure.segments.map((seg, sIdx) => {
+                              const pct = Math.max(
+                                2,
+                                ((seg.endSec - seg.startSec) / totalSpan) * 100
+                              );
+                              return (
+                                <div
+                                  key={`${seg.type}-${sIdx}`}
+                                  style={{ width: `${pct}%` }}
+                                  title={`${sectionLabel(seg.type)} (${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s)`}
+                                  className={`h-full ${sectionColorClass(seg.type)} transition-opacity hover:opacity-100 opacity-85`}
+                                />
+                              );
+                            });
+                          })()}
+                        </div>
+                        <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[9px] text-gray-400">
+                          {Array.from(new Set(songStructure.segments.map((s) => s.type))).map(
+                            (secType) => (
+                              <span key={secType} className="inline-flex items-center gap-1">
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full ${sectionColorClass(secType)}`}
+                                />
+                                {sectionLabel(secType)}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Quick Auto-Clip Presets */}
                     <div className="space-y-1">
                       <span className="text-[9.5px] uppercase tracking-wider text-gray-500 font-medium block">
@@ -1391,6 +1566,7 @@ export function MediaInputPanel({
                             setAutoClipCfg((prev) => ({
                               ...prev,
                               mode: m.id,
+                              editorialProfile: undefined,
                               shuffleOrder: m.id !== 'sequential',
                               presetId: undefined,
                             }))
@@ -1645,6 +1821,19 @@ export function MediaInputPanel({
                           </div>
                         </div>
 
+                        {/* Beat-Centered Transitions */}
+                        <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer pt-0.5">
+                          <span>{t.autoClipCenteredTransLabel}</span>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(config.beatCenteredTransitions)}
+                            onChange={(e) =>
+                              onUpdateConfig({ beatCenteredTransitions: e.target.checked })
+                            }
+                            className="accent-cyan-400 w-3.5 h-3.5 rounded cursor-pointer"
+                          />
+                        </label>
+
                         {/* Exclude ±5s Edges */}
                         <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer pt-0.5">
                           <span>{t.autoClipEdgeTrimLabel}</span>
@@ -1698,15 +1887,22 @@ export function MediaInputPanel({
 
                     <button
                       type="button"
-                      onClick={() => onCreateRandomBeatAutoClip(autoClipCfg)}
+                      onClick={handleTriggerAutoClipGenerate}
                       className="w-full py-1.5 px-3 rounded-md border border-amber-500/70 bg-amber-500/18 hover:bg-amber-500/28 text-xs font-semibold text-amber-200 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
                       <span>
                         {mediaItems.length > 0 && autoClipCfg.targetMode === 'append'
                           ? t.autoClipAppendBtn
-                          : t.binAutoClipBtn}
+                          : variationTake > 1
+                            ? t.autoClipVariantBtn
+                            : t.binAutoClipBtn}
                       </span>
+                      {variationTake > 1 && (
+                        <span className="px-1.5 py-0.2 rounded bg-[#0B0D11]/80 border border-amber-400/45 text-[9.5px] font-mono text-amber-300">
+                          {t.autoClipVariantBadge} #{variationTake}
+                        </span>
+                      )}
                     </button>
                   </div>
                 </div>

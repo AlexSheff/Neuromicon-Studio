@@ -287,6 +287,7 @@ export interface StudioConfig {
   minBeatCutSec: number;
   transitionType: SlideTransitionType;
   transitionDurationSec: number;
+  beatCenteredTransitions?: boolean;
   kenBurnsMotion: boolean;
   framingMode: MediaFramingMode;
   mediaFilter: MediaColorFilter;

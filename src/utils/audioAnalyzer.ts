@@ -2109,10 +2109,95 @@ export function resolveActiveSlideshowSlice(
   // Only trigger clip-to-clip transition when the outgoing clip actually touches the incoming clip
   const prevSeg =
     candidatePrev && currentSeg.startSec - candidatePrev.endSec <= 0.08 ? candidatePrev : null;
+  const candidateNext = segPos + 1 < segments.length ? segments[segPos + 1] : null;
+  const nextSeg =
+    candidateNext && candidateNext.startSec - currentSeg.endSec <= 0.08 ? candidateNext : null;
   const currentSegLen = Math.max(0.1, currentSeg.endSec - currentSeg.startSec);
   const prevSegLen = prevSeg ? Math.max(0.1, prevSeg.endSec - prevSeg.startSec) : currentSegLen;
   const timeInSlide = Math.max(0, localTime - currentSeg.startSec);
   const prevTimeInSlide = prevSeg ? Math.max(0, localTime - prevSeg.startSec) : 0;
+
+  const usePerClipTransition =
+    config.slideshowMode === 'custom_durations' || config.slideshowMode === 'manual';
+
+  const resolveBoundaryTransition = (
+    outgoingSeg: { clipIndex: number; startSec: number; endSec: number },
+    incomingSeg: { clipIndex: number; startSec: number; endSec: number }
+  ): { tType: SlideTransitionType; tDur: number } => {
+    const outClip = mediaItems[outgoingSeg.clipIndex];
+    const tType = usePerClipTransition && outClip ? outClip.transitionOut : config.transitionType;
+    if (tType === 'cut') return { tType, tDur: 0 };
+    const reqDur = Math.max(
+      0.05,
+      usePerClipTransition && outClip
+        ? outClip.transitionDurationSec
+        : config.transitionDurationSec
+    );
+    const outLen = Math.max(0.1, outgoingSeg.endSec - outgoingSeg.startSec);
+    const inLen = Math.max(0.1, incomingSeg.endSec - incomingSeg.startSec);
+    // Cap strictly below min(outLen, inLen) * 0.85 so adjacent centered halves (<= 0.425 each) never overlap.
+    const maxAllowed = Math.min(outLen * 0.85, inLen * 0.85);
+    if (maxAllowed < 0.05) return { tType, tDur: 0 };
+    return { tType, tDur: Math.min(reqDur, maxAllowed) };
+  };
+
+  if (config.beatCenteredTransitions) {
+    const inBoundary = prevSeg ? resolveBoundaryTransition(prevSeg, currentSeg) : { tType: 'cut' as SlideTransitionType, tDur: 0 };
+    const outBoundary = nextSeg ? resolveBoundaryTransition(currentSeg, nextSeg) : { tType: 'cut' as SlideTransitionType, tDur: 0 };
+    const inHalf = inBoundary.tDur * 0.5;
+    const outHalf = outBoundary.tDur * 0.5;
+
+    // 1. Pre-beat half [cut - outHalf .. cut]: blend current -> next, rawP goes 0 -> 0.5 at beat cut
+    const timeToCut = Math.max(0, currentSeg.endSec - localTime);
+    if (nextSeg && outHalf > 0 && timeToCut < outHalf) {
+      const nextSegLen = Math.max(0.1, nextSeg.endSec - nextSeg.startSec);
+      const elapsed = outHalf - timeToCut;
+      const rawP = Math.max(0, Math.min(1, elapsed / outBoundary.tDur));
+      const easedP = rawP * rawP * rawP * (rawP * (rawP * 6 - 15) + 10);
+      return {
+        activeIndex: nextSeg.clipIndex,
+        prevIndex: currentSeg.clipIndex,
+        transitionProgress: easedP,
+        transitionType: outBoundary.tType,
+        slideLocalTime: elapsed,
+        prevSlideLocalTime: inHalf + timeInSlide,
+        activeSegmentDuration: nextSegLen,
+        prevSegmentDuration: currentSegLen,
+      };
+    }
+
+    // 2. Post-beat half [cut .. cut + inHalf]: finish prev -> current, rawP goes 0.5 -> 1.0
+    if (prevSeg && inHalf > 0 && timeInSlide < inHalf) {
+      const prevInHalf =
+        segPos > 1 && prevSeg.startSec - segments[segPos - 2].endSec <= 0.08
+          ? resolveBoundaryTransition(segments[segPos - 2], prevSeg).tDur * 0.5
+          : 0;
+      const elapsed = inHalf + timeInSlide;
+      const rawP = Math.max(0, Math.min(1, elapsed / inBoundary.tDur));
+      const easedP = rawP * rawP * rawP * (rawP * (rawP * 6 - 15) + 10);
+      return {
+        activeIndex: currentSeg.clipIndex,
+        prevIndex: prevSeg.clipIndex,
+        transitionProgress: easedP,
+        transitionType: inBoundary.tType,
+        slideLocalTime: elapsed,
+        prevSlideLocalTime: prevInHalf + prevTimeInSlide,
+        activeSegmentDuration: currentSegLen,
+        prevSegmentDuration: prevSegLen,
+      };
+    }
+
+    return {
+      activeIndex: currentSeg.clipIndex,
+      prevIndex: null,
+      transitionProgress: 1,
+      transitionType: inBoundary.tType,
+      slideLocalTime: inHalf + timeInSlide,
+      prevSlideLocalTime: prevTimeInSlide,
+      activeSegmentDuration: currentSegLen,
+      prevSegmentDuration: prevSegLen,
+    };
+  }
 
   if (!prevSeg) {
     return {
@@ -2127,8 +2212,6 @@ export function resolveActiveSlideshowSlice(
     };
   }
 
-  const usePerClipTransition =
-    config.slideshowMode === 'custom_durations' || config.slideshowMode === 'manual';
   const prevClip = mediaItems[prevSeg.clipIndex];
   const tType =
     usePerClipTransition && prevClip ? prevClip.transitionOut : config.transitionType;
@@ -2359,10 +2442,68 @@ export type AutoClipPresetId =
   | 'cinema_flow'
   | 'dynamic_drop'
   | 'cinema_trailer'
+  | 'crescendo_arc'
+  | 'hiphop_groove'
+  | 'acoustic_breath'
+  | 'shorts_viral'
   | 'story_order'
   | 'remix_shuffle'
   | 'slow_dream'
   | 'beat_flash';
+
+export type AutoClipEditorialProfile =
+  | 'story_arc'
+  | 'cinema_flow'
+  | 'edm_drop'
+  | 'trailer'
+  | 'crescendo'
+  | 'groove'
+  | 'acoustic'
+  | 'viral_hook'
+  | 'sequential'
+  | 'remix'
+  | 'dream'
+  | 'beat_flash';
+
+export type MusicalSectionType =
+  | 'intro'
+  | 'verse'
+  | 'beatless'
+  | 'buildup'
+  | 'drop'
+  | 'outro';
+
+export interface MusicalSectionSegment {
+  type: MusicalSectionType;
+  startSec: number;
+  endSec: number;
+  beatStartIdx: number;
+  beatEndIdx: number;
+  avgEnergy: number;
+}
+
+export interface TrackStructureAnalysis {
+  beatSections: MusicalSectionType[];
+  segments: MusicalSectionSegment[];
+  phraseEnergy: number[];
+  onsetAccent: number[];
+  melodicNovelty: number[];
+  rhythmicPulse: number[];
+  subBassDrive: number[];
+  energySlope: number[];
+  dropImpactBeats: number[];
+  beatlessMelodicCues: number[];
+}
+
+export function createSeededRng(seed: number): () => number {
+  let state = (seed >>> 0) || 1;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 export function getDefaultBoundsForAutoClipRhythm(
   rhythm: AutoClipRhythm
@@ -2385,6 +2526,7 @@ export function getDefaultBoundsForAutoClipRhythm(
 
 export interface AutoClipGenerateConfig {
   presetId?: AutoClipPresetId;
+  editorialProfile?: AutoClipEditorialProfile;
   mode: AutoClipMode;
   rhythm: AutoClipRhythm;
   transitionStyle: AutoClipTransitionStyle;
@@ -2396,17 +2538,19 @@ export interface AutoClipGenerateConfig {
   avoidAdjacentRepeat: boolean;
   shuffleOrder: boolean;
   excludeEdgeSec?: number;
+  variationSeed?: number;
 }
 
 export interface AutoClipPresetDef {
   id: AutoClipPresetId;
-  config: Omit<AutoClipGenerateConfig, 'presetId' | 'targetMode' | 'targetDurationSec'>;
+  config: Omit<AutoClipGenerateConfig, 'presetId' | 'targetMode' | 'targetDurationSec' | 'variationSeed'>;
 }
 
 export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'music_story',
     config: {
+      editorialProfile: 'story_arc',
       mode: 'auto_rhythm',
       rhythm: 'auto',
       transitionStyle: 'musical',
@@ -2421,6 +2565,7 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'cinema_flow',
     config: {
+      editorialProfile: 'cinema_flow',
       mode: 'auto_rhythm',
       rhythm: 'smooth',
       transitionStyle: 'dissolve',
@@ -2435,12 +2580,13 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'dynamic_drop',
     config: {
+      editorialProfile: 'edm_drop',
       mode: 'auto_rhythm',
-      rhythm: 'beats_4',
+      rhythm: 'auto',
       transitionStyle: 'punchy',
       motionLevel: 'dynamic',
-      minClipSec: 2.0,
-      maxClipSec: 8.0,
+      minClipSec: 1.5,
+      maxClipSec: 8.5,
       avoidAdjacentRepeat: true,
       shuffleOrder: true,
       excludeEdgeSec: 5,
@@ -2449,20 +2595,82 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'cinema_trailer',
     config: {
+      editorialProfile: 'trailer',
       mode: 'auto_rhythm',
       rhythm: 'auto',
       transitionStyle: 'punchy',
       motionLevel: 'dynamic',
-      minClipSec: 2.0,
-      maxClipSec: 10.0,
+      minClipSec: 1.5,
+      maxClipSec: 11.0,
       avoidAdjacentRepeat: true,
       shuffleOrder: true,
       excludeEdgeSec: 5,
     },
   },
   {
+    id: 'crescendo_arc',
+    config: {
+      editorialProfile: 'crescendo',
+      mode: 'auto_rhythm',
+      rhythm: 'auto',
+      transitionStyle: 'musical',
+      motionLevel: 'gentle',
+      minClipSec: 1.5,
+      maxClipSec: 14.0,
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 5,
+    },
+  },
+  {
+    id: 'hiphop_groove',
+    config: {
+      editorialProfile: 'groove',
+      mode: 'auto_rhythm',
+      rhythm: 'beats_4',
+      transitionStyle: 'punchy',
+      motionLevel: 'gentle',
+      minClipSec: 1.5,
+      maxClipSec: 8.0,
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 5,
+    },
+  },
+  {
+    id: 'acoustic_breath',
+    config: {
+      editorialProfile: 'acoustic',
+      mode: 'auto_rhythm',
+      rhythm: 'smooth',
+      transitionStyle: 'dissolve',
+      motionLevel: 'gentle',
+      minClipSec: 3.5,
+      maxClipSec: 16.0,
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 5,
+    },
+  },
+  {
+    id: 'shorts_viral',
+    config: {
+      editorialProfile: 'viral_hook',
+      mode: 'auto_rhythm',
+      rhythm: 'beats_2',
+      transitionStyle: 'punchy',
+      motionLevel: 'dynamic',
+      minClipSec: 0.9,
+      maxClipSec: 4.5,
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 4,
+    },
+  },
+  {
     id: 'story_order',
     config: {
+      editorialProfile: 'sequential',
       mode: 'sequential',
       rhythm: 'beats_4',
       transitionStyle: 'dissolve',
@@ -2477,6 +2685,7 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'remix_shuffle',
     config: {
+      editorialProfile: 'remix',
       mode: 'random',
       rhythm: 'auto',
       transitionStyle: 'musical',
@@ -2491,6 +2700,7 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'slow_dream',
     config: {
+      editorialProfile: 'dream',
       mode: 'auto_rhythm',
       rhythm: 'smooth',
       transitionStyle: 'dissolve',
@@ -2505,6 +2715,7 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
   {
     id: 'beat_flash',
     config: {
+      editorialProfile: 'beat_flash',
       mode: 'random',
       rhythm: 'beats_1',
       transitionStyle: 'cuts_only',
@@ -2520,6 +2731,7 @@ export const AUTO_CLIP_PRESETS: AutoClipPresetDef[] = [
 
 export const DEFAULT_AUTO_CLIP_CONFIG: AutoClipGenerateConfig = {
   presetId: 'music_story',
+  editorialProfile: 'story_arc',
   mode: 'auto_rhythm',
   rhythm: 'auto',
   transitionStyle: 'musical',
@@ -2544,6 +2756,7 @@ export interface AutoBeatSlicePlacement {
   scaleStart: number;
   scaleEnd: number;
 }
+
 
 /**
  * Computes a smoothed normalized energy curve [0..1] aligned to each beat index
@@ -2794,15 +3007,319 @@ function subtractUsedIntervals(
 }
 
 /**
- * Generates an editorial beat- and melody-aligned montage in one of 3 user-selectable modes:
- * - `auto_rhythm`: analyzes phrase energy, beat transients, and harmonic/melodic shifts so
- *   calm passages dissolve smoothly and rhythmic/melodic turns cut cleanly on real beats.
- * - `sequential`: follows Media Library order chronologically without jumps.
- * - `random`: non-repeating random selection across unused images and non-overlapping
- *   video intervals without back-to-back source repeats.
- *
- * Strictly enforces `<= maxTimelineSec` when `hasAudio` is true, and when `fillToTargetEnd`
- * is enabled extends cleanly all the way to `targetLimit` without leaving bare trailing music.
+ * Analyzes musical macro-structure along aligned beats: detects quiet intros,
+ * no-beat ambient/breakdown pockets ('beatless'), rising crescendos/buildups ('buildup'),
+ * high-impact drop/chorus sections ('drop'), steady grooves ('verse'), and soft endings ('outro').
+ */
+export function analyzeMusicalStructure(
+  beatTimes: number[],
+  trimStart: number,
+  targetLimit: number,
+  monoData?: Float32Array,
+  sampleRate?: number,
+  barAnchorIdx = 0
+): TrackStructureAnalysis {
+  const count = beatTimes.length;
+  const empty: TrackStructureAnalysis = {
+    beatSections: [],
+    segments: [],
+    phraseEnergy: [],
+    onsetAccent: [],
+    melodicNovelty: [],
+    rhythmicPulse: [],
+    subBassDrive: [],
+    energySlope: [],
+    dropImpactBeats: [],
+    beatlessMelodicCues: [],
+  };
+  if (count === 0) return empty;
+
+  const phraseEnergy = computePhraseEnergyCurve(
+    beatTimes,
+    trimStart,
+    targetLimit,
+    monoData,
+    sampleRate
+  );
+  const { onsetAccent, melodicNovelty } = computeBeatMusicalAccents(
+    beatTimes,
+    trimStart,
+    monoData,
+    sampleRate
+  );
+
+  const rhythmicPulse = new Array<number>(count).fill(0.5);
+  const subBassDrive = new Array<number>(count).fill(0.5);
+  const hasAudioSignal = Boolean(monoData && monoData.length > 0 && sampleRate && sampleRate > 0);
+
+  if (hasAudioSignal && monoData && sampleRate) {
+    const totalSamples = monoData.length;
+    const rawPulse = new Array<number>(count).fill(0);
+    const rawSub = new Array<number>(count).fill(0);
+    const lowAlpha = Math.min(0.45, Math.max(0.03, (2 * Math.PI * 145) / sampleRate));
+
+    for (let i = 0; i < count; i++) {
+      const bt = beatTimes[i];
+      const nextBt =
+        i + 1 < count
+          ? beatTimes[i + 1]
+          : bt + (i > 0 ? beatTimes[i] - beatTimes[i - 1] : 0.5);
+      const sBeat = Math.max(0, Math.min(totalSamples - 1, Math.floor((trimStart + bt) * sampleRate)));
+      const sPre0 = Math.max(0, sBeat - Math.floor(sampleRate * 0.02));
+      const sPost1 = Math.min(totalSamples, sBeat + Math.floor(sampleRate * 0.065));
+      const sBody0 = Math.min(totalSamples - 1, sBeat + Math.floor(sampleRate * 0.095));
+      const sBody1 = Math.max(
+        sBody0 + 1,
+        Math.min(totalSamples, Math.floor((trimStart + nextBt) * sampleRate) - Math.floor(sampleRate * 0.02))
+      );
+
+      let atkSq = 0;
+      let atkN = 0;
+      let lp = 0;
+      let lpSq = 0;
+      const stepA = Math.max(1, Math.floor((sPost1 - sPre0) / 140));
+      for (let s = sPre0; s < sPost1; s += stepA) {
+        const v = monoData[s];
+        atkSq += v * v;
+        lp += lowAlpha * (v - lp);
+        lpSq += lp * lp;
+        atkN++;
+      }
+
+      let bodySq = 0;
+      let bodyN = 0;
+      const stepB = Math.max(1, Math.floor((sBody1 - sBody0) / 140));
+      for (let s = sBody0; s < sBody1; s += stepB) {
+        const v = monoData[s];
+        bodySq += v * v;
+        bodyN++;
+      }
+
+      const atkRms = Math.sqrt(atkSq / Math.max(1, atkN));
+      const bodyRms = Math.sqrt(bodySq / Math.max(1, bodyN));
+      const ratio = atkRms / Math.max(0.008, bodyRms);
+      // Kick/snare pulse combines attack transient strength with sharp attack-over-sustain contrast
+      rawPulse[i] = atkRms * 0.52 + Math.max(0, ratio - 0.85) * 0.14 + (onsetAccent[i] ?? 0) * 0.25;
+      rawSub[i] = Math.sqrt(lpSq / Math.max(1, atkN));
+    }
+
+    const normPulse = normalizeScores01(rawPulse);
+    const normSub = normalizeScores01(rawSub);
+    for (let i = 0; i < count; i++) {
+      let accP = 0;
+      let accS = 0;
+      let w = 0;
+      for (let k = -1; k <= 1; k++) {
+        const j = i + k;
+        if (j >= 0 && j < count) {
+          const wt = k === 0 ? 2 : 1;
+          accP += normPulse[j] * wt;
+          accS += normSub[j] * wt;
+          w += wt;
+        }
+      }
+      rhythmicPulse[i] = w > 0 ? accP / w : 0.5;
+      subBassDrive[i] = w > 0 ? accS / w : 0.5;
+    }
+  } else {
+    for (let i = 0; i < count; i++) {
+      const e = phraseEnergy[i] ?? 0.5;
+      rhythmicPulse[i] = Math.max(0.15, Math.min(0.95, e * 0.85 + (((i - barAnchorIdx) % 4 + 4) % 4 === 0 ? 0.15 : 0)));
+      subBassDrive[i] = e;
+    }
+  }
+
+  // Per-beat smoothed energy slope over +/- 3..4 beats to catch slowdowns & crescendos cleanly
+  const energySlope = new Array<number>(count).fill(0);
+  for (let i = 0; i < count; i++) {
+    const back = Math.max(0, i - 3);
+    const fwd = Math.min(count - 1, i + 3);
+    const span = Math.max(1, fwd - back);
+    energySlope[i] = ((phraseEnergy[fwd] ?? 0.5) - (phraseEnergy[back] ?? 0.5)) / span;
+  }
+
+  // Raw per-beat label classification
+  const totalDur = Math.max(1, beatTimes[count - 1] - beatTimes[0]);
+  const isShort = totalDur < 26;
+  const rawSections: MusicalSectionType[] = new Array(count).fill('verse');
+
+  for (let i = 0; i < count; i++) {
+    const bt = beatTimes[i];
+    const progress = (bt - beatTimes[0]) / totalDur;
+    const e = phraseEnergy[i] ?? 0.5;
+    const pulse = rhythmicPulse[i] ?? 0.5;
+    const bass = subBassDrive[i] ?? 0.5;
+    const slope = energySlope[i] ?? 0;
+    const fwdIdx = Math.min(count - 1, i + (isShort ? 3 : 6));
+    const fwdEnergy = phraseEnergy[fwdIdx] ?? e;
+    const fwdPulse = rhythmicPulse[fwdIdx] ?? pulse;
+
+    if (progress <= (isShort ? 0.24 : 0.16) && e < 0.56 && (pulse < 0.55 || e < 0.42)) {
+      rawSections[i] = 'intro';
+    } else if (progress >= (isShort ? 0.76 : 0.84) && e < 0.54 && slope <= 0.01) {
+      rawSections[i] = 'outro';
+    } else if (
+      hasAudioSignal &&
+      ((pulse < 0.24 && bass < 0.34) || (e < 0.26 && pulse < 0.35))
+    ) {
+      // Quiet or beatless breakdown / ambient vocal pocket
+      rawSections[i] = 'beatless';
+    } else if (
+      ((slope >= 0.032 && fwdEnergy - e >= 0.14 && fwdEnergy >= 0.58 && e < 0.78) ||
+        (slope >= 0.02 && fwdPulse - pulse >= 0.42 && pulse < 0.45)) &&
+      fwdPulse >= 0.52
+    ) {
+      rawSections[i] = 'buildup';
+    } else if (
+      (e >= 0.68 && (pulse >= 0.32 || !hasAudioSignal)) ||
+      (e >= 0.58 && (pulse >= 0.45 || !hasAudioSignal)) ||
+      (pulse >= 0.62 && bass >= 0.55) ||
+      (pulse >= 0.72 && bass >= 0.42)
+    ) {
+      rawSections[i] = 'drop';
+    } else if (!hasAudioSignal && e < 0.35) {
+      rawSections[i] = progress < 0.3 ? 'intro' : progress > 0.7 ? 'outro' : 'beatless';
+    } else {
+      rawSections[i] = 'verse';
+    }
+  }
+
+  // Smoothing hysteresis so sections dwell cleanly for at least ~1-2 bars instead of flickering
+  const beatSections: MusicalSectionType[] = [...rawSections];
+  const radius = isShort ? 1 : 2;
+  for (let i = 0; i < count; i++) {
+    const counts = new Map<MusicalSectionType, number>();
+    for (let k = -radius; k <= radius; k++) {
+      const j = i + k;
+      if (j >= 0 && j < count) {
+        const label = rawSections[j];
+        counts.set(label, (counts.get(label) ?? 0) + (k === 0 ? 1.5 : 1));
+      }
+    }
+    let bestLabel = rawSections[i];
+    let bestW = -1;
+    counts.forEach((w, lbl) => {
+      if (w > bestW) {
+        bestW = w;
+        bestLabel = lbl;
+      }
+    });
+    beatSections[i] = bestLabel;
+  }
+
+  // Enforce minimum dwell run length (>= 4 beats on normal tracks, >= 2 on short tracks)
+  const minRunBeats = isShort ? 2 : 4;
+  let runStart = 0;
+  while (runStart < count) {
+    let runEnd = runStart + 1;
+    while (runEnd < count && beatSections[runEnd] === beatSections[runStart]) {
+      runEnd++;
+    }
+    const runLen = runEnd - runStart;
+    if (runLen < minRunBeats && runStart > 0 && runEnd < count) {
+      const prevType = beatSections[runStart - 1];
+      const nextType = beatSections[runEnd];
+      const replacement =
+        prevType === 'drop' || nextType === 'drop'
+          ? 'drop'
+          : beatSections[runStart] === 'beatless'
+            ? beatSections[runStart]
+            : prevType;
+      for (let k = runStart; k < runEnd; k++) {
+        beatSections[k] = replacement;
+      }
+    }
+    runStart = runEnd;
+  }
+
+  // Group into contiguous segments
+  const segments: MusicalSectionSegment[] = [];
+  let segStart = 0;
+  while (segStart < count) {
+    let segEnd = segStart + 1;
+    while (segEnd < count && beatSections[segEnd] === beatSections[segStart]) {
+      segEnd++;
+    }
+    let sumE = 0;
+    for (let k = segStart; k < segEnd; k++) {
+      sumE += phraseEnergy[k] ?? 0.5;
+    }
+    const avgSecEnd =
+      segEnd < count
+        ? beatTimes[segEnd]
+        : Math.max(beatTimes[segEnd - 1] + 0.5, targetLimit);
+    segments.push({
+      type: beatSections[segStart],
+      startSec: Number(beatTimes[segStart].toFixed(3)),
+      endSec: Number(avgSecEnd.toFixed(3)),
+      beatStartIdx: segStart,
+      beatEndIdx: segEnd - 1,
+      avgEnergy: Number((sumE / Math.max(1, segEnd - segStart)).toFixed(3)),
+    });
+    segStart = segEnd;
+  }
+
+  // Detect true drop impact beats & beatless melodic cues
+  const dropImpactBeats: number[] = [];
+  for (let i = 1; i < count; i++) {
+    const prevSec = beatSections[i - 1];
+    const curSec = beatSections[i];
+    const dE = (phraseEnergy[i] ?? 0.5) - (phraseEnergy[Math.max(0, i - 4)] ?? 0.5);
+    const dPulse = (rhythmicPulse[i] ?? 0.5) - (rhythmicPulse[Math.max(0, i - 3)] ?? 0.5);
+    const isDropEntry =
+      curSec === 'drop' && prevSec !== 'drop';
+    const isBarImpact =
+      ((i - barAnchorIdx) % 4 + 4) % 4 === 0 &&
+      curSec === 'drop' &&
+      (dE >= 0.22 || dPulse >= 0.28) &&
+      (onsetAccent[i] ?? 0) >= 0.62;
+    if (isDropEntry || isBarImpact) {
+      if (dropImpactBeats.length === 0 || i - dropImpactBeats[dropImpactBeats.length - 1] >= 4) {
+        dropImpactBeats.push(i);
+      }
+    }
+  }
+
+  const beatlessMelodicCues: number[] = [];
+  for (let i = 2; i < count - 2; i++) {
+    if (beatSections[i] !== 'beatless' && beatSections[i] !== 'intro' && beatSections[i] !== 'outro') {
+      continue;
+    }
+    const m = melodicNovelty[i] ?? 0;
+    const isLocalPeak =
+      m >= 0.52 &&
+      m >= (melodicNovelty[i - 1] ?? 0) &&
+      m >= (melodicNovelty[i + 1] ?? 0);
+    if (
+      isLocalPeak &&
+      (beatlessMelodicCues.length === 0 ||
+        i - beatlessMelodicCues[beatlessMelodicCues.length - 1] >= 4)
+    ) {
+      beatlessMelodicCues.push(i);
+    }
+  }
+
+  return {
+    beatSections,
+    segments,
+    phraseEnergy,
+    onsetAccent,
+    melodicNovelty,
+    rhythmicPulse,
+    subBassDrive,
+    energySlope,
+    dropImpactBeats,
+    beatlessMelodicCues,
+  };
+}
+
+/**
+ * Generates a composition-, beat-, melody-, and transition-aware montage:
+ * - Analyzes song structure (intro / beatless / buildup / drop / verse / outro) so
+ *   calm/beatless passages breathe on melodic chord changes, crescendos accelerate into
+ *   drop downbeats, and drops hit with rhythmic energy.
+ * - Budgets transition durations & video tail headroom per cut slot.
+ * - Uses `variationSeed` for genuinely distinct takes across regenerations.
  */
 export function generateAutoClipPlan(
   binItems: MediaBinItem[],
@@ -2813,6 +3330,7 @@ export function generateAutoClipPlan(
   options: {
     mode?: AutoClipMode;
     rhythm?: AutoClipRhythm;
+    editorialProfile?: AutoClipEditorialProfile;
     transitionStyle?: AutoClipTransitionStyle;
     motionLevel?: AutoClipMotionLevel;
     minClipSec?: number;
@@ -2828,6 +3346,7 @@ export function generateAutoClipPlan(
     hasAudio?: boolean;
     monoData?: Float32Array;
     sampleRate?: number;
+    variationSeed?: number;
     rng?: () => number;
   } = {}
 ): AutoBeatSlicePlacement[] {
@@ -2835,6 +3354,17 @@ export function generateAutoClipPlan(
   const mode: AutoClipMode = options.mode ?? 'auto_rhythm';
   const rawRhythm = options.rhythm ?? 'auto';
   const rhythm: Exclude<AutoClipRhythm, 'mixed'> = rawRhythm === 'mixed' ? 'auto' : rawRhythm;
+  const editorialProfile: AutoClipEditorialProfile =
+    options.editorialProfile ??
+    (mode === 'sequential'
+      ? 'sequential'
+      : mode === 'random'
+        ? rhythm === 'beats_1'
+          ? 'beat_flash'
+          : 'remix'
+        : rhythm === 'smooth'
+          ? 'cinema_flow'
+          : 'story_arc');
   const transitionStyle: AutoClipTransitionStyle = options.transitionStyle ?? 'musical';
   const motionLevel: AutoClipMotionLevel = options.motionLevel ?? 'gentle';
   const avoidAdjacentRepeat = options.avoidAdjacentRepeat ?? true;
@@ -2842,7 +3372,9 @@ export function generateAutoClipPlan(
   const fillToTargetEnd = options.fillToTargetEnd ?? false;
   const hasAudio = options.hasAudio ?? true;
   const excludeEdgeSec = Math.max(0, options.excludeEdgeSec ?? 5);
-  const rng = options.rng ?? Math.random;
+  const rng =
+    options.rng ??
+    (options.variationSeed !== undefined ? createSeededRng(options.variationSeed) : Math.random);
   const beatSec =
     beatGrid.beatSec > 0.2 && beatGrid.beatSec < 1.5 ? beatGrid.beatSec : 0.5;
   const startOffsetSec = Math.max(0, Number((options.startOffsetSec ?? 0).toFixed(3)));
@@ -3073,22 +3605,33 @@ export function generateAutoClipPlan(
     beatTimes.push(lastBeat);
   }
 
-  const phraseEnergy = computePhraseEnergyCurve(
+  const structure = analyzeMusicalStructure(
     beatTimes,
     trimStart,
     targetLimit,
     options.monoData,
-    options.sampleRate
+    options.sampleRate,
+    barAnchorIdx
   );
-  const { onsetAccent, melodicNovelty } = computeBeatMusicalAccents(
-    beatTimes,
-    trimStart,
-    options.monoData,
-    options.sampleRate
-  );
+  const {
+    phraseEnergy,
+    onsetAccent,
+    melodicNovelty,
+    beatSections,
+    dropImpactBeats,
+    beatlessMelodicCues,
+  } = structure;
+  const dropImpactSet = new Set(dropImpactBeats);
+  const beatlessCueSet = new Set(beatlessMelodicCues);
 
   const isDownbeatIndex = (idx: number): boolean =>
     ((idx - barAnchorIdx) % 4 + 4) % 4 === 0;
+
+  // Compute run-level personality dials once via RNG when shouldShuffle=true so every
+  // take/regeneration produces a noticeably different montage arc and pacing pattern.
+  const takeEnergyBias = shouldShuffle ? (rng() - 0.5) * 0.14 : 0;
+  const takeSyncopationPref = shouldShuffle ? rng() : 0.5;
+  const takeOpeningRoll = shouldShuffle ? rng() : 0.5;
 
   const recentSteps: number[] = [];
   let stage1SlotOrd = 0;
@@ -3098,27 +3641,50 @@ export function generateAutoClipPlan(
 
   const getBeatStepsForIndex = (
     bIdx: number
-  ): { steps: number[]; energy: number; hitStrength: number; allowShortPhotoPunch: boolean } => {
-    const energy = phraseEnergy[bIdx] ?? 0.5;
+  ): {
+    steps: number[];
+    energy: number;
+    hitStrength: number;
+    allowShortPhotoPunch: boolean;
+    section: MusicalSectionType;
+  } => {
+    const rawEnergy = phraseEnergy[bIdx] ?? 0.5;
+    const energy = Math.max(0, Math.min(1, rawEnergy + takeEnergyBias * 0.5));
+    const section = beatSections[bIdx] ?? 'verse';
     const curOnset = onsetAccent[bIdx] ?? 0.5;
     const curMelody = melodicNovelty[bIdx] ?? 0.4;
     const hitStrength = curOnset * 0.55 + curMelody * 0.45;
     const isShortSpan = totalSpanSec < 26;
     const prevStep1 = recentSteps.length > 0 ? recentSteps[recentSteps.length - 1] : 0;
     const prevStep2 = recentSteps.length > 1 ? recentSteps[recentSteps.length - 2] : 0;
+
+    // Locate next upcoming drop impact beat within the next maxClipBound window so long holds
+    // land right onto the drop downbeat instead of overshooting across it.
+    let nextDropDelta = -1;
+    for (let d = 1; d <= 20 && bIdx + d < beatTimes.length; d++) {
+      if (dropImpactSet.has(bIdx + d)) {
+        nextDropDelta = d;
+        break;
+      }
+    }
+    const isBuildupBeforeDrop =
+      section === 'buildup' || (nextDropDelta > 0 && nextDropDelta <= 8 && section !== 'drop');
+
     const allowShortPhotoPunch =
       hasMixedPool &&
       shouldShuffle &&
+      section !== 'beatless' &&
+      section !== 'intro' &&
       (rhythm === 'auto' || rhythm === 'beats_4') &&
       maxClipBound >= beatSec * 1.8 &&
       recentSteps.length > 0 &&
       prevStep1 >= 4 &&
       (isShortSpan
         ? hasRealAudioSignals
-          ? energy >= 0.50 || hitStrength >= 0.58 || (prevStep2 >= 4 && curOnset >= 0.5)
+          ? energy >= 0.5 || hitStrength >= 0.58 || (prevStep2 >= 4 && curOnset >= 0.5)
           : prevStep2 >= 4 || stage1SlotOrd % 2 === 1
         : rhythm === 'auto'
-          ? (prevStep2 >= 4 || energy >= 0.68) &&
+          ? (prevStep2 >= 4 || energy >= 0.65 || section === 'drop') &&
             (hasRealAudioSignals
               ? energy >= 0.48 || hitStrength >= 0.56 || stage1SlotOrd % 4 === 3
               : stage1SlotOrd % 2 === 1)
@@ -3128,49 +3694,114 @@ export function generateAutoClipPlan(
               : stage1SlotOrd % 3 === 2));
 
     let preferredOrder: number[];
+    const effectiveRhythm =
+      mode === 'random' && rhythm === 'auto' && takeSyncopationPref > 0.6
+        ? 'beats_4'
+        : rhythm;
+
     if (rhythm === 'beats_1') {
       preferredOrder = beatSec < 0.44 ? [2, 1] : [1, 2];
     } else if (rhythm === 'beats_2') {
-      preferredOrder = beatSec < 0.48 ? [2, 4, 3, 1] : [2, 4, 1, 3];
-    } else if (rhythm === 'beats_4') {
+      if (editorialProfile === 'viral_hook' && bIdx < 6) {
+        preferredOrder = [2, 1, 3];
+      } else {
+        preferredOrder = beatSec < 0.48 ? [2, 4, 3, 1] : [2, 4, 1, 3];
+      }
+    } else if (effectiveRhythm === 'beats_4') {
       if (allowShortPhotoPunch) {
         preferredOrder = [2, 4, 6, 8];
+      } else if (
+        mode !== 'sequential' &&
+        (section === 'beatless' || section === 'intro' || section === 'outro')
+      ) {
+        preferredOrder = isShortSpan ? [8, 6, 4] : [12, 8, 16, 6];
       } else if (isShortSpan) {
         preferredOrder = [4, 6, 8, 2];
+      } else if (editorialProfile === 'groove') {
+        preferredOrder = takeSyncopationPref > 0.5 ? [4, 6, 8, 2] : [6, 4, 8, 12];
       } else {
         preferredOrder = avgTargetPerFile >= 8 ? [12, 8, 6, 16, 4] : [8, 4, 12, 6, 16];
       }
-    } else if (rhythm === 'smooth') {
+    } else if (rhythm === 'smooth' || editorialProfile === 'acoustic' || editorialProfile === 'dream') {
       if (isShortSpan) {
         preferredOrder = energy > 0.72 ? [4, 6, 8] : [8, 12, 6, 4];
+      } else if (section === 'beatless' || section === 'intro' || section === 'outro') {
+        preferredOrder = editorialProfile === 'dream' ? [20, 24, 16, 12] : [16, 20, 12, 24];
       } else {
         preferredOrder = energy > 0.72 ? [12, 8, 16, 20] : [16, 24, 12, 20, 8];
       }
-    } else if (isShortSpan) {
-      // Compact preview/test span (< 26s): contrast calm holds vs crisp drop cuts cleanly
-      if (energy < 0.38) {
-        preferredOrder = [8, 6, 4];
-      } else if (energy < 0.66) {
-        preferredOrder = allowShortPhotoPunch ? [2, 4, 6] : [4, 6, 8];
+    } else if (editorialProfile === 'viral_hook' && beatTimes[bIdx] - startOffsetSec < 2.6) {
+      // Viral hook: snappy opening hook regardless of quiet intro before locking into music flow
+      preferredOrder = beatSec < 0.46 ? [2, 3, 4] : [2, 1, 4];
+    } else if (section === 'beatless' && !isShortSpan) {
+      // No-beat / breakdown / ambient pocket: hold calm wide shots until chord shift / drop entry
+      const slowCalm =
+        editorialProfile === 'crescendo' || editorialProfile === 'cinema_flow';
+      preferredOrder = slowCalm ? [16, 12, 8, 20] : [8, 12, 6, 4];
+    } else if (isBuildupBeforeDrop && section === 'buildup') {
+      // Crescendo / buildup: progressive staircase acceleration heading into drop
+      if (nextDropDelta > 0 && nextDropDelta <= 2) {
+        preferredOrder = [nextDropDelta, 2, 1];
+      } else if (nextDropDelta > 2 && nextDropDelta <= 4) {
+        preferredOrder = [2, nextDropDelta, 4];
       } else {
+        preferredOrder = isShortSpan ? [4, 2, 6] : [4, 2, 6, 8];
+      }
+    } else if (isShortSpan) {
+      if (section === 'intro' || section === 'outro' || section === 'beatless' || rawEnergy < 0.38) {
+        preferredOrder = [8, 6, 4];
+      } else if (section === 'drop' || rawEnergy >= 0.66) {
         preferredOrder = allowShortPhotoPunch ? [1, 2, 4] : [2, 4, 6];
+      } else {
+        preferredOrder = allowShortPhotoPunch ? [2, 4, 6] : [4, 6, 8];
       }
     } else {
-      // Standard full track ('auto'): mix varied bar & half-bar phrase lengths,
-      // carving 1-2 beat punch slots when mixed photos + videos are present.
+      // Full-track narrative phrasing adapted per section & editorial profile
+      const isSlowEditorial =
+        editorialProfile === 'crescendo' || editorialProfile === 'cinema_flow';
       if (allowShortPhotoPunch) {
-        preferredOrder = energy >= 0.68 && beatSec >= 0.45 ? [2, 1, 4, 6] : [2, 4, 6, 8];
-      } else if (energy < 0.36) {
-        preferredOrder = avgTargetPerFile >= 9 ? [16, 12, 24, 8, 20] : [12, 16, 8, 20, 6];
-      } else if (energy < 0.64) {
-        preferredOrder = avgTargetPerFile >= 9 ? [8, 12, 6, 16, 4] : [8, 6, 12, 4, 16];
+        preferredOrder =
+          rawEnergy >= 0.68 && beatSec >= 0.45 ? [2, 1, 4, 6] : [2, 4, 6, 8];
+      } else if (section === 'intro') {
+        preferredOrder = isSlowEditorial
+          ? [16, 12, 8]
+          : hasRealAudioSignals && rawEnergy < 0.34
+            ? takeOpeningRoll > 0.5
+              ? [12, 8, 16, 6]
+              : [8, 12, 6, 16]
+            : [8, 6, 4, 12];
+      } else if (section === 'outro') {
+        preferredOrder = isSlowEditorial
+          ? [12, 16, 8, 20]
+          : hasRealAudioSignals && rawEnergy < 0.34
+            ? [12, 8, 16, 6]
+            : [8, 6, 12, 4];
+      } else if (section === 'drop') {
+        preferredOrder =
+          editorialProfile === 'edm_drop' || editorialProfile === 'trailer'
+            ? [4, 2, 6, 8]
+            : takeSyncopationPref > 0.55
+              ? [4, 6, 8, 2]
+              : [6, 4, 8, 12];
+      } else if (editorialProfile === 'crescendo') {
+        const trackProg = (beatTimes[bIdx] - startOffsetSec) / Math.max(1, totalSpanSec);
+        preferredOrder =
+          trackProg < 0.35 ? [12, 16, 8] : trackProg < 0.68 ? [8, 6, 12, 4] : [4, 6, 2, 8];
+      } else if (rawEnergy < 0.36) {
+        preferredOrder = isSlowEditorial
+          ? [12, 16, 8, 20]
+          : hasRealAudioSignals
+            ? [12, 8, 6, 16]
+            : [8, 6, 12, 4];
+      } else if (rawEnergy < 0.64) {
+        preferredOrder = avgTargetPerFile >= 9 ? [8, 6, 12, 4] : [6, 8, 4, 12];
       } else {
         preferredOrder = [4, 8, 6, 12];
       }
     }
 
     const effectiveMinBound = allowShortPhotoPunch
-      ? Math.min(minClipBound, beatSec >= 0.45 && energy >= 0.68 ? beatSec : beatSec * 2)
+      ? Math.min(minClipBound, beatSec >= 0.45 && rawEnergy >= 0.68 ? beatSec : beatSec * 2)
       : minClipBound;
     const minSteps = Math.max(1, Math.ceil(effectiveMinBound / beatSec - 0.05));
     const maxSteps = Math.max(minSteps, Math.floor(maxClipBound / beatSec + 0.05));
@@ -3178,8 +3809,14 @@ export function generateAutoClipPlan(
       new Set(preferredOrder.map((s) => Math.max(minSteps, Math.min(maxSteps, s))))
     );
     const candSet = new Set<number>(clampedPreferred);
+
+    // Ensure nextDropDelta can be landed directly without over-stretching short clips into giant holds
+    const maxDirectDropStep = isShortSpan ? Math.min(maxSteps, 8) : Math.min(maxSteps, 12);
+    if (nextDropDelta >= minSteps && nextDropDelta <= maxDirectDropStep && rhythm !== 'beats_1') {
+      candSet.add(nextDropDelta);
+    }
+
     if (enforceBarGrid) {
-      // Include 4-beat bar multiples and half-bar (2-beat pickup / 6-beat phrase) steps aligned to phase
       const phaseRem = ((bIdx - barAnchorIdx) % 4 + 4) % 4;
       const firstBarStep = phaseRem === 0 ? 4 : 4 - phaseRem;
       const barExtMax = isShortSpan ? Math.min(maxSteps, 8) : maxSteps;
@@ -3198,8 +3835,14 @@ export function generateAutoClipPlan(
     }
 
     let candidates = Array.from(candSet);
-    if (enforceBarGrid && !allowShortPhotoPunch && !(isShortSpan && energy >= 0.66 && rhythm === 'auto')) {
+    if (
+      enforceBarGrid &&
+      !allowShortPhotoPunch &&
+      section !== 'buildup' &&
+      !(isShortSpan && rawEnergy >= 0.66 && rhythm === 'auto')
+    ) {
       const barOrHalfBar = candidates.filter((s) => {
+        if (s === nextDropDelta) return true;
         const nextIdx = Math.min(beatTimes.length - 1, bIdx + s);
         const halfBar = ((nextIdx - barAnchorIdx) % 2 + 2) % 2 === 0;
         return isDownbeatIndex(nextIdx) || (s === 6 && halfBar);
@@ -3212,6 +3855,15 @@ export function generateAutoClipPlan(
     const isRigidBeatFlash = rhythm === 'beats_1';
     const hasCustomBarMode = rhythm !== 'auto' && rhythm !== 'smooth';
 
+    // Pre-draw tiny RNG jitter per candidate step when shouldShuffle is active so
+    // multiple regenerations genuinely vary cut rhythm without violating musical phrasing.
+    const jitterByStep = new Map<number, number>();
+    if (shouldShuffle && !isRigidBeatFlash && candidates.length > 1) {
+      for (const s of candidates) {
+        jitterByStep.set(s, (rng() - 0.5) * 0.24);
+      }
+    }
+
     candidates.sort((a, b) => {
       if (allowShortPhotoPunch) {
         const aShort = a <= 2;
@@ -3220,18 +3872,30 @@ export function generateAutoClipPlan(
       }
       const idxA = Math.min(beatTimes.length - 1, bIdx + a);
       const idxB = Math.min(beatTimes.length - 1, bIdx + b);
-      const musicalA = (onsetAccent[idxA] ?? 0.4) * 0.48 + (melodicNovelty[idxA] ?? 0.35) * 0.52;
-      const musicalB = (onsetAccent[idxB] ?? 0.4) * 0.48 + (melodicNovelty[idxB] ?? 0.35) * 0.52;
+      const musicalA =
+        (onsetAccent[idxA] ?? 0.4) * 0.48 +
+        (melodicNovelty[idxA] ?? 0.35) * 0.52 +
+        (dropImpactSet.has(idxA) ? 0.55 : beatlessCueSet.has(idxA) ? 0.25 : 0);
+      const musicalB =
+        (onsetAccent[idxB] ?? 0.4) * 0.48 +
+        (melodicNovelty[idxB] ?? 0.35) * 0.52 +
+        (dropImpactSet.has(idxB) ? 0.55 : beatlessCueSet.has(idxB) ? 0.25 : 0);
 
       const skipPenalty = (stepLen: number): number => {
-        if (hasCustomBarMode || stepLen <= Math.max(4, minSteps)) return 0;
+        if (hasCustomBarMode || stepLen <= Math.max(2, minSteps)) return 0;
+        if (nextDropDelta > 0 && stepLen > nextDropDelta) {
+          return 0.75; // Never overshoot an incoming drop impact!
+        }
         let maxDropJump = 0;
         for (let m = bIdx + Math.max(4, minSteps); m < Math.min(beatTimes.length - 1, bIdx + stepLen); m++) {
-          const dE = (phraseEnergy[m] ?? energy) - energy;
+          const dE = (phraseEnergy[m] ?? rawEnergy) - rawEnergy;
           const mPeak = (onsetAccent[m] ?? 0) * 0.45 + (melodicNovelty[m] ?? 0) * 0.55;
-          // Only break a long hold at real phrase/drop shifts, never on routine single-beat drum hits
-          if (dE >= 0.26 || (isDownbeatIndex(m) && (dE >= 0.16 || (mPeak >= 0.93 && Math.abs(dE) >= 0.08)))) {
-            maxDropJump = Math.max(maxDropJump, 0.3);
+          if (
+            dropImpactSet.has(m) ||
+            dE >= 0.26 ||
+            (isDownbeatIndex(m) && (dE >= 0.16 || (mPeak >= 0.93 && Math.abs(dE) >= 0.08)))
+          ) {
+            maxDropJump = Math.max(maxDropJump, 0.36);
           }
         }
         return maxDropJump;
@@ -3240,8 +3904,8 @@ export function generateAutoClipPlan(
       const monotonyPenalty = (stepLen: number): number => {
         if (isRigidBeatFlash || candidates.length <= 1) return 0;
         if (stepLen === prevStep1 && stepLen === prevStep2) return hasCustomBarMode ? 0.24 : 0.56;
-        if (stepLen === prevStep1) return hasCustomBarMode ? 0.12 : 0.26;
-        if (candidates.length >= 3 && stepLen === prevStep2) return hasCustomBarMode ? 0.04 : 0.08;
+        if (stepLen === prevStep1) return hasCustomBarMode ? 0.12 : 0.28;
+        if (candidates.length >= 3 && stepLen === prevStep2) return hasCustomBarMode ? 0.04 : 0.09;
         return 0;
       };
 
@@ -3259,16 +3923,18 @@ export function generateAutoClipPlan(
         musicalA * weightMusical +
         (prefA + barA) * weightPref -
         skipPenalty(a) -
-        monotonyPenalty(a);
+        monotonyPenalty(a) +
+        (jitterByStep.get(a) ?? 0);
       const scoreB =
         musicalB * weightMusical +
         (prefB + barB) * weightPref -
         skipPenalty(b) -
-        monotonyPenalty(b);
+        monotonyPenalty(b) +
+        (jitterByStep.get(b) ?? 0);
       return scoreB - scoreA;
     });
 
-    return { steps: candidates, energy, hitStrength, allowShortPhotoPunch };
+    return { steps: candidates, energy: rawEnergy, hitStrength, allowShortPhotoPunch, section };
   };
 
   interface MusicalSlot {
@@ -3278,6 +3944,8 @@ export function generateAutoClipPlan(
     beatEndIdx: number;
     energy: number;
     cutImpact: number;
+    section: MusicalSectionType;
+    isPreDrop: boolean;
   }
 
   const maxSlots = Math.max(
@@ -3309,7 +3977,7 @@ export function generateAutoClipPlan(
       beatIdx++;
     }
 
-    const { steps: stepCandidates, energy, hitStrength, allowShortPhotoPunch } = getBeatStepsForIndex(beatIdx);
+    const { steps: stepCandidates, energy, hitStrength, allowShortPhotoPunch, section } = getBeatStepsForIndex(beatIdx);
     let chosenSlot: MusicalSlot | null = null;
     for (const stepCount of stepCandidates) {
       let nextIdx = Math.min(beatTimes.length - 1, beatIdx + stepCount);
@@ -3329,9 +3997,9 @@ export function generateAutoClipPlan(
           nextIdx++;
         }
       }
-      const isShortDrop = totalSpanSec < 26 && energy >= 0.66 && rhythm === 'auto';
+      const isShortDrop = totalSpanSec < 26 && (energy >= 0.66 || section === 'drop') && rhythm === 'auto';
       const minAllow =
-        isShortDrop || (allowShortPhotoPunch && stepCount <= 2)
+        isShortDrop || (allowShortPhotoPunch && stepCount <= 2) || section === 'buildup'
           ? Math.max(0.36, Math.min(beatSec * 0.85, targetLimit - cursorSec))
           : Math.max(0.45, Math.min(minClipBound * 0.85, targetLimit - cursorSec));
       if (dur < minAllow) continue;
@@ -3344,32 +4012,38 @@ export function generateAutoClipPlan(
         beatEndIdx: nextIdx,
         energy,
         cutImpact,
+        section,
+        isPreDrop: dropImpactSet.has(nextIdx),
       };
       break;
     }
 
     if (!chosenSlot) {
       const rem = Number((targetLimit - cursorSec).toFixed(3));
-      // Absorb tiny trailing remainder into previous slot when fillToTargetEnd is enabled
       if (
-        fillToTargetEnd &&
         workingSlots.length > 0 &&
         rem < minClipBound &&
-        workingSlots[workingSlots.length - 1].dur + rem <= hardMaxDur + 1.5
+        workingSlots[workingSlots.length - 1].dur + rem <= (fillToTargetEnd ? hardMaxDur + 1.5 : maxClipBound + 0.05)
       ) {
         const prev = workingSlots[workingSlots.length - 1];
         prev.dur = Number((targetLimit - prev.startSec).toFixed(3));
         break;
       }
+      if (!fillToTargetEnd && rem < minClipBound) {
+        break;
+      }
       if (rem >= 0.4) {
         const clamped = Number(Math.min(rem, hardMaxDur).toFixed(3));
+        const endIdx = Math.min(beatTimes.length - 1, beatIdx + 1);
         chosenSlot = {
           startSec: cursorSec,
           dur: clamped,
           beatStartIdx: beatIdx,
-          beatEndIdx: Math.min(beatTimes.length - 1, beatIdx + 1),
+          beatEndIdx: endIdx,
           energy,
           cutImpact: hitStrength,
+          section,
+          isPreDrop: dropImpactSet.has(endIdx),
         };
       } else {
         break;
@@ -3410,7 +4084,7 @@ export function generateAutoClipPlan(
         while (startBeatIdx < beatTimes.length - 2 && beatTimes[startBeatIdx] < tailEnd - 0.04) {
           startBeatIdx++;
         }
-        const { steps: tailSteps, allowShortPhotoPunch: tailPhotoPunch } =
+        const { steps: tailSteps, allowShortPhotoPunch: tailPhotoPunch, section: tailSection } =
           getBeatStepsForIndex(startBeatIdx);
         const chosenTailSteps =
           tailSteps[0] ?? (rhythm === 'beats_1' ? 1 : rhythm === 'beats_2' ? 2 : 8);
@@ -3475,6 +4149,8 @@ export function generateAutoClipPlan(
           beatEndIdx: endBeat,
           energy: phraseEnergy[startBeatIdx] ?? 0.5,
           cutImpact: (onsetAccent[endBeat] ?? 0.5) * 0.55 + (melodicNovelty[endBeat] ?? 0.4) * 0.45,
+          section: tailSection,
+          isPreDrop: dropImpactSet.has(endBeat),
         });
       }
     }
@@ -3619,22 +4295,31 @@ export function generateAutoClipPlan(
       srcEnd = Number((srcStart + clampedNeed).toFixed(2));
       seqCursorByUrl.set(entry.binItem.url, Number((srcEnd + slicePad).toFixed(2)));
     } else {
-      const fitting: Array<[number, number]> = ranges.filter(([rs, re]) => re - rs >= mediaNeed - 0.01);
+      const transHeadroom = transitionStyle === 'cuts_only' ? 0 : Math.min(0.4, dur * 0.14) * entry.rate;
+      const fittingWithHeadroom: Array<[number, number]> =
+        transHeadroom > 0
+          ? ranges.filter(([rs, re]) => re - rs >= mediaNeed + transHeadroom)
+          : [];
+      const fitting: Array<[number, number]> =
+        fittingWithHeadroom.length > 0
+          ? fittingWithHeadroom
+          : ranges.filter(([rs, re]) => re - rs >= mediaNeed - 0.01);
       const [rs, re] =
         fitting.length > 0 ? fitting[Math.floor(rng() * fitting.length)] : ranges[0];
       const clampedNeed = Math.min(mediaNeed, Math.max(0.25, re - rs));
       const slack = Math.max(0, re - rs - clampedNeed);
+      const safeTailMargin = slack > transHeadroom + 0.1 ? Math.min(transHeadroom, slack * 0.5) : 0;
       if (slack >= Math.max(4.5, clampedNeed * 1.45)) {
         const prior = usedSlicesByUrl.get(entry.binItem.url) ?? [];
         const minEdgeBuf = Math.max(0.9, minSliceKeep + slicePad);
-        let bestOffset = Number((rs + rng() * slack).toFixed(2));
+        let bestOffset = Number((rs + rng() * Math.max(0, slack - safeTailMargin)).toFixed(2));
         let bestScore = -Infinity;
         for (let k = 0; k < 7; k++) {
           let cand: number;
           if (k === 0 && rng() < 0.3) {
             cand = rs;
           } else if (k === 1 && rng() < 0.3) {
-            cand = re - clampedNeed;
+            cand = re - clampedNeed - safeTailMargin;
           } else {
             const innerLo = rs + minEdgeBuf;
             const innerHi = re - clampedNeed - minEdgeBuf;
@@ -3807,7 +4492,7 @@ export function generateAutoClipPlan(
     return { sourceStartSec: bestOffset, rate: entry.rate };
   };
 
-  const buildPlacementForSlot = (
+    const buildPlacementForSlot = (
     slot: MusicalSlot,
     slotIdx: number,
     asset: PoolAsset,
@@ -3815,6 +4500,8 @@ export function generateAutoClipPlan(
     rate: number
   ): AutoBeatSlicePlacement => {
     const isImage = asset.kind === 'image';
+    const isCalmSection =
+      slot.section === 'intro' || slot.section === 'beatless' || slot.section === 'outro';
     const musicalPalette: SlideTransitionType[] = isImage
       ? ['cut', 'cut', 'crossfade', 'cut', 'cut']
       : ['cut', 'cut', 'zoom_cross', 'crossfade', 'cut'];
@@ -3827,20 +4514,36 @@ export function generateAutoClipPlan(
     } else if (transitionStyle === 'cuts_only' || rhythm === 'beats_1') {
       trType = 'cut';
     } else if (transitionStyle === 'punchy') {
-      trType =
-        slot.cutImpact >= 0.72
-          ? slotIdx % 4 === 2 && !isImage
-            ? 'zoom_cross'
-            : 'slide'
-          : slot.cutImpact >= 0.52 && slotIdx % 3 === 1
-            ? 'wipe_right'
-            : punchyPalette[slotIdx % punchyPalette.length];
-    } else if (mode === 'auto_rhythm' || rhythm === 'auto') {
-      if (rhythm === 'smooth' || slot.energy < 0.38) {
+      if (
+        (editorialProfile === 'trailer' || editorialProfile === 'edm_drop') &&
+        slot.isPreDrop &&
+        slot.dur >= 1.2
+      ) {
+        trType = 'dip_black';
+      } else if (slot.section === 'beatless' || (slot.section === 'intro' && slot.dur >= 2.8)) {
         trType = 'crossfade';
+      } else {
+        trType =
+          slot.cutImpact >= 0.72
+            ? slotIdx % 4 === 2 && !isImage
+              ? 'zoom_cross'
+              : 'slide'
+            : slot.cutImpact >= 0.52 && slotIdx % 3 === 1
+              ? 'wipe_right'
+              : punchyPalette[slotIdx % punchyPalette.length];
+      }
+    } else if (mode === 'auto_rhythm' || rhythm === 'auto') {
+      if (rhythm === 'smooth' || isCalmSection || slot.energy < 0.38) {
+        trType = 'crossfade';
+      } else if (editorialProfile === 'trailer' && slot.isPreDrop && slot.dur >= 1.2) {
+        trType = 'dip_black';
       } else if (slot.energy >= 0.45 || slot.cutImpact >= 0.52) {
         trType =
-          !isImage && slot.cutImpact >= 0.72 && slotIdx % 4 === 2 ? 'zoom_cross' : 'cut';
+          !isImage &&
+          (slot.cutImpact >= 0.64 ||
+            ((slot.section === 'drop' || slot.energy >= 0.56) && slotIdx % 4 === 2))
+            ? 'zoom_cross'
+            : 'cut';
       } else if (
         asset.binItem.defaultTransitionOut &&
         asset.binItem.defaultTransitionOut !== 'crossfade' &&
@@ -3857,7 +4560,7 @@ export function generateAutoClipPlan(
     ) {
       trType = asset.binItem.defaultTransitionOut;
     } else if (mode === 'sequential') {
-      trType = slot.dur >= 2.8 && slot.energy < 0.45 ? 'crossfade' : 'cut';
+      trType = (isCalmSection || (slot.dur >= 2.8 && slot.energy < 0.45)) ? 'crossfade' : 'cut';
     } else if (rhythm === 'smooth') {
       trType = 'crossfade';
     } else {
@@ -3869,26 +4572,45 @@ export function generateAutoClipPlan(
           : musicalPalette[slotIdx % musicalPalette.length];
     }
 
+    // Tighten tight short punches (< ~1.35 beats) to clean hard cuts unless explicit dissolve is selected
+    if (
+      trType !== 'cut' &&
+      transitionStyle !== 'dissolve' &&
+      slot.dur < Math.max(0.75, beatSec * 1.35)
+    ) {
+      trType = 'cut';
+    }
+
     const isSlowDissolve =
       transitionStyle === 'dissolve' ||
       rhythm === 'smooth' ||
-      ((mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.36);
+      isCalmSection ||
+      ((mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.38);
+    const allowLongDissolve =
+      transitionStyle === 'dissolve' ||
+      rhythm === 'smooth' ||
+      editorialProfile === 'dream' ||
+      editorialProfile === 'acoustic';
+    const maxDissolveSec = allowLongDissolve ? 0.78 : 0.45;
+
     const idealTrans =
       trType === 'cut'
         ? 0
-        : isSlowDissolve
-          ? Number(
-              Math.max(
-                0.14,
-                Math.min(0.32, beatSec * 0.58, slot.dur * 0.22)
-              ).toFixed(3)
-            )
-          : Number(
-              Math.max(
-                0.09,
-                Math.min(0.14, beatSec * 0.26, slot.dur * 0.18)
-              ).toFixed(3)
-            );
+        : trType === 'dip_black'
+          ? Number(Math.max(0.16, Math.min(0.38, beatSec * 0.65, slot.dur * 0.25)).toFixed(3))
+          : isSlowDissolve
+            ? Number(
+                Math.max(
+                  0.18,
+                  Math.min(maxDissolveSec, beatSec * 1.05, slot.dur * 0.32)
+                ).toFixed(3)
+              )
+            : Number(
+                Math.max(
+                  0.09,
+                  Math.min(0.22, beatSec * 0.38, slot.dur * 0.22)
+                ).toFixed(3)
+              );
 
     let scaleEnd = 1.0;
     if (motionLevel === 'gentle') {
@@ -3896,7 +4618,7 @@ export function generateAutoClipPlan(
         ? slot.dur >= 2.0
           ? 1.015
           : 1.0
-        : (mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.38
+        : (mode === 'auto_rhythm' || rhythm === 'auto') && (isCalmSection || slot.energy < 0.38)
           ? 1.012
           : 1.0;
     } else if (motionLevel === 'dynamic') {
@@ -3933,7 +4655,6 @@ export function generateAutoClipPlan(
           const barBonus = enforceBarGrid && isDownbeatIndex(b) ? 0.5 : 0;
           const accentBonus =
             (onsetAccent[b] ?? 0.4) * 0.3 + (melodicNovelty[b] ?? 0.35) * 0.3;
-          // Slightly favor musical 1/3 vs 2/3 split over rigid 50/50 equality so shots keep varied lengths
           const asymBonus =
             preferAsymmetric && Math.abs(d1 - d2) >= beatSec * 1.4
               ? 0.24
@@ -3969,6 +4690,8 @@ export function generateAutoClipPlan(
         beatEndIdx: splitBeatIdx,
         energy: slot.energy,
         cutImpact: midImpact,
+        section: slot.section,
+        isPreDrop: dropImpactSet.has(splitBeatIdx),
       },
       {
         startSec: splitTime,
@@ -3977,6 +4700,8 @@ export function generateAutoClipPlan(
         beatEndIdx: slot.beatEndIdx,
         energy: phraseEnergy[splitBeatIdx] ?? slot.energy,
         cutImpact: slot.cutImpact,
+        section: beatSections[splitBeatIdx] ?? slot.section,
+        isPreDrop: slot.isPreDrop,
       },
     ];
   };
@@ -4096,11 +4821,17 @@ export function generateAutoClipPlan(
 
     const videos = activeList.filter((e) => e.kind === 'video');
     if (videos.length > 0) return videos;
-    // In fallback pass, if only 1 video exists in the pool, alternate cleanly with an image
-    // on long slots rather than repeating the same video back-to-back.
-    if (ctx.isFallbackPass && avoidAdjacentRepeat && poolVideos.length <= 1) {
-      const nonAdjImages = activeList.filter((e) => e.kind === 'image');
-      if (nonAdjImages.length > 0) return nonAdjImages;
+    // Allow non-adjacent images on long slots in fallback when only <=1 video exists (must alternate)
+    // or in rigid bar-grid presets (e.g. beats_4 where all slots are >=2s).
+    const isAutoRhythmPool = mode === 'auto_rhythm' || rhythm === 'auto';
+    const nonAdjImages = activeList.filter((e) => e.kind === 'image');
+    if (
+      ctx.isFallbackPass &&
+      avoidAdjacentRepeat &&
+      nonAdjImages.length > 0 &&
+      (poolVideos.length <= 1 || !isAutoRhythmPool)
+    ) {
+      return nonAdjImages;
     }
     if (!strictVideoOnLongSlots) {
       const allVideos = list.filter((e) => e.kind === 'video');
@@ -4282,6 +5013,7 @@ export function generateAutoClipPlan(
 
   // Pass B: Exhaustion fallback ONLY after unique footage is depleted; maintains video priority on long slots
   // and photo priority on short beat punches while keeping least-used, max-distance cooled files and 0 adjacent repeats.
+  let passBSplitCount = 0;
   for (let i = 0; i < workingSlots.length; i++) {
     if (assigned[i] !== null) continue;
     const slot = workingSlots[i];
@@ -4293,6 +5025,61 @@ export function generateAutoClipPlan(
     const nextUrl = nextId ? binUrlById.get(nextId) ?? null : null;
     const prev2Url = prev2Id ? binUrlById.get(prev2Id) ?? null : null;
     const next2Url = next2Id ? binUrlById.get(next2Id) ?? null : null;
+
+    // If a long auto_rhythm slot is sandwiched between two videos covering the whole video pool
+    // (e.g. vid-2 [slot] vid-1 with 2 videos), split off a 1..2 beat tail photo punch so videos stay long
+    // and photos sit strictly on short beats with zero adjacent repeats.
+    if (
+      hasMixedPool &&
+      avoidAdjacentRepeat &&
+      (mode === 'auto_rhythm' || rhythm === 'auto') &&
+      !isShortBeatSlot(slot) &&
+      poolVideos.length >= 2 &&
+      poolVideos.every((v) => v.binItem.url === prevUrl || v.binItem.url === nextUrl) &&
+      slot.beatEndIdx - slot.beatStartIdx >= 3 &&
+      passBSplitCount < workingSlots.length
+    ) {
+      const punchBeats = beatSec * 2 <= shortBeatMaxSec + 0.01 ? 2 : 1;
+      const splitIdx = slot.beatEndIdx - punchBeats;
+      if (splitIdx > slot.beatStartIdx) {
+        const splitT = Number(beatTimes[splitIdx].toFixed(3));
+        const leftDur = Number((splitT - slot.startSec).toFixed(3));
+        const rightDur = Number((slot.startSec + slot.dur - splitT).toFixed(3));
+        if (leftDur >= 0.45 && rightDur >= 0.4 && rightDur <= shortBeatMaxSec + 0.01) {
+          passBSplitCount++;
+          const midImpact =
+            (onsetAccent[splitIdx] ?? slot.cutImpact) * 0.55 +
+            (melodicNovelty[splitIdx] ?? 0.4) * 0.45;
+          workingSlots.splice(
+            i,
+            1,
+            {
+              startSec: slot.startSec,
+              dur: leftDur,
+              beatStartIdx: slot.beatStartIdx,
+              beatEndIdx: splitIdx,
+              energy: slot.energy,
+              cutImpact: midImpact,
+              section: slot.section,
+              isPreDrop: dropImpactSet.has(splitIdx),
+            },
+            {
+              startSec: splitT,
+              dur: rightDur,
+              beatStartIdx: splitIdx,
+              beatEndIdx: slot.beatEndIdx,
+              energy: phraseEnergy[splitIdx] ?? slot.energy,
+              cutImpact: slot.cutImpact,
+              section: beatSections[splitIdx] ?? slot.section,
+              isPreDrop: slot.isPreDrop,
+            }
+          );
+          assigned.splice(i, 1, null, null);
+          i--;
+          continue;
+        }
+      }
+    }
 
     let candidates: PoolAsset[] = [];
     for (const pt of [true, false]) {

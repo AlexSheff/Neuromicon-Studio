@@ -566,6 +566,7 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   minBeatCutSec: 2.0,
   transitionType: 'crossfade',
   transitionDurationSec: 0.65,
+  beatCenteredTransitions: false,
   kenBurnsMotion: true,
   framingMode: 'cover',
   mediaFilter: 'none',

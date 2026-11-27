@@ -3,6 +3,7 @@ import test from 'node:test';
 import { MediaBinItem, StudioConfig, VisualMediaState } from '../../types/studio';
 import {
   alignBeatGridToTime,
+  analyzeMusicalStructure,
   AUTO_CLIP_PRESETS,
   clampManualClipMove,
   closeAllManualGapsAndFitBeats,
@@ -14,6 +15,7 @@ import {
   computeFadeEnvelope,
   computePhraseEnergyCurve,
   computeTapTempoBpm,
+  createSeededRng,
   detectTrackBpmAndBeats,
   dropBinItemIntoManualGap,
   findManualInsertionSlot,
@@ -673,7 +675,7 @@ test('generateAutoClipPlan supports auto_rhythm energy phrasing, sequential slic
 });
 
 test('AUTO_CLIP_PRESETS, append startOffsetSec, transition/motion styles, and duration caps behave accurately', () => {
-  assert.equal(AUTO_CLIP_PRESETS.length, 8);
+  assert.equal(AUTO_CLIP_PRESETS.length, 12);
   const binItems: MediaBinItem[] = [
     {
       id: 'v1',
@@ -2169,6 +2171,144 @@ test('generateAutoClipPlan eliminates adjacent repeats and distributes fallback 
   assert.ok(planC.filter((p) => p.binItemId === 'p1').length >= 4, 'Expected p1 active across 180s beats_4');
   assert.ok(planC.filter((p) => p.binItemId === 'p2').length >= 4, 'Expected p2 active across 180s beats_4');
 });
+
+test('analyzeMusicalStructure detects intro, beatless breakdown, crescendo buildup, drop impacts, and outro', () => {
+  const sr = 8000;
+  const totalSec = 48;
+  const beatSec = 0.5; // 120 BPM (96 beats)
+  const mono = new Float32Array(sr * totalSec);
+  const beats = Array.from({ length: 96 }, (_, i) => Number((i * beatSec).toFixed(3)));
+
+  // 0..8s: soft intro (gentle pulse)
+  // 8..18s: beatless ambient pad sustain (no kick transient, steady warm sine chord)
+  // 18..26s: crescendo buildup rising steadily in energy + kick pulse
+  // 26..40s: heavy drop impact (hard kicks + sub)
+  // 40..48s: soft fading outro
+  for (let s = 0; s < mono.length; s++) {
+    const t = s / sr;
+    if (t >= 8 && t < 18) {
+      mono[s] += Math.sin(2 * Math.PI * 220 * t) * 0.22 + Math.sin(2 * Math.PI * 330 * t) * 0.14;
+    } else if (t >= 18 && t < 26) {
+      const ramp = (t - 18) / 8;
+      mono[s] += Math.sin(2 * Math.PI * 260 * t) * (0.14 + 0.22 * ramp);
+    }
+  }
+  for (let b = 0; b < beats.length; b++) {
+    const t = beats[b];
+    if (t >= 8 && t < 18) continue; // zero drums in beatless pocket
+    const s0 = Math.round(t * sr);
+    let amp = 0.28;
+    if (t < 8) amp = 0.24;
+    else if (t >= 18 && t < 26) amp = 0.28 + 0.52 * ((t - 18) / 8);
+    else if (t >= 26 && t < 40) amp = 0.98;
+    else amp = 0.22 * Math.max(0.2, 1 - (t - 40) / 8);
+
+    for (let j = 0; j < 420 && s0 + j < mono.length; j++) {
+      mono[s0 + j] += Math.sin((j / sr) * 2 * Math.PI * 62) * Math.exp(-j / 135) * amp;
+    }
+  }
+
+  const analysis = analyzeMusicalStructure(beats, 0, totalSec, mono, sr, 0);
+  assert.equal(analysis.beatSections.length, beats.length);
+  assert.ok(analysis.segments.length >= 3);
+
+  const beatlessCount = analysis.beatSections.slice(18, 34).filter((sec) => sec === 'beatless' || sec === 'intro').length;
+  assert.ok(beatlessCount >= 10, `Expected beatless detection in 9..17s ambient pocket, got ${beatlessCount}/16`);
+
+  const hasDropAt26To38 = analysis.beatSections.slice(54, 78).filter((sec) => sec === 'drop').length >= 16;
+  assert.ok(hasDropAt26To38, 'Expected drop section classification in heavy 27..39s section');
+
+  const dropImpactSec = analysis.dropImpactBeats.map((idx) => beats[idx]);
+  assert.ok(
+    dropImpactSec.some((sec) => Math.abs(sec - 26.0) <= 2.5),
+    `Expected dropImpactBeat near 26.0s, got [${dropImpactSec.join(', ')}]`
+  );
+});
+
+test('generateAutoClipPlan produces genuinely distinct variations across regeneration seeds without adjacent repeats', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const bin = [mkV('v1', 30), mkV('v2', 30), mkV('v3', 30), mkV('v4', 30)];
+  const totalSec = 48;
+  const beats = Array.from({ length: 96 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const take1 = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    editorialProfile: 'story_arc',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    variationSeed: 101,
+  });
+  const take2 = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    editorialProfile: 'story_arc',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    variationSeed: 20202,
+  });
+
+  assert.ok(take1.length >= 6 && take2.length >= 6);
+  const sig1 = take1.map((p) => `${p.binItemId}@${p.sourceStartSec}:${p.durationSec}`).join('|');
+  const sig2 = take2.map((p) => `${p.binItemId}@${p.sourceStartSec}:${p.durationSec}`).join('|');
+  assert.notEqual(sig1, sig2, 'Expected different regeneration seeds to produce distinct montage takes');
+
+  const cuts1 = take1.map((p) => p.startSec).join(',');
+  const cuts2 = take2.map((p) => p.startSec).join(',');
+  const clips1 = take1.map((p) => p.binItemId).join(',');
+  const clips2 = take2.map((p) => p.binItemId).join(',');
+  assert.ok(cuts1 !== cuts2 || clips1 !== clips2, 'Expected variation in phrasing/clip selection');
+
+  for (const plan of [take1, take2]) {
+    for (let i = 1; i < plan.length; i++) {
+      assert.notEqual(plan[i].binItemId, plan[i - 1].binItemId);
+    }
+  }
+  assert.ok(createSeededRng(101)() !== createSeededRng(20202)());
+});
+
+test('resolveActiveSlideshowSlice supports beat-centered transitions peaking dead-on beat boundary', () => {
+  const touching: VisualMediaState[] = [
+    { ...makeClip('a', 4), startSec: 0, transitionOut: 'crossfade', transitionDurationSec: 0.8 },
+    { ...makeClip('b', 4), startSec: 4, transitionOut: 'crossfade', transitionDurationSec: 0.8 },
+  ];
+  const centeredCfg: StudioConfig = {
+    ...DEFAULT_STUDIO_CONFIG,
+    slideshowMode: 'manual',
+    beatCenteredTransitions: true,
+  };
+
+  // Before pre-beat half (cut=4.0, half=0.4 -> starts at 3.6): pure clip A
+  const pre = resolveActiveSlideshowSlice(touching, 3.4, 8, centeredCfg, [0, 4]);
+  assert.equal(pre.activeIndex, 0);
+  assert.equal(pre.prevIndex, null);
+  assert.equal(pre.transitionProgress, 1);
+
+  // Midpoint ON beat (t = 4.0): transitionProgress must be exactly 0.5!
+  const atBeat = resolveActiveSlideshowSlice(touching, 4.0, 8, centeredCfg, [0, 4]);
+  assert.equal(atBeat.activeIndex, 1);
+  assert.equal(atBeat.prevIndex, 0);
+  assert.ok(Math.abs(atBeat.transitionProgress - 0.5) < 1e-6, `Expected 0.5 at beat cut, got ${atBeat.transitionProgress}`);
+  assert.ok(Math.abs(atBeat.slideLocalTime - 0.4) < 1e-6);
+
+  // Continuous progression across 4.39 -> 4.41 (transition completion) with zero jump in slideLocalTime
+  const justBeforeEnd = resolveActiveSlideshowSlice(touching, 4.39, 8, centeredCfg, [0, 4]);
+  const justAfterEnd = resolveActiveSlideshowSlice(touching, 4.41, 8, centeredCfg, [0, 4]);
+  assert.equal(justBeforeEnd.prevIndex, 0);
+  assert.equal(justAfterEnd.prevIndex, null);
+  assert.ok(Math.abs((justAfterEnd.slideLocalTime - justBeforeEnd.slideLocalTime) - 0.02) < 1e-6);
+});
+
 
 
 
