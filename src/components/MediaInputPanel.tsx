@@ -61,12 +61,7 @@ import {
   TrackBeatGrid,
   TrackStructureAnalysis,
 } from '../utils/audioAnalyzer';
-import {
-  AUTO_CLIP_LOOK_PRESETS,
-  AutoClipLookId,
-  GENERATOR_EFFECTS,
-  resolveAutoClipLookConfigPatch,
-} from '../utils/presets';
+import { GENERATOR_EFFECTS } from '../utils/presets';
 import { MediaPreviewModal } from './MediaPreviewModal';
 
 type MediaPanelTab = 'media' | 'layers' | 'timing';
@@ -324,40 +319,6 @@ export function MediaInputPanel({
         return t.autoPresetSlowDream;
       case 'beat_flash':
         return t.autoPresetBeatFlash;
-    }
-  };
-
-  const lookLabel = (id: AutoClipLookId): string => {
-    switch (id) {
-      case 'clean_cinema':
-        return t.autoLookClean;
-      case 'film_35mm':
-        return t.autoLookFilm35mm;
-      case 'teal_orange':
-        return t.autoLookTealOrange;
-      case 'neon_night':
-        return t.autoLookNeon;
-      case 'golden_hour':
-        return t.autoLookGolden;
-      case 'noir_bw':
-        return t.autoLookNoir;
-      case 'keep':
-      default:
-        return t.autoLookKeep;
-    }
-  };
-
-  const handleSelectAutoLook = (lookId: AutoClipLookId) => {
-    setAutoClipCfg((prev) => ({ ...prev, lookPreset: lookId }));
-    if (lookId !== 'keep') {
-      const patch = resolveAutoClipLookConfigPatch(
-        lookId,
-        Boolean(autoClipCfg.cleanFootage),
-        autoClipCfg.letterboxBars
-      );
-      if (Object.keys(patch).length > 0) {
-        onUpdateConfig(patch);
-      }
     }
   };
 
@@ -1714,69 +1675,6 @@ export function MediaInputPanel({
                       </div>
                     )}
 
-                    {/* Quick Visual Look & Clean Cinema Frame Options */}
-                    <div className="space-y-1.5 pt-0.5 border-t border-[#262B38]/70">
-                      <span className="text-[9.5px] uppercase tracking-wider text-gray-500 font-medium block">
-                        {t.autoClipLookLabel}
-                      </span>
-                      <div className="grid grid-cols-4 gap-1">
-                        {AUTO_CLIP_LOOK_PRESETS.map((look) => {
-                          const isActive = (autoClipCfg.lookPreset ?? 'clean_cinema') === look.id;
-                          return (
-                            <button
-                              key={look.id}
-                              type="button"
-                              onClick={() => handleSelectAutoLook(look.id)}
-                              className={`py-1 px-1 rounded border text-[9px] font-medium cursor-pointer truncate flex items-center gap-1 ${
-                                isActive
-                                  ? 'border-cyan-400/90 bg-cyan-500/15 text-cyan-200'
-                                  : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
-                              }`}
-                            >
-                              <span
-                                className="w-2 h-2 rounded-xs shrink-0 border border-white/20"
-                                style={{
-                                  background: `linear-gradient(135deg, ${look.swatch[0]}, ${look.swatch[1]})`,
-                                }}
-                                aria-hidden="true"
-                              />
-                              <span className="truncate">{lookLabel(look.id)}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="grid grid-cols-2 gap-1.5 pt-0.5">
-                        <label className="flex items-center justify-between gap-1.5 rounded border border-[#262B38] bg-[#0E1016] px-2 py-1 text-[9.5px] text-gray-300 cursor-pointer">
-                          <span className="truncate">{t.autoClipCleanFootageLabel}</span>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(autoClipCfg.cleanFootage)}
-                            onChange={(e) => {
-                              const checked = e.target.checked;
-                              setAutoClipCfg((prev) => ({ ...prev, cleanFootage: checked }));
-                              if (checked) {
-                                onUpdateConfig({ generatorEffect: 'none' });
-                              }
-                            }}
-                            className="accent-cyan-400 w-3 h-3 rounded cursor-pointer shrink-0"
-                          />
-                        </label>
-                        <label className="flex items-center justify-between gap-1.5 rounded border border-[#262B38] bg-[#0E1016] px-2 py-1 text-[9.5px] text-gray-300 cursor-pointer">
-                          <span className="truncate">{t.autoClipLetterboxLabel}</span>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(autoClipCfg.letterboxBars)}
-                            onChange={(e) => {
-                              const checked = e.target.checked;
-                              setAutoClipCfg((prev) => ({ ...prev, letterboxBars: checked }));
-                              onUpdateConfig({ letterboxAmount: checked ? 0.095 : 0 });
-                            }}
-                            className="accent-amber-400 w-3 h-3 rounded cursor-pointer shrink-0"
-                          />
-                        </label>
-                      </div>
-                    </div>
-
                     {/* Expandable Fine Settings */}
                     {autoSettingsOpen && (
                       <div className="rounded-md border border-[#262B38] bg-[#0E1016] p-2 space-y-2">
@@ -2019,6 +1917,22 @@ export function MediaInputPanel({
                               setAutoClipCfg((prev) => ({
                                 ...prev,
                                 avoidAdjacentRepeat: e.target.checked,
+                              }))
+                            }
+                            className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"
+                          />
+                        </label>
+
+                        {/* Optional Exhaustion Reuse (OFF by default: strict 1x usage per slice/photo) */}
+                        <label className="flex items-center justify-between text-[10px] text-gray-300 cursor-pointer pt-0.5">
+                          <span>{t.autoClipAllowReuseLabel}</span>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(autoClipCfg.allowReuseWhenExhausted)}
+                            onChange={(e) =>
+                              setAutoClipCfg((prev) => ({
+                                ...prev,
+                                allowReuseWhenExhausted: e.target.checked,
                               }))
                             }
                             className="accent-amber-500 w-3.5 h-3.5 rounded cursor-pointer"

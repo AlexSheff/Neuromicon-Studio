@@ -1249,6 +1249,7 @@ export function detectTrackBpmAndBeats(
   const totalSteps = Math.max(16, Math.floor(clipDuration / hopSec));
   const rawOnsets = new Float32Array(totalSteps);
   const rawLowOnsets = new Float32Array(totalSteps);
+  const rawAttackOnsets = new Float32Array(totalSteps);
 
   // Two cascaded 1-pole crossover cutoffs for bass (<~180 Hz) & mid (~180..2200 Hz)
   const alphaLow = 1 - Math.exp((-2 * Math.PI * 180) / sampleRate);
@@ -1258,6 +1259,7 @@ export function detectTrackBpmAndBeats(
   let prevLowLog = 0;
   let prevMidLog = 0;
   let prevHighLog = 0;
+  let prevAttack = 0;
   let maxRawOnset = 0;
 
   for (let s = 0; s < totalSteps; s++) {
@@ -1292,9 +1294,15 @@ export function detectTrackBpmAndBeats(
     prevMidLog = midLog;
     prevHighLog = highLog;
 
-    const flux = (lowFlux * 0.58 + midFlux * 0.32 + highFlux * 0.10) * sensitivity;
+    const flux = (lowFlux * 0.56 + midFlux * 0.32 + highFlux * 0.12) * sensitivity;
+    const attackInstant = (midFlux * 0.45 + highFlux * 0.28 + lowFlux * 0.27) * sensitivity;
+    // Emphasize sharp rising transient edge to avoid locking late onto kick boom / sidechain swells
+    const attackEdge = attackInstant * 0.72 + Math.max(0, attackInstant - prevAttack * 0.65) * 0.55;
+    prevAttack = attackInstant;
+
     rawOnsets[s] = flux;
     rawLowOnsets[s] = lowFlux * sensitivity;
+    rawAttackOnsets[s] = attackEdge;
     if (flux > maxRawOnset) maxRawOnset = flux;
   }
 
@@ -1305,6 +1313,7 @@ export function detectTrackBpmAndBeats(
   // Adaptive local baseline subtraction (±0.24s) sharpens real musical hits over sustained chords/drones
   const onsets = new Float32Array(totalSteps);
   const lowOnsets = new Float32Array(totalSteps);
+  const attackOnsets = new Float32Array(totalSteps);
   const halfWin = Math.max(6, Math.round(0.24 / hopSec));
   let onsetSum = 0;
   let nonzeroCount = 0;
@@ -1313,16 +1322,20 @@ export function detectTrackBpmAndBeats(
     const w1 = Math.min(totalSteps - 1, s + halfWin);
     let sum = 0;
     let lowSum = 0;
+    let atkSum = 0;
     for (let k = w0; k <= w1; k++) {
       sum += rawOnsets[k];
       lowSum += rawLowOnsets[k];
+      atkSum += rawAttackOnsets[k];
     }
     const winLen = Math.max(1, w1 - w0 + 1);
     const localMean = sum / winLen;
     const localLowMean = lowSum / winLen;
+    const localAtkMean = atkSum / winLen;
     const val = Math.max(0, rawOnsets[s] - localMean * 0.76);
     onsets[s] = val;
     lowOnsets[s] = Math.max(0, rawLowOnsets[s] - localLowMean * 0.72);
+    attackOnsets[s] = Math.max(0, rawAttackOnsets[s] - localAtkMean * 0.78);
     if (val > 0) {
       onsetSum += val;
       nonzeroCount++;
@@ -1330,11 +1343,13 @@ export function detectTrackBpmAndBeats(
   }
   const activeOnsetMean = nonzeroCount > 0 ? onsetSum / nonzeroCount : maxRawOnset * 0.25;
 
-  // Autocorrelation across 66..184 BPM with octave comb scoring to eliminate half/double-time drift
+  // Autocorrelation across full double/half-octave range so 93..131 BPM gets symmetric harmonic support
   const minLag = Math.max(16, Math.round(60 / 184 / hopSec));
   const maxLag = Math.min(Math.floor(totalSteps / 2), Math.round(60 / 66 / hopSec));
-  const acf = new Float32Array(maxLag + 1);
-  for (let lag = minLag; lag <= maxLag; lag++) {
+  const minAcfLag = Math.max(8, Math.floor(minLag / 2));
+  const maxAcfLag = Math.min(Math.floor(totalSteps / 2), maxLag * 2);
+  const acf = new Float32Array(maxAcfLag + 1);
+  for (let lag = minAcfLag; lag <= maxAcfLag; lag++) {
     let sum = 0;
     const len = totalSteps - lag;
     for (let i = 0; i < len; i++) {
@@ -1351,8 +1366,8 @@ export function detectTrackBpmAndBeats(
     const doubleLag = lag * 2;
     const harmonicSupport =
       acf[lag] +
-      (doubleLag <= maxLag ? acf[doubleLag] * 0.35 : 0) +
-      (halfLag >= minLag ? acf[halfLag] * 0.18 : 0);
+      (doubleLag <= maxAcfLag ? acf[doubleLag] * 0.34 : 0) +
+      (halfLag >= minAcfLag ? acf[halfLag] * 0.20 : 0);
     const tempoPrior =
       candBpm >= 88 && candBpm <= 142 ? 1.15 : candBpm >= 72 && candBpm <= 165 ? 1.03 : 0.94;
     const score = harmonicSupport * tempoPrior;
@@ -1377,7 +1392,11 @@ export function detectTrackBpmAndBeats(
 
   const coarseBpm = Math.max(60, Math.min(188, 60 / (refinedLag * hopSec)));
 
-  const scoreCombInterp = (candBeatSec: number, phaseStartSec: number): number => {
+  const scoreCombInterp = (
+    candBeatSec: number,
+    phaseStartSec: number,
+    neighborWeight = 0.28
+  ): number => {
     let score = 0;
     let hits = 0;
     for (let t = phaseStartSec; t < clipDuration; t += candBeatSec) {
@@ -1387,14 +1406,19 @@ export function detectTrackBpmAndBeats(
       const i1 = Math.min(totalSteps - 1, i0 + 1);
       const oCenter = onsets[i0] * (1 - frac) + onsets[i1] * frac;
       const lCenter = lowOnsets[i0] * (1 - frac) + lowOnsets[i1] * frac;
-      const centerHit = oCenter * 0.62 + lCenter * 0.58;
-      const iPrev = Math.max(0, i0 - 1);
-      const iNext = Math.min(totalSteps - 1, i0 + 1);
-      const neighborHit = Math.max(
-        onsets[iPrev] * 0.62 + lowOnsets[iPrev] * 0.58,
-        onsets[iNext] * 0.62 + lowOnsets[iNext] * 0.58
-      );
-      score += Math.max(centerHit, neighborHit * 0.55);
+      const aCenter = attackOnsets[i0] * (1 - frac) + attackOnsets[i1] * frac;
+      const centerHit = oCenter * 0.44 + lCenter * 0.30 + aCenter * 0.54;
+      if (neighborWeight > 0) {
+        const iPrev = Math.max(0, i0 - 1);
+        const iNext = Math.min(totalSteps - 1, i0 + 1);
+        const neighborHit = Math.max(
+          onsets[iPrev] * 0.44 + lowOnsets[iPrev] * 0.30 + attackOnsets[iPrev] * 0.54,
+          onsets[iNext] * 0.44 + lowOnsets[iNext] * 0.30 + attackOnsets[iNext] * 0.54
+        );
+        score += Math.max(centerHit, neighborHit * neighborWeight);
+      } else {
+        score += centerHit;
+      }
       hits++;
     }
     return hits > 0 ? score / hits : 0;
@@ -1414,7 +1438,7 @@ export function detectTrackBpmAndBeats(
     const candBeatSec = 60 / candBpm;
     for (let ph = 0; ph < phaseSteps; ph++) {
       const phSec = ph * hopSec;
-      const avgScore = scoreCombInterp(candBeatSec, phSec);
+      const avgScore = scoreCombInterp(candBeatSec, phSec, 0.28);
       if (avgScore > bestCombScore) {
         bestCombScore = avgScore;
         bestPhase = phSec;
@@ -1432,7 +1456,7 @@ export function detectTrackBpmAndBeats(
     const candBeatSec = 60 / candBpm;
     for (let dMs = -14; dMs <= 14; dMs += 2) {
       const phSec = ((ultraCenterPh + dMs * 0.001) % candBeatSec + candBeatSec) % candBeatSec;
-      const avgScore = scoreCombInterp(candBeatSec, phSec);
+      const avgScore = scoreCombInterp(candBeatSec, phSec, 0.22);
       if (avgScore > ultraBestScore) {
         ultraBestScore = avgScore;
         lockedBpm = candBpm;
@@ -1445,6 +1469,14 @@ export function detectTrackBpmAndBeats(
   const bpm = Math.round(lockedBpm);
   const beatSec = lockedBeatSec;
   bestPhase = Number((bestPhase % beatSec).toFixed(3));
+
+  // Explicit off-beat (+0.5 * beatSec) disambiguation using zero-bleed sharp attack energy
+  const altHalfPhase = Number(((bestPhase + beatSec * 0.5) % beatSec).toFixed(3));
+  const primarySharpScore = scoreCombInterp(beatSec, bestPhase, 0);
+  const halfBeatSharpScore = scoreCombInterp(beatSec, altHalfPhase, 0);
+  if (halfBeatSharpScore > primarySharpScore * 1.12) {
+    bestPhase = altHalfPhase;
+  }
 
   // Adaptive transient-locked PLL tracker tightly anchored to global phase lattice to eliminate cumulative drift
   const beats: number[] = [];
@@ -1472,7 +1504,8 @@ export function detectTrackBpmAndBeats(
     for (let d = -searchRadiusSteps; d <= searchRadiusSteps; d++) {
       const idx = Math.max(0, Math.min(totalSteps - 1, centerIdx + d));
       const proxWeight = 1 - Math.abs(d) / (searchRadiusSteps * 2.0);
-      const weighted = (onsets[idx] * 0.65 + lowOnsets[idx] * 0.5) * proxWeight;
+      const weighted =
+        (onsets[idx] * 0.48 + lowOnsets[idx] * 0.34 + attackOnsets[idx] * 0.52) * proxWeight;
       if (weighted > bestPeakWeighted) {
         bestPeakWeighted = weighted;
         bestPeakIdx = idx;
@@ -1483,9 +1516,9 @@ export function detectTrackBpmAndBeats(
     // Sub-hop parabolic peak refinement for 2-3ms beat precision
     let subStep = bestPeakIdx;
     if (bestPeakIdx > 0 && bestPeakIdx < totalSteps - 1 && bestPeakRaw >= pllSteerThreshold) {
-      const y0 = onsets[bestPeakIdx - 1] * 0.65 + lowOnsets[bestPeakIdx - 1] * 0.5;
-      const y1 = onsets[bestPeakIdx] * 0.65 + lowOnsets[bestPeakIdx] * 0.5;
-      const y2 = onsets[bestPeakIdx + 1] * 0.65 + lowOnsets[bestPeakIdx + 1] * 0.5;
+      const y0 = onsets[bestPeakIdx - 1] * 0.48 + lowOnsets[bestPeakIdx - 1] * 0.34 + attackOnsets[bestPeakIdx - 1] * 0.52;
+      const y1 = onsets[bestPeakIdx] * 0.48 + lowOnsets[bestPeakIdx] * 0.34 + attackOnsets[bestPeakIdx] * 0.52;
+      const y2 = onsets[bestPeakIdx + 1] * 0.48 + lowOnsets[bestPeakIdx + 1] * 0.34 + attackOnsets[bestPeakIdx + 1] * 0.52;
       const denom = 2 * (y0 - 2 * y1 + y2);
       if (Math.abs(denom) > 1e-8 && denom < 0) {
         subStep += Math.max(-0.45, Math.min(0.45, (y0 - y2) / denom));
@@ -2546,9 +2579,7 @@ export interface AutoClipGenerateConfig {
   beatCenteredTransitions?: boolean;
   excludeEdgeSec?: number;
   mediaPriority?: AutoClipMediaPriority;
-  lookPreset?: AutoClipLookId;
-  cleanFootage?: boolean;
-  letterboxBars?: boolean;
+  allowReuseWhenExhausted?: boolean;
   variationSeed?: number;
 }
 
@@ -2756,9 +2787,7 @@ export const DEFAULT_AUTO_CLIP_CONFIG: AutoClipGenerateConfig = {
   beatCenteredTransitions: true,
   excludeEdgeSec: 5,
   mediaPriority: 'auto',
-  lookPreset: 'clean_cinema',
-  cleanFootage: true,
-  letterboxBars: false,
+  allowReuseWhenExhausted: false,
 };
 
 export interface AutoBeatSlicePlacement {
@@ -3366,6 +3395,7 @@ export function generateAutoClipPlan(
     excludeUsedUrls?: Set<string>;
     excludeVideoRangesByUrl?: Map<string, Array<[number, number]>>;
     fillToTargetEnd?: boolean;
+    strictSingleUse?: boolean;
     hasAudio?: boolean;
     monoData?: Float32Array;
     sampleRate?: number;
@@ -3393,6 +3423,7 @@ export function generateAutoClipPlan(
   const mediaPriority: AutoClipMediaPriority = options.mediaPriority ?? 'auto';
   const avoidAdjacentRepeat = options.avoidAdjacentRepeat ?? true;
   const shouldShuffle = options.shuffleOrder ?? mode !== 'sequential';
+  const strictSingleUse = options.strictSingleUse ?? false;
   const fillToTargetEnd = options.fillToTargetEnd ?? false;
   const hasAudio = options.hasAudio ?? true;
   const excludeEdgeSec = Math.max(0, options.excludeEdgeSec ?? 5);
@@ -3483,7 +3514,7 @@ export function generateAutoClipPlan(
   };
 
   const minSliceKeep = 0.35;
-  const slicePad = 0.06;
+  const slicePad = 0.08;
 
   const initPoolAndRanges = (respectExclusions: boolean): PoolAsset[] => {
     freeRangesByKey.clear();
@@ -3615,11 +3646,11 @@ export function generateAutoClipPlan(
 
   const detectedFiltered =
     beatGrid.beats.length >= 2
-      ? beatGrid.beats.filter((b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15)
+      ? beatGrid.beats.filter((b) => b > startOffsetSec + 0.04 && b < targetLimit - 0.12)
       : [];
   const filteredIdx =
     beatGrid.beats.length >= 2
-      ? beatGrid.beats.findIndex((b) => b > startOffsetSec + 0.15 && b < targetLimit - 0.15)
+      ? beatGrid.beats.findIndex((b) => b > startOffsetSec + 0.04 && b < targetLimit - 0.12)
       : -1;
 
   let baseBeats: number[];
@@ -4121,17 +4152,19 @@ export function generateAutoClipPlan(
       let rawEnd = Number(Math.min(targetLimit, beatTimes[nextIdx]).toFixed(3));
       let dur = Number((rawEnd - cursorSec).toFixed(3));
       if (dur > hardMaxDur) {
-        const fallbackSteps = Math.max(1, Math.floor(maxClipBound / beatSec));
-        const cappedEnd = Math.min(
-          targetLimit,
-          cursorSec + Math.min(maxClipBound, fallbackSteps * beatSec)
-        );
-        rawEnd = Number(Math.max(cursorSec + 0.45, cappedEnd).toFixed(3));
-        dur = Number((rawEnd - cursorSec).toFixed(3));
-        nextIdx = beatIdx + 1;
-        while (nextIdx < beatTimes.length - 1 && beatTimes[nextIdx] < rawEnd - 0.04) {
-          nextIdx++;
+        let capBeat = -1;
+        for (let b = beatIdx + 1; b < beatTimes.length; b++) {
+          if (beatTimes[b] > targetLimit + 0.02 || beatTimes[b] - cursorSec > hardMaxDur) break;
+          capBeat = b;
         }
+        if (capBeat > beatIdx) {
+          nextIdx = capBeat;
+          rawEnd = Number(Math.min(targetLimit, beatTimes[capBeat]).toFixed(3));
+        } else {
+          nextIdx = Math.min(beatTimes.length - 1, beatIdx + 1);
+          rawEnd = Number(Math.min(targetLimit, beatTimes[nextIdx], cursorSec + maxClipBound).toFixed(3));
+        }
+        dur = Number((rawEnd - cursorSec).toFixed(3));
       }
       const isShortDrop = totalSpanSec < 26 && (energy >= 0.66 || section === 'drop') && rhythm === 'auto';
       const minAllow =
@@ -4177,8 +4210,19 @@ export function generateAutoClipPlan(
         break;
       }
       if (rem >= 0.4) {
-        const clamped = Number(Math.min(rem, hardMaxDur).toFixed(3));
-        const endIdx = Math.min(beatTimes.length - 1, beatIdx + 1);
+        let endIdx = Math.min(beatTimes.length - 1, beatIdx + 1);
+        for (let b = beatIdx + 1; b < beatTimes.length; b++) {
+          if (beatTimes[b] - cursorSec <= hardMaxDur && beatTimes[b] <= targetLimit - 0.12) {
+            endIdx = b;
+          } else {
+            break;
+          }
+        }
+        const snappedEnd =
+          beatTimes[endIdx] > cursorSec + 0.35 && beatTimes[endIdx] <= targetLimit
+            ? beatTimes[endIdx]
+            : targetLimit;
+        const clamped = Number(Math.max(0.4, Math.min(rem, snappedEnd - cursorSec, hardMaxDur)).toFixed(3));
         chosenSlot = {
           startSec: cursorSec,
           dur: clamped,
@@ -4265,17 +4309,21 @@ export function generateAutoClipPlan(
             endBeat = bestBeat;
             sliceDur = Number((beatTimes[bestBeat] - tailEnd).toFixed(3));
           } else {
-            sliceDur = Number(
-              Math.min(
-                targetSliceDur,
-                rem - minClipBound >= minClipBound ? targetSliceDur : rem
-              ).toFixed(3)
-            );
-            while (
-              endBeat < beatTimes.length - 1 &&
-              beatTimes[endBeat] < tailEnd + sliceDur - 0.04
-            ) {
-              endBeat++;
+            // Fall back strictly to an actual beat timestamp within [0.4s .. hardMaxDur] instead of off-beat duration
+            let anyBeat = -1;
+            for (let b = startBeatIdx + 1; b < beatTimes.length; b++) {
+              const candEnd = beatTimes[b];
+              const candDur = candEnd - tailEnd;
+              if (candDur < 0.4) continue;
+              if (candDur > hardMaxDur || candEnd > targetLimit - 0.4) break;
+              anyBeat = b;
+            }
+            if (anyBeat > startBeatIdx) {
+              endBeat = anyBeat;
+              sliceDur = Number((beatTimes[anyBeat] - tailEnd).toFixed(3));
+            } else {
+              endBeat = Math.min(beatTimes.length - 1, startBeatIdx + 1);
+              sliceDur = Number(Math.max(0.4, Math.min(rem, hardMaxDur)).toFixed(3));
             }
           }
         }
@@ -4455,72 +4503,54 @@ export function generateAutoClipPlan(
       const slack = Math.max(0, re - rs - clampedNeed);
       const safeTailMargin = slack > transHeadroom + 0.1 ? Math.min(transHeadroom, slack * 0.5) : 0;
       const prior = usedSlicesByKey.get(entry.contentKey) ?? [];
-      const maxRangeOff = Math.max(0, slack - safeTailMargin);
-      if (prior.length === 0 && maxRangeOff > 0.15) {
-        // First slice of a video in shuffled mode: sample uniformly across the whole safe span
-        // so consecutive regenerations do not always open at rs = 5.0s.
-        const bucketIdx = Math.floor(rng() * 5);
-        const rawOff = ((bucketIdx + rng()) / 5) * maxRangeOff;
-        srcStart = Number(Math.max(rs, Math.min(re - clampedNeed, rs + rawOff)).toFixed(2));
+      const wasteFloor = Math.max(1.0, minSliceKeep + slicePad);
+
+      if (slack <= 0.18) {
+        srcStart = Number(rs.toFixed(2));
         srcEnd = Number((srcStart + clampedNeed).toFixed(2));
-      } else if (slack >= Math.max(4.5, clampedNeed * 1.45)) {
-        const minEdgeBuf = Math.max(0.9, minSliceKeep + slicePad);
-        let bestOffset = Number((rs + rng() * maxRangeOff).toFixed(2));
-        let bestScore = -Infinity;
-        for (let k = 0; k < 7; k++) {
-          let cand: number;
-          if (k === 0 && rng() < 0.22) {
-            cand = rs;
-          } else if (k === 1 && rng() < 0.22) {
-            cand = re - clampedNeed - safeTailMargin;
-          } else {
-            const innerLo = rs + minEdgeBuf;
-            const innerHi = re - clampedNeed - minEdgeBuf;
-            cand =
-              innerHi > innerLo
-                ? innerLo + ((k + rng()) / 7) * (innerHi - innerLo)
-                : rs + rng() * slack;
-          }
-          cand = Number(Math.max(rs, Math.min(re - clampedNeed, cand)).toFixed(2));
-          const candEnd = cand + clampedNeed;
-          let minDist = prior.length === 0 ? slack : Infinity;
-          for (const [ps, pe] of prior) {
-            const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
-            if (d < minDist) minDist = d;
-          }
-          const score = minDist + rng() * 0.85;
-          if (score > bestScore) {
-            bestScore = score;
-            bestOffset = cand;
-          }
-        }
-        srcStart = bestOffset;
-        srcEnd = Number((srcStart + clampedNeed).toFixed(2));
-      } else if (slack > 0.15) {
-        // Sample endpoints + interior offsets with jitter so moderate-slack cuts do not snap to rs = 5.0s
-        const modMaxOff = Math.max(0, slack - safeTailMargin * 0.5);
-        let bestOffset = Number((rs + rng() * modMaxOff).toFixed(2));
-        let bestScore = -Infinity;
-        const tieNoise = Math.min(1.6, Math.max(0.45, modMaxOff * 0.35));
-        for (let k = 0; k < 8; k++) {
-          const frac = (k + rng() * 0.75) / 8;
-          const cand = Number(Math.max(rs, Math.min(re - clampedNeed, rs + frac * modMaxOff)).toFixed(2));
-          const candEnd = cand + clampedNeed;
-          let minDist = prior.length === 0 ? slack : Infinity;
-          for (const [ps, pe] of prior) {
-            const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
-            if (d < minDist) minDist = d;
-          }
-          const score = minDist + rng() * tieNoise;
-          if (score > bestScore) {
-            bestScore = score;
-            bestOffset = cand;
-          }
-        }
-        srcStart = bestOffset;
+      } else if (slack < wasteFloor * 2) {
+        // Moderate slack: pop cleanly from head or tail so the remaining range stays one contiguous non-fragmented span
+        const useTail = rng() < 0.5;
+        const rawCand = useTail ? re - clampedNeed - safeTailMargin : rs;
+        srcStart = Number(Math.max(rs, Math.min(re - clampedNeed, rawCand)).toFixed(2));
         srcEnd = Number((srcStart + clampedNeed).toFixed(2));
       } else {
-        srcStart = Number(rs.toFixed(2));
+        // Large slack: generate only clean non-fragmenting candidates (head, tail, or interior splits leaving >= wasteFloor on both sides)
+        const cleanCands: number[] = [
+          Number(rs.toFixed(2)),
+          Number(Math.max(rs, re - clampedNeed - safeTailMargin).toFixed(2)),
+        ];
+        const innerLo = rs + wasteFloor;
+        const innerHi = re - clampedNeed - wasteFloor;
+        if (innerHi > innerLo + 0.1) {
+          const steps = 6;
+          for (let k = 0; k <= steps; k++) {
+            const frac = (k + rng() * 0.7) / (steps + 1);
+            cleanCands.push(
+              Number(Math.max(innerLo, Math.min(innerHi, innerLo + frac * (innerHi - innerLo))).toFixed(2))
+            );
+          }
+        }
+        if (prior.length === 0) {
+          srcStart = cleanCands[Math.floor(rng() * cleanCands.length)];
+        } else {
+          let bestOffset = cleanCands[0];
+          let bestScore = -Infinity;
+          for (const cand of cleanCands) {
+            const candEnd = cand + clampedNeed;
+            let minDist = Infinity;
+            for (const [ps, pe] of prior) {
+              const d = candEnd <= ps ? ps - candEnd : cand >= pe ? cand - pe : 0;
+              if (d < minDist) minDist = d;
+            }
+            const score = minDist + rng() * 1.1;
+            if (score > bestScore) {
+              bestScore = score;
+              bestOffset = cand;
+            }
+          }
+          srcStart = bestOffset;
+        }
         srcEnd = Number((srcStart + clampedNeed).toFixed(2));
       }
     }
@@ -4822,33 +4852,37 @@ export function generateAutoClipPlan(
       transitionStyle === 'dissolve' ||
       rhythm === 'smooth' ||
       isCalmSection ||
-      ((mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.38);
+      ((mode === 'auto_rhythm' || rhythm === 'auto') && slot.energy < 0.36);
     const allowLongDissolve =
       transitionStyle === 'dissolve' ||
       rhythm === 'smooth' ||
       editorialProfile === 'dream' ||
       editorialProfile === 'acoustic';
     const maxDissolveSec =
-      editorialProfile === 'dream' ? 0.95 : allowLongDissolve ? 0.78 : 0.45;
+      editorialProfile === 'dream' ? 0.72 : allowLongDissolve ? 0.58 : 0.32;
+    const isWhipOrMotion =
+      trType === 'wipe_right' || trType === 'slide' || trType === 'zoom_cross';
 
     const idealTrans =
       trType === 'cut'
         ? 0
         : trType === 'dip_black'
-          ? Number(Math.max(0.16, Math.min(0.38, beatSec * 0.65, slot.dur * 0.25)).toFixed(3))
-          : isSlowDissolve
-            ? Number(
-                Math.max(
-                  0.18,
-                  Math.min(maxDissolveSec, beatSec * (editorialProfile === 'dream' ? 1.35 : 1.05), slot.dur * 0.32)
-                ).toFixed(3)
-              )
-            : Number(
-                Math.max(
-                  0.09,
-                  Math.min(0.22, beatSec * 0.38, slot.dur * 0.22)
-                ).toFixed(3)
-              );
+          ? Number(Math.max(0.12, Math.min(0.24, beatSec * 0.45, slot.dur * 0.20)).toFixed(3))
+          : isWhipOrMotion
+            ? Number(Math.max(0.08, Math.min(0.13, beatSec * 0.24, slot.dur * 0.16)).toFixed(3))
+            : isSlowDissolve
+              ? Number(
+                  Math.max(
+                    0.16,
+                    Math.min(maxDissolveSec, beatSec * (editorialProfile === 'dream' ? 1.15 : 0.9), slot.dur * 0.28)
+                  ).toFixed(3)
+                )
+              : Number(
+                  Math.max(
+                    0.10,
+                    Math.min(0.20, beatSec * 0.35, slot.dur * 0.20)
+                  ).toFixed(3)
+                );
 
     // Editorial alternating camera choreography: push-in, lateral pan drift, tilt, or pull-out.
     // Short punch photos (<1.85s or short beat slots) stay strictly static (1.0 -> 1.0, pan=0)
@@ -4924,47 +4958,46 @@ export function generateAutoClipPlan(
     };
   };
 
-  const splitSlotAtBeat = (slot: MusicalSlot): [MusicalSlot, MusicalSlot] | null => {
-    if (slot.dur < splitFloor * 2) return null;
+  const splitSlotAtBeat = (
+    slot: MusicalSlot,
+    floorOverride?: number
+  ): [MusicalSlot, MusicalSlot] | null => {
+    const effFloor = floorOverride !== undefined ? Math.max(0.4, floorOverride) : splitFloor;
+    if (slot.dur < effFloor * 2 || slot.beatEndIdx - slot.beatStartIdx < 2) return null;
     const midTime = Number((slot.startSec + slot.dur * 0.5).toFixed(3));
     let splitTime: number | null = null;
     let splitBeatIdx = Math.floor((slot.beatStartIdx + slot.beatEndIdx) / 2);
 
-    if (slot.beatEndIdx - slot.beatStartIdx >= 2) {
-      let bestScore = -1e9;
-      const preferAsymmetric = slot.dur >= splitFloor * 2.45;
-      for (let b = slot.beatStartIdx + 1; b < slot.beatEndIdx; b++) {
-        const t = Number(beatTimes[b].toFixed(3));
-        const d1 = t - slot.startSec;
-        const d2 = slot.startSec + slot.dur - t;
-        if (d1 >= splitFloor && d2 >= splitFloor) {
-          const barBonus = enforceBarGrid && isDownbeatIndex(b) ? 0.5 : 0;
-          const accentBonus =
-            (onsetAccent[b] ?? 0.4) * 0.3 + (melodicNovelty[b] ?? 0.35) * 0.3;
-          const asymBonus =
-            preferAsymmetric && Math.abs(d1 - d2) >= beatSec * 1.4
-              ? 0.24
-              : preferAsymmetric && Math.abs(d1 - d2) < 0.18
-                ? -0.22
-                : 0;
-          const centerTerm = 1 - Math.min(1, Math.abs(t - midTime) / Math.max(0.5, slot.dur * 0.5));
-          const score = barBonus + accentBonus + asymBonus + centerTerm * 0.25;
-          if (score > bestScore) {
-            bestScore = score;
-            splitTime = t;
-            splitBeatIdx = b;
-          }
+    let bestScore = -1e9;
+    const preferAsymmetric = slot.dur >= effFloor * 2.45;
+    for (let b = slot.beatStartIdx + 1; b < slot.beatEndIdx; b++) {
+      const t = Number(beatTimes[b].toFixed(3));
+      const d1 = t - slot.startSec;
+      const d2 = slot.startSec + slot.dur - t;
+      if (d1 >= effFloor && d2 >= effFloor) {
+        const barBonus = enforceBarGrid && isDownbeatIndex(b) ? 0.5 : 0;
+        const accentBonus =
+          (onsetAccent[b] ?? 0.4) * 0.3 + (melodicNovelty[b] ?? 0.35) * 0.3;
+        const asymBonus =
+          preferAsymmetric && Math.abs(d1 - d2) >= beatSec * 1.4
+            ? 0.24
+            : preferAsymmetric && Math.abs(d1 - d2) < 0.18
+              ? -0.22
+              : 0;
+        const centerTerm = 1 - Math.min(1, Math.abs(t - midTime) / Math.max(0.5, slot.dur * 0.5));
+        const score = barBonus + accentBonus + asymBonus + centerTerm * 0.25;
+        if (score > bestScore) {
+          bestScore = score;
+          splitTime = t;
+          splitBeatIdx = b;
         }
       }
     }
-    if (splitTime === null) {
-      const halfDur = Number((slot.dur * 0.5).toFixed(3));
-      if (halfDur < splitFloor || slot.dur - halfDur < splitFloor) return null;
-      splitTime = Number((slot.startSec + halfDur).toFixed(3));
-    }
+    // Strictly require an interior beat timestamp — never create off-beat midpoint splits
+    if (splitTime === null) return null;
     const leftDur = Number((splitTime - slot.startSec).toFixed(3));
     const rightDur = Number((slot.startSec + slot.dur - splitTime).toFixed(3));
-    if (leftDur < splitFloor || rightDur < splitFloor) return null;
+    if (leftDur < effFloor || rightDur < effFloor) return null;
     const midImpact =
       (onsetAccent[splitBeatIdx] ?? slot.cutImpact) * 0.55 +
       (melodicNovelty[splitBeatIdx] ?? 0.4) * 0.45;
@@ -5044,7 +5077,18 @@ export function generateAutoClipPlan(
       }
 
       if (matchedIdx < 0) {
-        if (!fillToTargetEnd) {
+        if (strictSingleUse && splitGuard < Math.max(450, workingSlots.length * 2)) {
+          const fineFloor = Math.max(0.42, Math.min(splitFloor, beatSec * 0.92));
+          if (hasAnyUnusedFootage(fineFloor)) {
+            const finePair = splitSlotAtBeat(slot, fineFloor);
+            if (finePair) {
+              splitGuard++;
+              workingSlots.splice(sIdx, 1, finePair[0], finePair[1]);
+              continue;
+            }
+          }
+        }
+        if (!fillToTargetEnd || strictSingleUse) {
           for (let off = 0; off < pool.length; off++) {
             const idx = (seqPoolPointer + off) % pool.length;
             if (canAssetFitUnused(pool[idx], slot.dur, true, true) || canAssetFitUnused(pool[idx], slot.dur, false, true)) {
@@ -5217,34 +5261,51 @@ export function generateAutoClipPlan(
     return poolToPick[Math.floor(rng() * poolToPick.length)];
   };
 
-  if (!fillToTargetEnd) {
+  if (!fillToTargetEnd || strictSingleUse) {
+    // Chronological 100% single-use pass: every photo & non-overlapping video slice is used at most once,
+    // never leaving empty timeline gaps before placed clips and never running Pass B exhaustion repeats.
     const placements: AutoBeatSlicePlacement[] = [];
     let sIdx = 0;
     let lastKey: string | null = null;
     let last2Key: string | null = null;
     let last3Key: string | null = null;
     let splitGuard = 0;
-    while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
-      const slot = workingSlots[sIdx];
-      let rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
-      let eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
-      if (eligible.length === 0) {
-        if (hasAnyUnusedFootage(splitFloor) && splitGuard < Math.max(300, workingSlots.length)) {
-          const pair = splitSlotAtBeat(slot);
-          if (pair) {
-            splitGuard++;
-            workingSlots.splice(sIdx, 1, pair[0], pair[1]);
-            continue;
-          }
-        }
-        rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
-        eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
+    const fineSplitFloor = strictSingleUse
+      ? Math.max(0.42, Math.min(splitFloor, beatSec * 0.92))
+      : splitFloor;
+
+    const getUnusedRemainingSec = (entry: PoolAsset): number => {
+      if (entry.kind === 'image') return usedImageKeys.has(entry.contentKey) ? 0 : 1.5;
+      const ranges = freeRangesByKey.get(entry.contentKey) ?? [];
+      let sum = 0;
+      for (const [rs, re] of ranges) sum += Math.max(0, re - rs);
+      return sum / entry.rate;
+    };
+
+    const pickStrictCandidate = (candidates: PoolAsset[], slot: MusicalSlot): PoolAsset => {
+      if (candidates.length === 1) return candidates[0];
+      const neverUsed = candidates.filter((e) => (usageCountByKey.get(e.contentKey) ?? 0) === 0);
+      const base = neverUsed.length > 0 ? neverUsed : candidates;
+      if (strictSingleUse && neverUsed.length === 0 && base.length > 1) {
+        // Load-balance remaining unused span so multiple source videos drain evenly without bunching one file at the end
+        const sortedByRem = [...base].sort(
+          (a, b) => getUnusedRemainingSec(b) - getUnusedRemainingSec(a)
+        );
+        const topPool = sortedByRem.slice(0, Math.max(2, Math.ceil(sortedByRem.length * 0.65)));
+        return pickShuffledAsset(
+          topPool,
+          slot,
+          placements.length,
+          lastKey,
+          null,
+          last2Key,
+          null,
+          last3Key,
+          null
+        );
       }
-      if (eligible.length === 0) {
-        break;
-      }
-      const chosen = pickShuffledAsset(
-        eligible,
+      return pickShuffledAsset(
+        base,
         slot,
         placements.length,
         lastKey,
@@ -5254,6 +5315,41 @@ export function generateAutoClipPlan(
         last3Key,
         null
       );
+    };
+
+    while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
+      const slot = workingSlots[sIdx];
+      let rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
+      let eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
+      if (eligible.length === 0) {
+        if (hasAnyUnusedFootage(splitFloor) && splitGuard < Math.max(350, workingSlots.length)) {
+          const pair = splitSlotAtBeat(slot);
+          if (pair) {
+            splitGuard++;
+            workingSlots.splice(sIdx, 1, pair[0], pair[1]);
+            continue;
+          }
+        }
+        rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, false, false));
+        eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
+        if (
+          strictSingleUse &&
+          eligible.length === 0 &&
+          hasAnyUnusedFootage(fineSplitFloor) &&
+          splitGuard < Math.max(450, workingSlots.length * 2)
+        ) {
+          const finePair = splitSlotAtBeat(slot, fineSplitFloor);
+          if (finePair) {
+            splitGuard++;
+            workingSlots.splice(sIdx, 1, finePair[0], finePair[1]);
+            continue;
+          }
+        }
+      }
+      if (eligible.length === 0) {
+        break;
+      }
+      const chosen = pickStrictCandidate(eligible, slot);
       const { sourceStartSec, rate } = takeUnusedSlice(chosen, slot.dur, false, placements.length);
       placements.push(buildPlacementForSlot(slot, placements.length, chosen, sourceStartSec, rate));
       last3Key = last2Key;
@@ -5823,6 +5919,7 @@ export function planAutoClipsAroundLocked(
         shuffleOrder: autoCfg.shuffleOrder,
         excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
         fillToTargetEnd: Boolean(options.hasAudio),
+        strictSingleUse: !autoCfg.allowReuseWhenExhausted,
         hasAudio: Boolean(options.hasAudio),
         monoData: options.monoData,
         sampleRate: options.sampleRate,
@@ -5896,6 +5993,7 @@ export function planAutoClipsAroundLocked(
         excludeUsedUrls: usedUrls,
         excludeVideoRangesByUrl: usedVideoRanges,
         fillToTargetEnd: true,
+        strictSingleUse: !autoCfg.allowReuseWhenExhausted,
         hasAudio: Boolean(options.hasAudio),
         monoData: options.monoData,
         sampleRate: options.sampleRate,

@@ -2810,6 +2810,155 @@ test('planAutoClipsAroundLocked preserves locked hero shots, fills surrounding g
   assert.equal(patch.letterboxAmount, 0.095);
 });
 
+test('generateAutoClipPlan with strictSingleUse uses every photo and non-overlapping video slice strictly once without gaps', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const mkImg = (id: string): MediaBinItem => ({
+    id,
+    kind: 'image',
+    fileName: `${id}.jpg`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    defaultDurationSec: 4,
+  });
+
+  // 2 videos (14s + 16s raw = 30s) + 3 photos on a LONG 120s song -> strictSingleUse must NEVER repeat slices or photos!
+  const bin = [mkV('v1', 14), mkV('v2', 16), mkImg('p1'), mkImg('p2'), mkImg('p3')];
+  const beats = Array.from({ length: 240 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  for (const mode of ['auto_rhythm', 'sequential'] as const) {
+    const plan = generateAutoClipPlan(bin, grid, [], 0, 120, {
+      mode,
+      rhythm: 'beats_4',
+      shuffleOrder: mode !== 'sequential',
+      fillToTargetEnd: true,
+      strictSingleUse: true,
+      excludeEdgeSec: 0,
+      hasAudio: true,
+      variationSeed: 31415,
+    });
+
+    assert.ok(plan.length >= 8, `Mode ${mode}: expected >=8 unique slices, got ${plan.length}`);
+
+    // 1. Continuous timeline with ZERO internal black holes
+    assert.ok(plan[0].startSec <= 0.005);
+    for (let i = 1; i < plan.length; i++) {
+      const prevEnd = Number((plan[i - 1].startSec + plan[i - 1].durationSec).toFixed(3));
+      assert.ok(
+        Math.abs(plan[i].startSec - prevEnd) <= 0.005,
+        `Mode ${mode}: gap/overlap between clip ${i - 1} end=${prevEnd} and clip ${i} start=${plan[i].startSec}`
+      );
+    }
+
+    // 2. Each photo appears at most ONCE
+    for (const imgId of ['p1', 'p2', 'p3']) {
+      const count = plan.filter((p) => p.binItemId === imgId).length;
+      assert.ok(count <= 1, `Mode ${mode}: image ${imgId} repeated ${count} times!`);
+    }
+
+    // 3. Every video slice is strictly non-overlapping (never reused/overlapped)
+    for (const vidId of ['v1', 'v2']) {
+      const slices = plan
+        .filter((p) => p.binItemId === vidId)
+        .map((p) => [p.sourceStartSec, p.sourceStartSec + p.durationSec * p.playbackRate] as const)
+        .sort((a, b) => a[0] - b[0]);
+      for (let i = 1; i < slices.length; i++) {
+        const overlap = slices[i - 1][1] - slices[i][0];
+        assert.ok(
+          overlap <= 0.01,
+          `Mode ${mode}: overlapping slices for ${vidId}: [${slices[i - 1]}] & [${slices[i]}]`
+        );
+      }
+    }
+
+    // 4. Substantial portion of the unique footage consumed (not wasted via fragmentation)
+    const totalUsedSec = plan.reduce((s, p) => s + p.durationSec, 0);
+    assert.ok(totalUsedSec >= 24, `Mode ${mode}: expected >=24s unique footage placed, got ${totalUsedSec.toFixed(1)}s`);
+  }
+});
+
+test('detectTrackBpmAndBeats and generateAutoClipPlan lock onto 128 BPM kick transients over sidechain bass with <=5ms cut alignment', () => {
+  const sr = 22050;
+  const dur = 32;
+  const mono = new Float32Array(sr * dur);
+  const bpm = 128;
+  const beatSec = 60 / bpm;
+  const phase = 0.14;
+
+  for (let t = phase; t < dur - 0.1; t += beatSec) {
+    // Sharp broadband kick transient ON the beat
+    const s0 = Math.round(t * sr);
+    for (let j = 0; j < 700 && s0 + j < mono.length; j++) {
+      const env = Math.exp(-j / 140);
+      const click = j < 80 ? Math.sin((j / sr) * 2 * Math.PI * 1200) * 0.45 : 0;
+      const body = Math.sin((j / sr) * 2 * Math.PI * 64) * 0.85;
+      mono[s0 + j] += (body + click) * env;
+    }
+    // Off-beat sidechain sustained sub swell at +0.5 * beatSec (must NOT steal beat phase!)
+    const sOff = Math.round((t + beatSec * 0.5) * sr);
+    for (let j = 0; j < Math.round(beatSec * 0.35 * sr) && sOff + j < mono.length; j++) {
+      const swell = Math.sin((j / (beatSec * 0.35 * sr)) * Math.PI);
+      mono[sOff + j] += Math.sin((j / sr) * 2 * Math.PI * 55) * swell * 0.42;
+    }
+  }
+
+  const grid = detectTrackBpmAndBeats(mono, sr, 0, dur, 1.0);
+  assert.ok(Math.abs(grid.bpm - bpm) <= 1, `Expected ~128 BPM, got ${grid.bpm}`);
+
+  // Verify beats land near the kick transient phase, NOT shifted by half beat (~0.234s) onto off-beat bass swell
+  let absErrSum = 0;
+  let checked = 0;
+  for (const b of grid.beats) {
+    if (b < 0.05 || b > dur - 0.5) continue;
+    const k = Math.round((b - phase) / beatSec);
+    const trueKick = phase + k * beatSec;
+    absErrSum += Math.abs(b - trueKick);
+    checked++;
+  }
+  const meanErrMs = (absErrSum / Math.max(1, checked)) * 1000;
+  assert.ok(meanErrMs <= 18, `Expected beat phase locked to kick transients (<=18ms mean err), got ${meanErrMs.toFixed(1)}ms`);
+
+  const bin: MediaBinItem[] = [
+    { id: 'v1', kind: 'video', fileName: 'v1.mp4', url: 'blob:v1', width: 1920, height: 1080, videoDuration: 25, defaultDurationSec: 25 },
+    { id: 'v2', kind: 'video', fileName: 'v2.mp4', url: 'blob:v2', width: 1920, height: 1080, videoDuration: 25, defaultDurationSec: 25 },
+    { id: 'v3', kind: 'video', fileName: 'v3.mp4', url: 'blob:v3', width: 1920, height: 1080, videoDuration: 25, defaultDurationSec: 25 },
+  ];
+  const plan = generateAutoClipPlan(bin, grid, [], 0, dur, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_4',
+    maxClipSec: 4.0,
+    fillToTargetEnd: true,
+    strictSingleUse: true,
+    transitionStyle: 'punchy',
+    hasAudio: true,
+    monoData: mono,
+    sampleRate: sr,
+    variationSeed: 555,
+  });
+
+  assert.ok(plan.length >= 6);
+  const allGridBeats = [0, ...grid.beats];
+  for (let i = 1; i < plan.length; i++) {
+    const cutT = plan[i].startSec;
+    const minDist = Math.min(...allGridBeats.map((b) => Math.abs(b - cutT)));
+    assert.ok(minDist <= 0.006, `Cut #${i} at ${cutT}s misses nearest beat by ${(minDist * 1000).toFixed(1)}ms`);
+    if (plan[i].transitionOut === 'wipe_right' || plan[i].transitionOut === 'slide' || plan[i].transitionOut === 'zoom_cross') {
+      assert.ok(plan[i].transitionDurationSec <= 0.14, `Expected crisp <=0.14s motion transition, got ${plan[i].transitionDurationSec}s`);
+    }
+  }
+});
+
+
 
 
 

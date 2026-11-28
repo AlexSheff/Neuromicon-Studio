@@ -68,7 +68,6 @@ import {
   DEFAULT_CLIP_TRANSFORM,
   DEFAULT_STUDIO_CONFIG,
   GENERATOR_EFFECTS,
-  resolveAutoClipLookConfigPatch,
 } from './utils/presets';
 import { proceduralShaderEngine } from './utils/proceduralShaders';
 import {
@@ -783,10 +782,10 @@ export default function App() {
         }
         const upcoming = items[s.clipIndex];
         if (!upcoming || upcoming.kind !== 'video') continue;
-        if (dt <= 4.8 || upcomingVideoCount < 6) {
+        if (dt <= 6.2 || upcomingVideoCount < 8) {
           preloadWindowIds.add(upcoming.id);
           keepAttachedIds.add(upcoming.id);
-          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 6 && dt <= 4.5) {
+          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 10 && dt <= 6.2) {
             const vDur = upcoming.videoDuration || 1;
             const maxSafe = Math.max(0, vDur - 0.04);
             prewarmTargets.set(
@@ -795,14 +794,14 @@ export default function App() {
             );
           }
           upcomingVideoCount++;
-        } else if (dt <= 10 && keepAttachedIds.size < 16) {
+        } else if (dt <= 12 && keepAttachedIds.size < 22) {
           keepAttachedIds.add(upcoming.id);
         }
-        if (keepAttachedIds.size >= 16 && dt > 10) break;
+        if (keepAttachedIds.size >= 22 && dt > 12) break;
       }
 
       const totalVideoCount = items.reduce((acc, it) => acc + (it.kind === 'video' ? 1 : 0), 0);
-      const enforceDecoderBudget = totalVideoCount > 18;
+      const enforceDecoderBudget = totalVideoCount > 24;
 
       items.forEach((item) => {
         if (item.kind !== 'video' || !item.videoElement) return;
@@ -1342,10 +1341,6 @@ export default function App() {
         video.preload = 'metadata';
         video.onloadedmetadata = () => {
           const vDur = video.duration || 10;
-          const trimEdges = vDur >= 12.5;
-          const initStart = trimEdges ? 5 : 0;
-          const initEnd = trimEdges ? Number((vDur - 5).toFixed(1)) : Number(vDur.toFixed(1));
-          const usableDur = Math.max(0.5, initEnd - initStart);
           const newBinItem: MediaBinItem = {
             id: binId,
             kind: 'video',
@@ -1354,9 +1349,7 @@ export default function App() {
             width: video.videoWidth || 1080,
             height: video.videoHeight || 1920,
             videoDuration: vDur,
-            defaultSourceStartSec: initStart,
-            defaultSourceEndSec: initEnd,
-            defaultDurationSec: Number(Math.max(0.5, Math.min(600, usableDur)).toFixed(1)),
+            defaultDurationSec: Number(Math.max(0.5, Math.min(600, vDur)).toFixed(1)),
           };
           pushImmediateHistory();
           const nextBinVid = [...mediaBinRef.current, newBinItem];
@@ -2440,6 +2433,7 @@ export default function App() {
             excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
             excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
             fillToTargetEnd: Boolean(aud),
+            strictSingleUse: !autoCfg.allowReuseWhenExhausted,
             hasAudio: Boolean(aud),
             monoData: monoDataRef.current,
             sampleRate: aud?.sampleRate,
@@ -2522,20 +2516,25 @@ export default function App() {
       setSelectedFxId(null);
 
       const desiredCentered = autoCfg.beatCenteredTransitions ?? true;
-      const lookPatch = resolveAutoClipLookConfigPatch(
-        autoCfg.lookPreset ?? 'keep',
-        Boolean(autoCfg.cleanFootage),
-        autoCfg.letterboxBars
-      );
       setConfig((prev) => ({
         ...prev,
-        ...lookPatch,
         slideshowMode: 'manual',
         beatCenteredTransitions: desiredCentered,
       }));
 
+      const lastPlacedEnd = nextItems.reduce(
+        (maxEnd, item) => Math.max(maxEnd, (item.startSec ?? 0) + item.durationSec),
+        0
+      );
       if (hasLockedInReplace && preservedLockedClips.length > 0) {
         showUndoToast(tFor(langRef.current).lockedPreservedToast);
+      } else if (
+        aud &&
+        !autoCfg.allowReuseWhenExhausted &&
+        !autoCfg.targetDurationSec &&
+        lastPlacedEnd < maxLimit - 1.25
+      ) {
+        showUndoToast(tFor(langRef.current).autoClipExhaustedToast);
       }
 
       const focusLocal = isAppend ? startOffsetSec : 0;
@@ -5038,7 +5037,7 @@ export default function App() {
       let elapsedSec = 0;
       if (hasAudioSource && audioCtxRef.current) {
         const ctx = audioCtxRef.current;
-        const latency = Math.max(0, ctx.outputLatency || 0);
+        const latency = Math.min(0.18, Math.max(0, ctx.outputLatency || ctx.baseLatency || 0));
         elapsedSec = Math.max(0, ctx.currentTime - latency - playStartCtxTimeRef.current);
       } else {
         elapsedSec = Math.max(0, (now - playStartPerfMsRef.current) / 1000);
