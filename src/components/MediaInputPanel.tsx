@@ -45,6 +45,7 @@ import {
 import {
   AUTO_CLIP_PRESETS,
   AutoClipGenerateConfig,
+  AutoClipMediaPriority,
   AutoClipMode,
   AutoClipMotionLevel,
   AutoClipPresetId,
@@ -60,7 +61,12 @@ import {
   TrackBeatGrid,
   TrackStructureAnalysis,
 } from '../utils/audioAnalyzer';
-import { GENERATOR_EFFECTS } from '../utils/presets';
+import {
+  AUTO_CLIP_LOOK_PRESETS,
+  AutoClipLookId,
+  GENERATOR_EFFECTS,
+  resolveAutoClipLookConfigPatch,
+} from '../utils/presets';
 import { MediaPreviewModal } from './MediaPreviewModal';
 
 type MediaPanelTab = 'media' | 'layers' | 'timing';
@@ -128,6 +134,7 @@ interface MediaInputPanelProps {
   onUpdateOverlay: (id: string, patch: Partial<OverlayLayer>) => void;
   onRemoveOverlay: (id: string) => void;
   onResetAutosave: () => void;
+  onSeekAbsolute?: (sec: number) => void;
   widthPx?: number;
 }
 
@@ -189,6 +196,7 @@ export function MediaInputPanel({
   onUpdateOverlay,
   onRemoveOverlay,
   onResetAutosave,
+  onSeekAbsolute,
   widthPx,
 }: MediaInputPanelProps) {
   const t = tFor(lang);
@@ -316,6 +324,40 @@ export function MediaInputPanel({
         return t.autoPresetSlowDream;
       case 'beat_flash':
         return t.autoPresetBeatFlash;
+    }
+  };
+
+  const lookLabel = (id: AutoClipLookId): string => {
+    switch (id) {
+      case 'clean_cinema':
+        return t.autoLookClean;
+      case 'film_35mm':
+        return t.autoLookFilm35mm;
+      case 'teal_orange':
+        return t.autoLookTealOrange;
+      case 'neon_night':
+        return t.autoLookNeon;
+      case 'golden_hour':
+        return t.autoLookGolden;
+      case 'noir_bw':
+        return t.autoLookNoir;
+      case 'keep':
+      default:
+        return t.autoLookKeep;
+    }
+  };
+
+  const handleSelectAutoLook = (lookId: AutoClipLookId) => {
+    setAutoClipCfg((prev) => ({ ...prev, lookPreset: lookId }));
+    if (lookId !== 'keep') {
+      const patch = resolveAutoClipLookConfigPatch(
+        lookId,
+        Boolean(autoClipCfg.cleanFootage),
+        autoClipCfg.letterboxBars
+      );
+      if (Object.keys(patch).length > 0) {
+        onUpdateConfig(patch);
+      }
     }
   };
 
@@ -1479,33 +1521,45 @@ export function MediaInputPanel({
                       </button>
                     </div>
 
-                    {/* Detected Musical Composition Bar */}
+                    {/* Detected Musical Composition Bar (clickable to seek) */}
                     {songStructure && songStructure.segments.length > 0 && audio && (
                       <div className="space-y-1 rounded border border-[#262B38] bg-[#0B0D11]/80 px-2 py-1.5">
                         <div className="flex items-center justify-between text-[9.5px] text-gray-400">
                           <span>{t.songStructureTitle}</span>
-                          <span className="font-mono text-gray-500">
-                            {songStructure.segments.length}
+                          <span className="text-[9px] text-gray-500">
+                            {t.songStructureSeekHint} ·{' '}
+                            <span className="font-mono">{songStructure.segments.length}</span>
                           </span>
                         </div>
-                        <div className="flex h-2 w-full rounded overflow-hidden bg-[#141821] gap-[1px]">
+                        <div className="flex h-2.5 w-full rounded overflow-hidden bg-[#141821] gap-[1px]">
                           {(() => {
                             const totalSpan = Math.max(
                               0.5,
                               songStructure.segments[songStructure.segments.length - 1].endSec -
                                 songStructure.segments[0].startSec
                             );
+                            const localNow = Math.max(0, currentTime - (config.trimStart || 0));
                             return songStructure.segments.map((seg, sIdx) => {
                               const pct = Math.max(
                                 2,
                                 ((seg.endSec - seg.startSec) / totalSpan) * 100
                               );
+                              const isCurrentSeg =
+                                localNow >= seg.startSec && localNow < seg.endSec;
                               return (
-                                <div
+                                <button
                                   key={`${seg.type}-${sIdx}`}
+                                  type="button"
+                                  onClick={() =>
+                                    onSeekAbsolute?.(Math.max(0, (config.trimStart || 0) + seg.startSec))
+                                  }
                                   style={{ width: `${pct}%` }}
                                   title={`${sectionLabel(seg.type)} (${seg.startSec.toFixed(1)}s–${seg.endSec.toFixed(1)}s)`}
-                                  className={`h-full ${sectionColorClass(seg.type)} transition-opacity hover:opacity-100 opacity-85`}
+                                  className={`h-full ${sectionColorClass(seg.type)} transition-opacity cursor-pointer ${
+                                    isCurrentSeg
+                                      ? 'opacity-100 ring-1 ring-inset ring-white/80'
+                                      : 'opacity-80 hover:opacity-100'
+                                  }`}
                                 />
                               );
                             });
@@ -1516,7 +1570,7 @@ export function MediaInputPanel({
                             (secType) => (
                               <span key={secType} className="inline-flex items-center gap-1">
                                 <span
-                                  className={`w-1.5 h-1.5 rounded-full ${sectionColorClass(secType)}`}
+                                  className={`w-2 h-2 rounded-xs ${sectionColorClass(secType)}`}
                                 />
                                 {sectionLabel(secType)}
                               </span>
@@ -1660,6 +1714,69 @@ export function MediaInputPanel({
                       </div>
                     )}
 
+                    {/* Quick Visual Look & Clean Cinema Frame Options */}
+                    <div className="space-y-1.5 pt-0.5 border-t border-[#262B38]/70">
+                      <span className="text-[9.5px] uppercase tracking-wider text-gray-500 font-medium block">
+                        {t.autoClipLookLabel}
+                      </span>
+                      <div className="grid grid-cols-4 gap-1">
+                        {AUTO_CLIP_LOOK_PRESETS.map((look) => {
+                          const isActive = (autoClipCfg.lookPreset ?? 'clean_cinema') === look.id;
+                          return (
+                            <button
+                              key={look.id}
+                              type="button"
+                              onClick={() => handleSelectAutoLook(look.id)}
+                              className={`py-1 px-1 rounded border text-[9px] font-medium cursor-pointer truncate flex items-center gap-1 ${
+                                isActive
+                                  ? 'border-cyan-400/90 bg-cyan-500/15 text-cyan-200'
+                                  : 'border-[#262B38] bg-[#0E1016] text-gray-300 hover:border-gray-500'
+                              }`}
+                            >
+                              <span
+                                className="w-2 h-2 rounded-xs shrink-0 border border-white/20"
+                                style={{
+                                  background: `linear-gradient(135deg, ${look.swatch[0]}, ${look.swatch[1]})`,
+                                }}
+                                aria-hidden="true"
+                              />
+                              <span className="truncate">{lookLabel(look.id)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                        <label className="flex items-center justify-between gap-1.5 rounded border border-[#262B38] bg-[#0E1016] px-2 py-1 text-[9.5px] text-gray-300 cursor-pointer">
+                          <span className="truncate">{t.autoClipCleanFootageLabel}</span>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(autoClipCfg.cleanFootage)}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setAutoClipCfg((prev) => ({ ...prev, cleanFootage: checked }));
+                              if (checked) {
+                                onUpdateConfig({ generatorEffect: 'none' });
+                              }
+                            }}
+                            className="accent-cyan-400 w-3 h-3 rounded cursor-pointer shrink-0"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between gap-1.5 rounded border border-[#262B38] bg-[#0E1016] px-2 py-1 text-[9.5px] text-gray-300 cursor-pointer">
+                          <span className="truncate">{t.autoClipLetterboxLabel}</span>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(autoClipCfg.letterboxBars)}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setAutoClipCfg((prev) => ({ ...prev, letterboxBars: checked }));
+                              onUpdateConfig({ letterboxAmount: checked ? 0.095 : 0 });
+                            }}
+                            className="accent-amber-400 w-3 h-3 rounded cursor-pointer shrink-0"
+                          />
+                        </label>
+                      </div>
+                    </div>
+
                     {/* Expandable Fine Settings */}
                     {autoSettingsOpen && (
                       <div className="rounded-md border border-[#262B38] bg-[#0E1016] p-2 space-y-2">
@@ -1729,6 +1846,40 @@ export function MediaInputPanel({
                                 }`}
                               >
                                 {ml.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Media Mix Priority */}
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-gray-400 block">
+                            {t.autoClipMediaMixLabel}
+                          </span>
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                { id: 'auto', label: t.autoClipMixAuto },
+                                { id: 'video_first', label: t.autoClipMixVideoFirst },
+                                { id: 'photo_beats', label: t.autoClipMixPhotoBeats },
+                              ] as { id: AutoClipMediaPriority; label: string }[]
+                            ).map((mp) => (
+                              <button
+                                key={mp.id}
+                                type="button"
+                                onClick={() =>
+                                  setAutoClipCfg((prev) => ({
+                                    ...prev,
+                                    mediaPriority: mp.id,
+                                  }))
+                                }
+                                className={`py-1 px-1 rounded border text-[9.5px] cursor-pointer truncate ${
+                                  (autoClipCfg.mediaPriority ?? 'auto') === mp.id
+                                    ? 'border-emerald-500/80 bg-emerald-500/15 text-emerald-200'
+                                    : 'border-[#262B38] bg-[#141821] text-gray-400 hover:border-gray-500'
+                                }`}
+                              >
+                                {mp.label}
                               </button>
                             ))}
                           </div>

@@ -27,6 +27,7 @@ import {
   moveManualClipGroup,
   packTimelineLanes,
   pickAutoReplacementForTimelineClip,
+  planAutoClipsAroundLocked,
   resizeManualClipDuration,
   resolveActiveSlideshowSlice,
   resolveCalibratedBeatGrid,
@@ -38,6 +39,7 @@ import { parseID3Tags } from '../id3Parser';
 import {
   DEFAULT_CLIP_TRANSFORM,
   DEFAULT_STUDIO_CONFIG,
+  resolveAutoClipLookConfigPatch,
   STUDIO_CINEMA_PRESETS,
   STUDIO_MOOD_PRESETS,
 } from '../presets';
@@ -2620,6 +2622,192 @@ test('pickAutoReplacementForTimelineClip replaces without repeating current clip
   assert.ok(soloRes);
   assert.equal(soloRes.binItem.id, 'v1');
   assert.ok(Math.abs(soloRes.sourceStartSec - 6) >= 4, `Expected shifted slice away from 6s, got ${soloRes.sourceStartSec}s`);
+});
+
+test('generateAutoClipPlan assigns directional camera choreography while keeping short photos & off static', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const mkImg = (id: string): MediaBinItem => ({
+    id,
+    kind: 'image',
+    fileName: `${id}.jpg`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    defaultDurationSec: 4,
+  });
+
+  const bin = [mkV('v1', 24), mkV('v2', 24), mkImg('p1'), mkImg('p2')];
+  const beats = Array.from({ length: 64 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const dynPlan = generateAutoClipPlan(bin, grid, [], 0, 32, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_4',
+    motionLevel: 'dynamic',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    variationSeed: 404,
+  });
+  assert.ok(dynPlan.length >= 6);
+  // Dynamic plan should include directional pan sweeps and/or pull-out zooms
+  const hasPanOrPullOut = dynPlan.some(
+    (p) =>
+      Math.abs((p.panEndX ?? 0) - (p.panStartX ?? 0)) > 0.005 ||
+      p.scaleStart > p.scaleEnd
+  );
+  assert.ok(hasPanOrPullOut, 'Expected directional pan or zoom-out choreography on dynamic motion');
+
+  // Off motion keeps all clips completely static (scale 1.0, pan 0)
+  const offPlan = generateAutoClipPlan(bin, grid, [], 0, 24, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_4',
+    motionLevel: 'off',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    variationSeed: 404,
+  });
+  assert.ok(offPlan.length >= 4);
+  for (const p of offPlan) {
+    assert.equal(p.scaleStart, 1.0);
+    assert.equal(p.scaleEnd, 1.0);
+    assert.equal(p.panStartX ?? 0, 0);
+    assert.equal(p.panEndX ?? 0, 0);
+  }
+});
+
+test('generateAutoClipPlan honors mediaPriority (video_first vs photo_beats) on mixed media bins', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const mkImg = (id: string): MediaBinItem => ({
+    id,
+    kind: 'image',
+    fileName: `${id}.jpg`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    defaultDurationSec: 4,
+  });
+  const bin = [mkV('v1', 35), mkV('v2', 35), mkImg('p1'), mkImg('p2')];
+  const beats = Array.from({ length: 64 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const videoFirst = generateAutoClipPlan(bin, grid, [], 0, 28, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_4',
+    mediaPriority: 'video_first',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    variationSeed: 101,
+  });
+  const vidCountVF = videoFirst.filter((p) => p.binItemId.startsWith('v')).length;
+  assert.ok(vidCountVF >= Math.ceil(videoFirst.length * 0.7), 'video_first should heavily favor video');
+
+  const photoBeats = generateAutoClipPlan(bin, grid, [], 0, 28, {
+    mode: 'auto_rhythm',
+    rhythm: 'beats_2',
+    mediaPriority: 'photo_beats',
+    fillToTargetEnd: true,
+    hasAudio: true,
+    variationSeed: 101,
+  });
+  const photoCountPB = photoBeats.filter((p) => p.binItemId.startsWith('p')).length;
+  assert.ok(photoCountPB >= 2, `photo_beats should schedule multiple photos on beats (got ${photoCountPB})`);
+});
+
+test('planAutoClipsAroundLocked preserves locked hero shots, fills surrounding gaps cleanly without overlap, and resolves look patch', () => {
+  const mkV = (id: string, dur: number): MediaBinItem => ({
+    id,
+    kind: 'video',
+    fileName: `${id}.mp4`,
+    url: `blob:${id}`,
+    width: 1920,
+    height: 1080,
+    videoDuration: dur,
+    defaultDurationSec: dur,
+  });
+  const bin = [mkV('v1', 30), mkV('v2', 30), mkV('v3', 30)];
+  const beats = Array.from({ length: 64 }, (_, i) => Number((i * 0.5).toFixed(2)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const lockedHero: VisualMediaState = {
+    ...makeClip('hero_lock', 4),
+    kind: 'video',
+    fileName: 'v1.mp4',
+    url: 'blob:v1',
+    videoDuration: 30,
+    startSec: 8,
+    durationSec: 4,
+    sourceStartSec: 12,
+    locked: true,
+  };
+
+  const res = planAutoClipsAroundLocked(
+    [lockedHero, makeClip('unlocked_old', 4)],
+    bin,
+    grid,
+    [],
+    0,
+    24,
+    {
+      mode: 'auto_rhythm',
+      rhythm: 'beats_4',
+      transitionStyle: 'musical',
+      motionLevel: 'gentle',
+      minClipSec: 1.5,
+      maxClipSec: 6,
+      targetDurationSec: null,
+      targetMode: 'replace',
+      avoidAdjacentRepeat: true,
+      shuffleOrder: true,
+      excludeEdgeSec: 5,
+      variationSeed: 999,
+    },
+    { hasAudio: true }
+  );
+
+  assert.equal(res.lockedClips.length, 1);
+  assert.equal(res.lockedClips[0].id, 'hero_lock');
+  assert.equal(res.lockedClips[0].startSec, 8);
+  assert.equal(res.lockedClips[0].durationSec, 4);
+
+  const beforeGap = res.placements.filter((p) => p.startSec < 8);
+  const afterGap = res.placements.filter((p) => p.startSec >= 12);
+  assert.ok(beforeGap.length >= 2, 'Expected auto placements before locked clip');
+  assert.ok(afterGap.length >= 2, 'Expected auto placements after locked clip');
+
+  for (const p of res.placements) {
+    const pEnd = p.startSec + p.durationSec;
+    const overlapLocked = Math.min(pEnd, 12) - Math.max(p.startSec, 8);
+    assert.ok(overlapLocked <= 0.05, `Placement [${p.startSec}..${pEnd}] overlaps locked [8..12]`);
+    if (p.binItemId === 'v1') {
+      const srcOverlap =
+        Math.min(p.sourceStartSec + p.durationSec * p.playbackRate, 16) -
+        Math.max(p.sourceStartSec, 12);
+      assert.ok(srcOverlap <= 0.1, 'Reused locked video slice [12..16] inside gap fill');
+    }
+  }
+
+  const patch = resolveAutoClipLookConfigPatch('teal_orange', true, true);
+  assert.equal(patch.lutPreset, 'teal_orange');
+  assert.equal(patch.generatorEffect, 'none');
+  assert.equal(patch.letterboxAmount, 0.095);
 });
 
 

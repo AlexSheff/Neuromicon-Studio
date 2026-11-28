@@ -529,6 +529,128 @@ export function resolveColorScheme(
   return COLOR_SCHEMES.find((s) => s.id === id) || COLOR_SCHEMES[0];
 }
 
+export type AutoClipLookId =
+  | 'keep'
+  | 'clean_cinema'
+  | 'film_35mm'
+  | 'teal_orange'
+  | 'neon_night'
+  | 'golden_hour'
+  | 'noir_bw';
+
+export interface AutoClipLookDef {
+  id: AutoClipLookId;
+  swatch: [string, string];
+  patch: Partial<StudioConfig>;
+}
+
+export const AUTO_CLIP_LOOK_PRESETS: AutoClipLookDef[] = [
+  {
+    id: 'keep',
+    swatch: ['#334155', '#64748B'],
+    patch: {},
+  },
+  {
+    id: 'clean_cinema',
+    swatch: ['#1E293B', '#E2E8F0'],
+    patch: {
+      lutPreset: 'none',
+      mediaFilter: 'high_contrast',
+      mediaBrightness: 1.0,
+      mediaBlur: 0,
+      vignetteAmount: 0.22,
+      scrimStrength: 0.2,
+      glitchStrength: 0,
+    },
+  },
+  {
+    id: 'film_35mm',
+    swatch: ['#D97706', '#FDE68A'],
+    patch: {
+      lutPreset: 'vintage_gold',
+      mediaFilter: 'warm_film',
+      mediaBrightness: 1.02,
+      mediaBlur: 0,
+      vignetteAmount: 0.36,
+      scrimStrength: 0.24,
+      glitchStrength: 0,
+      colorSchemeId: 'warm_copper',
+    },
+  },
+  {
+    id: 'teal_orange',
+    swatch: ['#0D9488', '#EA580C'],
+    patch: {
+      lutPreset: 'teal_orange',
+      mediaFilter: 'high_contrast',
+      mediaBrightness: 0.98,
+      mediaBlur: 0,
+      vignetteAmount: 0.4,
+      scrimStrength: 0.24,
+      glitchStrength: 0,
+      colorSchemeId: 'obsidian_amber',
+    },
+  },
+  {
+    id: 'neon_night',
+    swatch: ['#C026D3', '#0EA5E9'],
+    patch: {
+      lutPreset: 'cyber_magenta',
+      mediaFilter: 'high_contrast',
+      mediaBrightness: 0.98,
+      mediaBlur: 0,
+      vignetteAmount: 0.38,
+      scrimStrength: 0.26,
+      glitchStrength: 0.08,
+      colorSchemeId: 'cobalt_ice',
+    },
+  },
+  {
+    id: 'golden_hour',
+    swatch: ['#F59E0B', '#FB923C'],
+    patch: {
+      lutPreset: 'sunset_amber',
+      mediaFilter: 'warm_film',
+      mediaBrightness: 1.03,
+      mediaBlur: 0,
+      vignetteAmount: 0.32,
+      scrimStrength: 0.2,
+      glitchStrength: 0,
+      colorSchemeId: 'warm_copper',
+    },
+  },
+  {
+    id: 'noir_bw',
+    swatch: ['#18181B', '#D4D4D8'],
+    patch: {
+      lutPreset: 'bleach_bypass',
+      mediaFilter: 'bw',
+      mediaBrightness: 0.98,
+      mediaBlur: 0,
+      vignetteAmount: 0.48,
+      scrimStrength: 0.28,
+      glitchStrength: 0,
+      colorSchemeId: 'monochrome_silver',
+    },
+  },
+];
+
+export function resolveAutoClipLookConfigPatch(
+  lookId: AutoClipLookId = 'keep',
+  cleanFootage = false,
+  letterboxBars?: boolean
+): Partial<StudioConfig> {
+  const def = AUTO_CLIP_LOOK_PRESETS.find((l) => l.id === lookId);
+  const patch: Partial<StudioConfig> = def ? { ...def.patch } : {};
+  if (cleanFootage) {
+    patch.generatorEffect = 'none';
+  }
+  if (letterboxBars !== undefined) {
+    patch.letterboxAmount = letterboxBars ? 0.095 : 0;
+  }
+  return patch;
+}
+
 export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   showVisualizer: true,
   visualizerColor: 'auto',
@@ -546,7 +668,7 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   stabilizeMotion: false,
   showBottomAudioTrack: true,
 
-  generatorEffect: 'space_nebula',
+  generatorEffect: 'none',
   generatorBlend: 'screen',
   generatorOpacity: 0.72,
   generatorSpeed: 1.0,
@@ -574,8 +696,9 @@ export const DEFAULT_STUDIO_CONFIG: StudioConfig = {
   glitchStrength: 0,
   mediaBrightness: 1.0,
   mediaBlur: 0,
-  scrimStrength: 0.52,
-  vignetteAmount: 0.35,
+  scrimStrength: 0.24,
+  vignetteAmount: 0.3,
+  letterboxAmount: 0,
 
   titleText: 'Midnight Resonance',
   artistText: 'Neuromicon',

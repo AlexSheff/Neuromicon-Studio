@@ -6,6 +6,7 @@ import {
   Film,
   HardDriveDownload,
   Layers,
+  Lock,
   Move,
   Orbit,
   Palette,
@@ -17,6 +18,7 @@ import {
   Sparkles,
   Trash2,
   Type,
+  Unlock,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -371,6 +373,23 @@ export function InspectorPanel({
                         </option>
                       ))}
                     </select>
+                    <button
+                      type="button"
+                      onClick={() => onUpdateClip(selectedClip.id, { locked: !selectedClip.locked })}
+                      title={selectedClip.locked ? t.clipUnlockBtn : t.clipLockBtn}
+                      aria-label={selectedClip.locked ? t.clipUnlockBtn : t.clipLockBtn}
+                      className={`p-1.5 rounded-md border cursor-pointer ${
+                        selectedClip.locked
+                          ? 'border-cyan-400/75 bg-cyan-500/20 text-cyan-200'
+                          : 'border-[#262B38] bg-[#141821] hover:border-cyan-500/60 text-gray-300 hover:text-cyan-200'
+                      }`}
+                    >
+                      {selectedClip.locked ? (
+                        <Lock className="w-3.5 h-3.5" />
+                      ) : (
+                        <Unlock className="w-3.5 h-3.5" />
+                      )}
+                    </button>
                     {onAutoReplaceClip && (
                       <button
                         type="button"
@@ -1902,6 +1921,24 @@ export function InspectorPanel({
                   step={0.05}
                   value={config.glitchStrength}
                   onChange={(e) => onUpdateConfig({ glitchStrength: Number(e.target.value) })}
+                  className="w-full studio-slider"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-300">{t.letterboxLabel}</span>
+                  <span className="font-mono tabular-nums text-gray-200">
+                    {Math.round((config.letterboxAmount ?? 0) * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={0.14}
+                  step={0.005}
+                  value={config.letterboxAmount ?? 0}
+                  onChange={(e) => onUpdateConfig({ letterboxAmount: Number(e.target.value) })}
                   className="w-full studio-slider"
                 />
               </div>

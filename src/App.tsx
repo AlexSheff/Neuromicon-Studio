@@ -52,6 +52,7 @@ import {
   insertManualClipAtAnchor,
   moveManualClipGroup,
   pickAutoReplacementForTimelineClip,
+  planAutoClipsAroundLocked,
   resolveActiveSlideshowSlice,
   resolveBeatCutPoints,
   resolveCalibratedBeatGrid,
@@ -67,6 +68,7 @@ import {
   DEFAULT_CLIP_TRANSFORM,
   DEFAULT_STUDIO_CONFIG,
   GENERATOR_EFFECTS,
+  resolveAutoClipLookConfigPatch,
 } from './utils/presets';
 import { proceduralShaderEngine } from './utils/proceduralShaders';
 import {
@@ -2388,35 +2390,65 @@ export default function App() {
       }
 
       const maxLimit = aud ? bounds.clipDuration : 3600;
-      const placements = generateAutoClipPlan(
-        binList,
-        trackBeatGrid,
-        cfg.manualBeatMarkers,
-        bounds.trimBase,
-        maxLimit,
-        {
-          mode: autoCfg.mode,
-          rhythm: autoCfg.rhythm,
-          editorialProfile: autoCfg.editorialProfile,
-          transitionStyle: autoCfg.transitionStyle,
-          motionLevel: autoCfg.motionLevel,
-          minClipSec: autoCfg.minClipSec,
-          maxClipSec: autoCfg.maxClipSec,
-          targetDurationSec: autoCfg.targetDurationSec,
-          startOffsetSec,
-          avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
-          shuffleOrder: autoCfg.shuffleOrder,
-          excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
-          excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
-          excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
-          fillToTargetEnd: Boolean(aud),
-          hasAudio: Boolean(aud),
-          monoData: monoDataRef.current,
-          sampleRate: aud?.sampleRate,
-          variationSeed: autoCfg.variationSeed,
-        }
-      );
-      if (placements.length === 0) {
+      const hasLockedInReplace = !isAppend && prevItems.some((c) => Boolean(c.locked));
+
+      let preservedLockedClips: VisualMediaState[] = [];
+      let placements = [] as ReturnType<typeof generateAutoClipPlan>;
+
+      if (hasLockedInReplace) {
+        const lockSourceItems =
+          cfg.slideshowMode !== 'manual'
+            ? snapshotSegmentDurations(prevItems, bounds.clipDuration, cfg, beatCutTimestamps)
+            : prevItems;
+        const lockedPlan = planAutoClipsAroundLocked(
+          lockSourceItems,
+          binList,
+          trackBeatGrid,
+          cfg.manualBeatMarkers,
+          bounds.trimBase,
+          maxLimit,
+          autoCfg,
+          {
+            hasAudio: Boolean(aud),
+            monoData: monoDataRef.current,
+            sampleRate: aud?.sampleRate,
+          }
+        );
+        preservedLockedClips = lockedPlan.lockedClips;
+        placements = lockedPlan.placements;
+      } else {
+        placements = generateAutoClipPlan(
+          binList,
+          trackBeatGrid,
+          cfg.manualBeatMarkers,
+          bounds.trimBase,
+          maxLimit,
+          {
+            mode: autoCfg.mode,
+            rhythm: autoCfg.rhythm,
+            editorialProfile: autoCfg.editorialProfile,
+            transitionStyle: autoCfg.transitionStyle,
+            motionLevel: autoCfg.motionLevel,
+            mediaPriority: autoCfg.mediaPriority,
+            minClipSec: autoCfg.minClipSec,
+            maxClipSec: autoCfg.maxClipSec,
+            targetDurationSec: autoCfg.targetDurationSec,
+            startOffsetSec,
+            avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
+            shuffleOrder: autoCfg.shuffleOrder,
+            excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
+            excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
+            excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
+            fillToTargetEnd: Boolean(aud),
+            hasAudio: Boolean(aud),
+            monoData: monoDataRef.current,
+            sampleRate: aud?.sampleRate,
+            variationSeed: autoCfg.variationSeed,
+          }
+        );
+      }
+
+      if (placements.length === 0 && preservedLockedClips.length === 0) {
         showError(tFor(langRef.current).errAutoClipEmpty);
         return;
       }
@@ -2424,6 +2456,7 @@ export default function App() {
       pushImmediateHistory();
       if (!isAppend) {
         for (const prevClip of prevItems) {
+          if (prevClip.locked) continue;
           if (prevClip.kind === 'video') {
             detachClipVideoElement(prevClip.videoElement);
           }
@@ -2453,46 +2486,70 @@ export default function App() {
           clipAudioVolume: aud ? 0 : clip.clipAudioVolume,
           transitionOut: p.transitionOut,
           transitionDurationSec: p.transitionDurationSec,
+          cutImpact: p.cutImpact,
           transform: {
             ...clip.transform,
             scale: p.scaleStart,
             endScale: p.scaleEnd,
-            easing: 'ease_in_out',
+            offsetX: p.panStartX ?? 0,
+            endOffsetX: p.panEndX ?? 0,
+            offsetY: p.panStartY ?? 0,
+            endOffsetY: p.panEndY ?? 0,
+            easing: p.easing ?? 'ease_in_out',
           },
         });
       }
 
-      if (builtClips.length === 0) {
+      if (builtClips.length === 0 && preservedLockedClips.length === 0) {
         showError(tFor(langRef.current).errAutoClipEmpty);
         return;
       }
-      const nextItems = isAppend ? [...normalizedPrev, ...builtClips] : builtClips;
+
+      const nextItems = isAppend
+        ? [...normalizedPrev, ...builtClips]
+        : hasLockedInReplace
+          ? [...preservedLockedClips, ...builtClips].sort(
+              (a, b) => (a.startSec ?? 0) - (b.startSec ?? 0)
+            )
+          : builtClips;
+
       setMediaItems(nextItems);
-      setSelectedClipId(builtClips[0].id);
-      setSelectedClipIds([builtClips[0].id]);
-      setSelectedFxId(null);
-      const desiredCentered = autoCfg.beatCenteredTransitions ?? true;
-      if (
-        cfg.slideshowMode !== 'manual' ||
-        Boolean(cfg.beatCenteredTransitions) !== desiredCentered
-      ) {
-        setConfig((prev) => ({
-          ...prev,
-          slideshowMode: 'manual',
-          beatCenteredTransitions: desiredCentered,
-        }));
+      const firstSelected = builtClips[0] ?? preservedLockedClips[0];
+      if (firstSelected) {
+        setSelectedClipId(firstSelected.id);
+        setSelectedClipIds([firstSelected.id]);
       }
+      setSelectedFxId(null);
+
+      const desiredCentered = autoCfg.beatCenteredTransitions ?? true;
+      const lookPatch = resolveAutoClipLookConfigPatch(
+        autoCfg.lookPreset ?? 'keep',
+        Boolean(autoCfg.cleanFootage),
+        autoCfg.letterboxBars
+      );
+      setConfig((prev) => ({
+        ...prev,
+        ...lookPatch,
+        slideshowMode: 'manual',
+        beatCenteredTransitions: desiredCentered,
+      }));
+
+      if (hasLockedInReplace && preservedLockedClips.length > 0) {
+        showUndoToast(tFor(langRef.current).lockedPreservedToast);
+      }
+
       const focusLocal = isAppend ? startOffsetSec : 0;
       const focusAbs = (aud ? bounds.trimBase : 0) + focusLocal;
       currentTimeRef.current = focusAbs;
       setCurrentTime(focusAbs);
 
       // Pre-warm only the first slice of the new auto-clip block
-      if (builtClips[0].kind === 'video' && builtClips[0].videoElement) {
-        if (!builtClips[0].videoElement.getAttribute('src') && builtClips[0].url) {
-          builtClips[0].videoElement.src = builtClips[0].url;
+      const warmCandidate = builtClips[0] ?? preservedLockedClips[0];
+      if (warmCandidate && warmCandidate.kind === 'video' && warmCandidate.videoElement) {
+        if (!warmCandidate.videoElement.getAttribute('src') && warmCandidate.url) {
+          warmCandidate.videoElement.src = warmCandidate.url;
         }
-        builtClips[0].videoElement.preload = 'auto';
+        warmCandidate.videoElement.preload = 'auto';
       }
 
       // Keep timeline fitted cleanly to the viewport at 1× zoom so clips never extend past screen edge
@@ -2508,6 +2565,7 @@ export default function App() {
       getEffectiveTimelineBounds,
       pushImmediateHistory,
       showError,
+      showUndoToast,
       stopPlayback,
       trackBeatGrid,
     ]
@@ -3028,6 +3086,7 @@ export default function App() {
 
       const replacement: VisualMediaState = {
         ...built,
+        locked: orig.locked,
         transitionOut: orig.transitionOut,
         transitionDurationSec: orig.transitionDurationSec,
         overlayEffect: orig.overlayEffect
@@ -5626,6 +5685,7 @@ export default function App() {
               onUpdateOverlay={handleUpdateOverlay}
               onRemoveOverlay={handleRemoveOverlay}
               onResetAutosave={handleResetAutosave}
+              onSeekAbsolute={handleSeekAbsolute}
             />
             <div
               onPointerDown={(e) => {

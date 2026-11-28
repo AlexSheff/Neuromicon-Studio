@@ -9,6 +9,7 @@ import {
   Flag,
   GripHorizontal,
   Layers,
+  Lock,
   Magnet,
   Maximize2,
   Minus,
@@ -20,6 +21,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  Unlock,
   Volume2,
   VolumeX,
   X,
@@ -1230,6 +1232,26 @@ export function TimelineDock({
 
                   <button
                     type="button"
+                    onClick={() => onUpdateClip(selectedClip.id, { locked: !selectedClip.locked })}
+                    title={selectedClip.locked ? t.clipUnlockBtn : t.clipLockBtn}
+                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium cursor-pointer transition-colors ${
+                      selectedClip.locked
+                        ? 'bg-cyan-500/20 border-cyan-400/75 text-cyan-200'
+                        : 'bg-[#0B0D11] border-[#262B38] hover:border-cyan-500/60 text-gray-300 hover:text-cyan-200'
+                    }`}
+                  >
+                    {selectedClip.locked ? (
+                      <Lock className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <Unlock className="w-2.5 h-2.5" aria-hidden="true" />
+                    )}
+                    <span className="hidden lg:inline">
+                      {selectedClip.locked ? t.clipLockedBadge : t.clipLockBtn}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => onInspectClip(selectedClip.id)}
                     title={t.inspectClipBtn}
                     className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#0B0D11] border border-[#262B38] hover:border-amber-500/60 text-[10px] font-medium text-gray-300 hover:text-amber-300 cursor-pointer"
@@ -2253,15 +2275,23 @@ export function TimelineDock({
                                         ? 'ring-2 ring-inset ring-amber-400 bg-amber-500/25'
                                         : isSelected
                                           ? 'bg-amber-500/20 text-amber-100 ring-1 ring-inset ring-amber-400 z-[22]'
-                                          : isPlayheadInside
-                                            ? 'bg-[#1D2434] text-gray-100'
-                                            : 'bg-[#141821] hover:bg-[#191E2A] text-gray-300'
+                                          : clip.locked
+                                            ? 'bg-[#12202B] hover:bg-[#162735] text-cyan-100 ring-1 ring-inset ring-cyan-500/45'
+                                            : isPlayheadInside
+                                              ? 'bg-[#1D2434] text-gray-100'
+                                              : 'bg-[#141821] hover:bg-[#191E2A] text-gray-300'
                                   }`}
                                 >
                                   <div className="flex items-center gap-1 overflow-hidden w-full h-full pointer-events-none">
                                     <span className="text-[9px] font-mono text-gray-500 shrink-0">
                                       #{seg.clipIndex + 1}
                                     </span>
+                                    {clip.locked && (
+                                      <Lock
+                                        className="w-2.5 h-2.5 text-cyan-300 shrink-0"
+                                        aria-hidden="true"
+                                      />
+                                    )}
                                     {clip.kind === 'image' ? (
                                       <img
                                         src={clip.url}

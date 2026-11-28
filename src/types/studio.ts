@@ -243,6 +243,8 @@ export interface VisualMediaState {
   transform: ClipTransform;
   clipAudioVolume: number; // 0 .. 1.5
   clipAudioMuted: boolean;
+  locked?: boolean;
+  cutImpact?: number;
 }
 
 export interface StudioConfig {
@@ -297,6 +299,7 @@ export interface StudioConfig {
   mediaBlur: number;
   scrimStrength: number;
   vignetteAmount: number;
+  letterboxAmount?: number; // 0 .. 0.14 cinema black bars
 
   // Typography & animated text
   titleText: string;

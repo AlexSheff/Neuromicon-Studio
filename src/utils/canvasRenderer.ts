@@ -417,9 +417,15 @@ function drawSingleClipLayer(
 ) {
   const tr: ClipTransform = media.transform || DEFAULT_CLIP_TRANSFORM;
   const easedP = applyEasing(clipProgress, tr.easing);
-  const interpScale = tr.scale + (tr.endScale - tr.scale) * easedP;
+  const rawInterpScale = tr.scale + (tr.endScale - tr.scale) * easedP;
   const interpOffX = tr.offsetX + (tr.endOffsetX - tr.offsetX) * easedP;
   const interpOffY = tr.offsetY + (tr.endOffsetY - tr.offsetY) * easedP;
+  // Auto edge-protection overscan whenever full-frame camera panning is active so frame borders never leak black
+  const minPanSafeScale =
+    rawInterpScale >= 0.98 && (Math.abs(interpOffX) > 0.001 || Math.abs(interpOffY) > 0.001)
+      ? 1 + 2.02 * Math.max(Math.abs(interpOffX), Math.abs(interpOffY))
+      : rawInterpScale;
+  const interpScale = Math.max(rawInterpScale, minPanSafeScale);
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, alpha * tr.opacity));
@@ -551,15 +557,15 @@ function drawSingleClipLayer(
       panX,
       panY,
       config,
-      media.kind === 'image'
+      true
     );
   } else {
     const baseScale = pulseScale > 0.01 ? totalScale / pulseScale : totalScale;
     const safeHeadroom = Math.max(0, baseScale - 1);
     const maxPanX = width * safeHeadroom * 0.42;
     const maxPanY = height * safeHeadroom * 0.42;
-    const clampedPanX = media.kind === 'video' ? 0 : Math.max(-maxPanX, Math.min(maxPanX, panX));
-    const clampedPanY = media.kind === 'video' ? 0 : Math.max(-maxPanY, Math.min(maxPanY, panY));
+    const clampedPanX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+    const clampedPanY = Math.max(-maxPanY, Math.min(maxPanY, panY));
     const hasFilter = supportsCanvasFilter(ctx);
     if (hasFilter) {
       ctx.filter = buildFilterString(config.mediaFilter, config.mediaBrightness, config.mediaBlur);
@@ -716,20 +722,30 @@ function drawLutAndGlitch(
     if (lutPreset === 'teal_orange') {
       ctx.globalCompositeOperation = 'soft-light';
       const g = ctx.createLinearGradient(0, 0, width, height);
-      g.addColorStop(0, 'rgba(13, 148, 136, 0.34)');
-      g.addColorStop(1, 'rgba(234, 88, 12, 0.34)');
+      g.addColorStop(0, 'rgba(13, 148, 136, 0.36)');
+      g.addColorStop(0.55, 'rgba(20, 40, 56, 0.14)');
+      g.addColorStop(1, 'rgba(234, 88, 12, 0.38)');
       ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height);
+      ctx.globalCompositeOperation = 'screen';
+      const hi = ctx.createRadialGradient(width * 0.5, height * 0.35, 0, width * 0.5, height * 0.45, Math.max(width, height) * 0.7);
+      hi.addColorStop(0, 'rgba(251, 146, 60, 0.09)');
+      hi.addColorStop(1, 'rgba(13, 148, 136, 0.03)');
+      ctx.fillStyle = hi;
       ctx.fillRect(0, 0, width, height);
     } else if (lutPreset === 'cyber_magenta') {
       ctx.globalCompositeOperation = 'screen';
       const g = ctx.createLinearGradient(0, height, width, 0);
-      g.addColorStop(0, 'rgba(192, 38, 211, 0.2)');
-      g.addColorStop(1, 'rgba(14, 165, 233, 0.22)');
+      g.addColorStop(0, 'rgba(192, 38, 211, 0.22)');
+      g.addColorStop(1, 'rgba(14, 165, 233, 0.24)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, width, height);
     } else if (lutPreset === 'vintage_gold') {
       ctx.globalCompositeOperation = 'multiply';
-      ctx.fillStyle = 'rgba(245, 222, 179, 0.88)';
+      ctx.fillStyle = 'rgba(246, 224, 182, 0.9)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.globalCompositeOperation = 'soft-light';
+      ctx.fillStyle = 'rgba(217, 119, 6, 0.14)';
       ctx.fillRect(0, 0, width, height);
     } else if (lutPreset === 'deep_ocean') {
       ctx.globalCompositeOperation = 'overlay';
@@ -737,31 +753,31 @@ function drawLutAndGlitch(
       ctx.fillRect(0, 0, width, height);
     } else if (lutPreset === 'bleach_bypass') {
       ctx.globalCompositeOperation = 'saturation';
-      ctx.fillStyle = 'rgba(128, 128, 128, 0.42)';
+      ctx.fillStyle = 'rgba(128, 128, 128, 0.45)';
       ctx.fillRect(0, 0, width, height);
       ctx.globalCompositeOperation = 'soft-light';
       const g = ctx.createLinearGradient(0, 0, 0, height);
-      g.addColorStop(0, 'rgba(203, 213, 225, 0.24)');
-      g.addColorStop(1, 'rgba(15, 23, 42, 0.36)');
+      g.addColorStop(0, 'rgba(226, 232, 240, 0.28)');
+      g.addColorStop(1, 'rgba(15, 23, 42, 0.38)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, width, height);
     } else if (lutPreset === 'crimson_noir') {
       ctx.globalCompositeOperation = 'overlay';
       const g = ctx.createLinearGradient(0, 0, width, height);
-      g.addColorStop(0, 'rgba(190, 18, 60, 0.30)');
+      g.addColorStop(0, 'rgba(190, 18, 60, 0.32)');
       g.addColorStop(1, 'rgba(17, 12, 24, 0.44)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, width, height);
     } else if (lutPreset === 'sunset_amber') {
       ctx.globalCompositeOperation = 'screen';
-      const flare = ctx.createRadialGradient(width * 0.18, height * 0.15, 0, width * 0.25, height * 0.2, Math.max(width, height) * 0.7);
-      flare.addColorStop(0, 'rgba(251, 146, 60, 0.22)');
+      const flare = ctx.createRadialGradient(width * 0.18, height * 0.15, 0, width * 0.25, height * 0.2, Math.max(width, height) * 0.72);
+      flare.addColorStop(0, 'rgba(251, 146, 60, 0.24)');
       flare.addColorStop(1, 'rgba(251, 146, 60, 0)');
       ctx.fillStyle = flare;
       ctx.fillRect(0, 0, width, height);
       ctx.globalCompositeOperation = 'soft-light';
       const g = ctx.createLinearGradient(0, 0, width, height);
-      g.addColorStop(0, 'rgba(245, 158, 11, 0.28)');
+      g.addColorStop(0, 'rgba(245, 158, 11, 0.3)');
       g.addColorStop(1, 'rgba(124, 45, 18, 0.28)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, width, height);
@@ -963,7 +979,16 @@ export function renderStudioFrame(params: RenderFrameParams): void {
 
     if (prevMedia && activeMedia && p < 0.999 && slice.transitionType !== 'cut') {
       if (slice.transitionType === 'crossfade' || slice.transitionType === 'zoom_cross') {
-        // Keep incoming clip unscaled so photos never reverse-zoom jump at transition finish
+        const isZoomCross = slice.transitionType === 'zoom_cross';
+        const zoomInAmt = isZoomCross && (!reducedMotion && !config.stabilizeMotion)
+          ? 1 + (1 - applyEasing(p, 'ease_out')) * 0.065
+          : 1;
+        if (Math.abs(zoomInAmt - 1) > 0.001) {
+          ctx.save();
+          ctx.translate(width * 0.5, height * 0.5);
+          ctx.scale(zoomInAmt, zoomInAmt);
+          ctx.translate(-width * 0.5, -height * 0.5);
+        }
         drawSingleClipLayer(
           ctx,
           activeMedia,
@@ -983,6 +1008,9 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           1,
           Boolean(isExport)
         );
+        if (Math.abs(zoomInAmt - 1) > 0.001) {
+          ctx.restore();
+        }
 
         // Render outgoing clip into isolated offscreen buffer at alpha=1, then composite (1-p)
         // Guarantees (1-p)*Prev + p*Next with zero dark dip and zero filter+alpha artifacts
@@ -1020,9 +1048,10 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           );
           ctx.save();
           ctx.filter = 'none';
-          ctx.globalAlpha = Math.max(0, Math.min(1, 1 - p));
-          if (slice.transitionType === 'zoom_cross' && prevMedia.kind === 'video' && activeMedia.kind === 'video') {
-            const outZoom = 1 + p * 0.08;
+          const easedAlpha = isZoomCross ? 1 - applyEasing(p, 'ease_in_out') : 1 - p;
+          ctx.globalAlpha = Math.max(0, Math.min(1, easedAlpha));
+          if (isZoomCross && !reducedMotion && !config.stabilizeMotion) {
+            const outZoom = 1 + applyEasing(p, 'ease_out') * 0.12;
             ctx.translate(width * 0.5, height * 0.5);
             ctx.scale(outZoom, outZoom);
             ctx.translate(-width * 0.5, -height * 0.5);
@@ -1082,7 +1111,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             1,
             Boolean(isExport)
           );
-          const edgeX = width * p;
+          const wipeP = applyEasing(p, 'ease_in_out');
+          const edgeX = width * wipeP;
           ctx.save();
           ctx.beginPath();
           ctx.rect(0, 0, edgeX, height);
@@ -1091,14 +1121,14 @@ export function renderStudioFrame(params: RenderFrameParams): void {
           ctx.drawImage(bufA.canvas, 0, 0, width, height);
           ctx.restore();
 
-          // Soft accent feather along the wipe boundary
-          const seamW = Math.max(8, minDim * 0.024);
-          const seamGrad = ctx.createLinearGradient(edgeX - seamW, 0, edgeX + seamW * 0.35, 0);
+          // Soft luminous feather along the wipe boundary
+          const seamW = Math.max(10, minDim * 0.028);
+          const seamGrad = ctx.createLinearGradient(edgeX - seamW, 0, edgeX + seamW * 0.4, 0);
           seamGrad.addColorStop(0, 'rgba(255,255,255,0)');
-          seamGrad.addColorStop(0.75, hexToRgba(scheme.accentColor, 0.24 * (1 - p * 0.4)));
+          seamGrad.addColorStop(0.75, hexToRgba(scheme.accentColor, 0.22 * (1 - wipeP * 0.4)));
           seamGrad.addColorStop(1, 'rgba(255,255,255,0)');
           ctx.fillStyle = seamGrad;
-          ctx.fillRect(edgeX - seamW, 0, seamW * 1.35, height);
+          ctx.fillRect(edgeX - seamW, 0, seamW * 1.4, height);
         }
       } else if (slice.transitionType === 'dip_black') {
         if (p < 0.5) {
@@ -1121,7 +1151,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             1,
             Boolean(isExport)
           );
-          ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(1, p * 2)})`;
+          const dipAlpha = Math.min(1, Math.pow(Math.max(0, p * 2), 1.35));
+          ctx.fillStyle = `rgba(0, 0, 0, ${dipAlpha})`;
           ctx.fillRect(0, 0, width, height);
         } else {
           drawSingleClipLayer(
@@ -1143,7 +1174,8 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             1,
             Boolean(isExport)
           );
-          ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(1, (1 - p) * 2)})`;
+          const dipAlpha = Math.min(1, Math.pow(Math.max(0, (1 - p) * 2), 1.35));
+          ctx.fillStyle = `rgba(0, 0, 0, ${dipAlpha})`;
           ctx.fillRect(0, 0, width, height);
         }
       } else if (slice.transitionType === 'slide') {
@@ -1210,10 +1242,19 @@ export function renderStudioFrame(params: RenderFrameParams): void {
             1,
             Boolean(isExport)
           );
+          const whipP = applyEasing(p, 'ease_in_out');
+          const boundaryX = (1 - whipP) * width;
           ctx.save();
           ctx.filter = 'none';
-          ctx.drawImage(bufA.canvas, -p * width, 0, width, height);
-          ctx.drawImage(bufB.canvas, (1 - p) * width, 0, width, height);
+          ctx.drawImage(bufA.canvas, -whipP * width, 0, width, height);
+          ctx.drawImage(bufB.canvas, boundaryX, 0, width, height);
+          const shadowW = Math.max(12, width * 0.032);
+          const shadowGrad = ctx.createLinearGradient(boundaryX - shadowW, 0, boundaryX + shadowW * 0.35, 0);
+          shadowGrad.addColorStop(0, 'rgba(0,0,0,0)');
+          shadowGrad.addColorStop(0.7, 'rgba(0,0,0,0.34)');
+          shadowGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = shadowGrad;
+          ctx.fillRect(boundaryX - shadowW, 0, shadowW * 1.35, height);
           ctx.restore();
         }
       }
@@ -1237,6 +1278,24 @@ export function renderStudioFrame(params: RenderFrameParams): void {
         1,
         Boolean(isExport)
       );
+    }
+
+    // Subtle 110ms optical cut-impact glint on high-energy drop hard cuts (respects stabilized/reduced motion)
+    if (
+      activeMedia &&
+      slice.transitionType === 'cut' &&
+      (activeMedia.cutImpact ?? 0) >= 0.72 &&
+      slice.slideLocalTime < 0.11 &&
+      !config.stabilizeMotion &&
+      !config.disableBeatPulse &&
+      !reducedMotion
+    ) {
+      const impactEnv = (1 - slice.slideLocalTime / 0.11) * Math.min(1, activeMedia.cutImpact ?? 0.72);
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = `rgba(255, 255, 255, ${(impactEnv * 0.075).toFixed(4)})`;
+      ctx.fillRect(0, 0, width, height);
+      ctx.restore();
     }
 
     // Generative Blend Overlay on top of uploaded clips (Screen / Additive Glow)
@@ -1726,6 +1785,15 @@ export function renderStudioFrame(params: RenderFrameParams): void {
     scheme.accentColor,
     scheme.visualizerSecondary
   );
+
+  // 5b-2. Cinema Widescreen Letterbox Bars (2.39:1 / user matte)
+  const letterboxRatio = Math.max(0, Math.min(0.14, config.letterboxAmount ?? 0));
+  if (letterboxRatio > 0.004) {
+    const barH = Math.round(height * letterboxRatio);
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, width, barH);
+    ctx.fillRect(0, height - barH, width, barH);
+  }
 
   // 5c. Multi-Layer Text & Image Overlays (respect startSec / durationSec timing and optional fadeSec)
   if (config.overlays && config.overlays.length > 0) {

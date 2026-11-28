@@ -52,6 +52,8 @@ export interface SerializedClip {
   transform: ClipTransform;
   clipAudioVolume: number;
   clipAudioMuted: boolean;
+  locked?: boolean;
+  cutImpact?: number;
   blobKey?: string;
 }
 
@@ -327,6 +329,8 @@ export function serializeStudioState(
       transform: m.transform || { ...DEFAULT_CLIP_TRANSFORM },
       clipAudioVolume: m.clipAudioVolume ?? 0,
       clipAudioMuted: m.clipAudioMuted ?? true,
+      locked: m.locked || undefined,
+      cutImpact: m.cutImpact,
       blobKey: m.url ? blobKeyMap.get(m.url) : undefined,
     })),
     audioMeta: audioFileName

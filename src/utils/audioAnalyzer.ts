@@ -2,12 +2,15 @@ import {
   AudioFrameMetrics,
   BeatGridMode,
   BeatSyncMode,
+  KeyframeEasing,
   MediaBinItem,
   SlideTransitionType,
   StudioConfig,
   VisualMediaState,
 } from '../types/studio';
 import { Radix2FFT } from './fft';
+import type { AutoClipLookId } from './presets';
+export type { AutoClipLookId } from './presets';
 
 const FFT_SIZE = 1024;
 const fftInstance = new Radix2FFT(FFT_SIZE);
@@ -2437,6 +2440,7 @@ export type AutoClipRhythm = 'auto' | 'smooth' | 'beats_1' | 'beats_2' | 'beats_
 export type AutoClipTransitionStyle = 'musical' | 'dissolve' | 'cuts_only' | 'punchy';
 export type AutoClipMotionLevel = 'off' | 'gentle' | 'dynamic';
 export type AutoClipTargetMode = 'replace' | 'append';
+export type AutoClipMediaPriority = 'auto' | 'video_first' | 'photo_beats';
 export type AutoClipPresetId =
   | 'music_story'
   | 'cinema_flow'
@@ -2541,6 +2545,10 @@ export interface AutoClipGenerateConfig {
   shuffleOrder: boolean;
   beatCenteredTransitions?: boolean;
   excludeEdgeSec?: number;
+  mediaPriority?: AutoClipMediaPriority;
+  lookPreset?: AutoClipLookId;
+  cleanFootage?: boolean;
+  letterboxBars?: boolean;
   variationSeed?: number;
 }
 
@@ -2747,6 +2755,10 @@ export const DEFAULT_AUTO_CLIP_CONFIG: AutoClipGenerateConfig = {
   shuffleOrder: true,
   beatCenteredTransitions: true,
   excludeEdgeSec: 5,
+  mediaPriority: 'auto',
+  lookPreset: 'clean_cinema',
+  cleanFootage: true,
+  letterboxBars: false,
 };
 
 export interface AutoBeatSlicePlacement {
@@ -2759,6 +2771,12 @@ export interface AutoBeatSlicePlacement {
   transitionDurationSec: number;
   scaleStart: number;
   scaleEnd: number;
+  panStartX?: number;
+  panStartY?: number;
+  panEndX?: number;
+  panEndY?: number;
+  easing?: KeyframeEasing;
+  cutImpact?: number;
 }
 
 
@@ -3337,6 +3355,7 @@ export function generateAutoClipPlan(
     editorialProfile?: AutoClipEditorialProfile;
     transitionStyle?: AutoClipTransitionStyle;
     motionLevel?: AutoClipMotionLevel;
+    mediaPriority?: AutoClipMediaPriority;
     minClipSec?: number;
     maxClipSec?: number;
     targetDurationSec?: number | null;
@@ -3371,6 +3390,7 @@ export function generateAutoClipPlan(
           : 'story_arc');
   const transitionStyle: AutoClipTransitionStyle = options.transitionStyle ?? 'musical';
   const motionLevel: AutoClipMotionLevel = options.motionLevel ?? 'gentle';
+  const mediaPriority: AutoClipMediaPriority = options.mediaPriority ?? 'auto';
   const avoidAdjacentRepeat = options.avoidAdjacentRepeat ?? true;
   const shouldShuffle = options.shuffleOrder ?? mode !== 'sequential';
   const fillToTargetEnd = options.fillToTargetEnd ?? false;
@@ -4703,6 +4723,7 @@ export function generateAutoClipPlan(
     rate: number
   ): AutoBeatSlicePlacement => {
     const isImage = asset.kind === 'image';
+    const isShortSlot = slot.dur <= shortBeatMaxSec || slot.beatEndIdx - slot.beatStartIdx <= 2;
     const isCalmSection =
       slot.section === 'intro' || slot.section === 'beatless' || slot.section === 'outro';
     const musicalPalette: SlideTransitionType[] = isImage
@@ -4750,12 +4771,11 @@ export function generateAutoClipPlan(
       } else if (editorialProfile === 'trailer' && slot.isPreDrop && slot.dur >= 1.2) {
         trType = 'dip_black';
       } else if (slot.energy >= 0.45 || slot.cutImpact >= 0.52) {
-        trType =
-          !isImage &&
+        const allowZoomTransition =
+          (!isImage || (slot.dur >= 1.85 && !isShortSlot)) &&
           (slot.cutImpact >= 0.64 ||
-            ((slot.section === 'drop' || slot.energy >= 0.56) && slotIdx % 4 === 2))
-            ? 'zoom_cross'
-            : 'cut';
+            ((slot.section === 'drop' || slot.energy >= 0.56) && slotIdx % 4 === 2));
+        trType = allowZoomTransition ? 'zoom_cross' : 'cut';
       } else if (
         asset.binItem.defaultTransitionOut &&
         asset.binItem.defaultTransitionOut !== 'crossfade' &&
@@ -4782,6 +4802,11 @@ export function generateAutoClipPlan(
             ? 'zoom_cross'
             : 'cut'
           : musicalPalette[slotIdx % musicalPalette.length];
+    }
+
+    // Never allow zoom_cross on tight short beat photos (prevents abrupt photo jump)
+    if (isImage && isShortSlot && trType === 'zoom_cross') {
+      trType = 'cut';
     }
 
     // Tighten tight short punches (< ~1.35 beats) to clean hard cuts unless explicit dissolve is selected
@@ -4825,19 +4850,60 @@ export function generateAutoClipPlan(
                 ).toFixed(3)
               );
 
+    // Editorial alternating camera choreography: push-in, lateral pan drift, tilt, or pull-out.
+    // Short punch photos (<1.85s or short beat slots) stay strictly static (1.0 -> 1.0, pan=0)
+    // so rhythmic flashes never jump in zoom.
+    const isShortPunchPhoto = isImage && (isShortSlot || slot.dur < 1.85);
+    let scaleStart = 1.0;
     let scaleEnd = 1.0;
-    if (motionLevel === 'gentle') {
-      scaleEnd = isImage
-        ? slot.dur >= 2.0
-          ? 1.015
-          : 1.0
-        : editorialProfile === 'dream' ||
-            ((mode === 'auto_rhythm' || rhythm === 'auto') && (isCalmSection || slot.energy < 0.38))
-          ? 1.012
-          : 1.0;
-    } else if (motionLevel === 'dynamic') {
-      scaleEnd = isImage ? (slot.dur >= 2.0 ? 1.03 : 1.0) : 1.02;
+    let panStartX = 0;
+    let panStartY = 0;
+    let panEndX = 0;
+    let panEndY = 0;
+
+    if (motionLevel !== 'off' && !isShortPunchPhoto) {
+      const camPattern = slotIdx % 4;
+      if (motionLevel === 'gentle') {
+        const pushAmt = isCalmSection ? 0.026 : slot.section === 'drop' ? 0.038 : 0.032;
+        scaleStart = 1.0;
+        if (camPattern === 0) {
+          scaleEnd = Number((1 + pushAmt).toFixed(3));
+        } else if (camPattern === 1) {
+          scaleEnd = Number((1 + pushAmt * 0.92).toFixed(3));
+          panEndX = 0.011;
+        } else if (camPattern === 2) {
+          scaleEnd = Number((1 + pushAmt * 0.88).toFixed(3));
+          panEndY = -0.008;
+        } else {
+          scaleEnd = Number((1 + pushAmt * 0.92).toFixed(3));
+          panEndX = -0.011;
+        }
+      } else {
+        // Dynamic editorial motion: bold push-ins, lateral sweeps, and pull-out reveals on long video shots
+        if (camPattern === 0) {
+          scaleStart = 1.0;
+          scaleEnd = Number((slot.section === 'drop' ? 1.068 : 1.052).toFixed(3));
+        } else if (camPattern === 1) {
+          scaleStart = 1.042;
+          scaleEnd = 1.042;
+          panStartX = -0.017;
+          panEndX = 0.017;
+        } else if (camPattern === 2 && !isImage) {
+          scaleStart = 1.06;
+          scaleEnd = 1.0;
+          panStartY = 0.006;
+          panEndY = 0;
+        } else {
+          scaleStart = 1.042;
+          scaleEnd = 1.042;
+          panStartX = 0.017;
+          panEndX = -0.017;
+        }
+      }
     }
+
+    const easing: KeyframeEasing =
+      slot.section === 'drop' || slot.cutImpact >= 0.62 ? 'ease_out' : 'ease_in_out';
 
     return {
       binItemId: asset.binItem.id,
@@ -4847,8 +4913,14 @@ export function generateAutoClipPlan(
       playbackRate: rate,
       transitionOut: trType,
       transitionDurationSec: idealTrans,
-      scaleStart: 1.0,
+      scaleStart,
       scaleEnd,
+      panStartX,
+      panStartY,
+      panEndX,
+      panEndY,
+      easing,
+      cutImpact: Number(slot.cutImpact.toFixed(3)),
     };
   };
 
@@ -5055,7 +5127,16 @@ export function generateAutoClipPlan(
         : list;
     const activeList = basePool.length > 0 ? basePool : list;
 
-    if (isShortBeatSlot(slot)) {
+    const preferPhotoHere =
+      mediaPriority === 'video_first'
+        ? slot.dur <= Math.max(beatSec * 2.1, shortBeatMaxSec * 0.78) &&
+          (slot.section === 'drop' || slot.cutImpact >= 0.58)
+        : mediaPriority === 'photo_beats'
+          ? isShortBeatSlot(slot) ||
+            (slot.dur <= beatSec * 4.1 && (slot.section === 'drop' || slot.cutImpact >= 0.56))
+          : isShortBeatSlot(slot);
+
+    if (preferPhotoHere) {
       const photos = activeList.filter((e) => e.kind === 'image');
       if (photos.length > 0) return photos;
       if (ctx.reserveShortForPhotos) return [];
@@ -5664,6 +5745,182 @@ export function pickAutoReplacementForTimelineClip(
     playbackRate: rate,
   };
 }
+
+export interface LockedPlanGapResult {
+  lockedClips: VisualMediaState[];
+  placements: AutoBeatSlicePlacement[];
+}
+
+/**
+ * Generates fresh Auto-Clip slices around any user-locked timeline clips (`clip.locked === true`)
+ * while preserving locked clip timing and excluding locked media slices from reuse so
+ * hero shots stay anchored across regenerations without overlaps or duplicate frames.
+ */
+export function planAutoClipsAroundLocked(
+  existingItems: VisualMediaState[],
+  binItems: MediaBinItem[],
+  beatGrid: TrackBeatGrid,
+  manualMarkersAbs: number[],
+  trimBase: number,
+  maxTimelineSec: number,
+  autoCfg: AutoClipGenerateConfig,
+  options: {
+    hasAudio?: boolean;
+    monoData?: Float32Array;
+    sampleRate?: number;
+  } = {}
+): LockedPlanGapResult {
+  const lockedRaw = existingItems
+    .filter((c) => Boolean(c.locked))
+    .map((c) => {
+      const st = Math.max(0, Number((c.startSec ?? 0).toFixed(3)));
+      const dur = Math.max(0.4, Number((c.durationSec || 0.4).toFixed(3)));
+      return { ...c, startSec: st, durationSec: dur };
+    })
+    .filter((c) => c.startSec < maxTimelineSec - 0.1)
+    .sort((a, b) => (a.startSec ?? 0) - (b.startSec ?? 0));
+
+  // Clamp locked intervals so they never overlap one another or overrun maxTimelineSec
+  const lockedClips: VisualMediaState[] = [];
+  let lockCursor = 0;
+  for (const lc of lockedRaw) {
+    const startSec = Math.max(lockCursor, lc.startSec ?? 0);
+    const maxAllowed = Math.max(0, maxTimelineSec - startSec);
+    if (maxAllowed < 0.4) continue;
+    const dur = Math.min(lc.durationSec, maxAllowed);
+    lockedClips.push({
+      ...lc,
+      startSec: Number(startSec.toFixed(3)),
+      durationSec: Number(dur.toFixed(3)),
+    });
+    lockCursor = Number((startSec + dur).toFixed(3));
+  }
+
+  const effectiveLimit =
+    autoCfg.targetDurationSec && autoCfg.targetDurationSec > 0.5
+      ? Math.min(maxTimelineSec, autoCfg.targetDurationSec)
+      : maxTimelineSec;
+
+  if (lockedClips.length === 0) {
+    const placements = generateAutoClipPlan(
+      binItems,
+      beatGrid,
+      manualMarkersAbs,
+      trimBase,
+      effectiveLimit,
+      {
+        mode: autoCfg.mode,
+        rhythm: autoCfg.rhythm,
+        editorialProfile: autoCfg.editorialProfile,
+        transitionStyle: autoCfg.transitionStyle,
+        motionLevel: autoCfg.motionLevel,
+        mediaPriority: autoCfg.mediaPriority,
+        minClipSec: autoCfg.minClipSec,
+        maxClipSec: autoCfg.maxClipSec,
+        targetDurationSec: autoCfg.targetDurationSec,
+        startOffsetSec: 0,
+        avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
+        shuffleOrder: autoCfg.shuffleOrder,
+        excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
+        fillToTargetEnd: Boolean(options.hasAudio),
+        hasAudio: Boolean(options.hasAudio),
+        monoData: options.monoData,
+        sampleRate: options.sampleRate,
+        variationSeed: autoCfg.variationSeed,
+      }
+    );
+    return { lockedClips: [], placements };
+  }
+
+  const usedUrls = new Set<string>();
+  const usedVideoRanges = new Map<string, Array<[number, number]>>();
+  for (const lc of lockedClips) {
+    if (!lc.url) continue;
+    if (lc.kind === 'image') {
+      usedUrls.add(lc.url);
+    } else if (lc.kind === 'video') {
+      const list = usedVideoRanges.get(lc.url) ?? [];
+      const srcStart = Math.max(0, lc.sourceStartSec || 0);
+      const srcEnd = srcStart + lc.durationSec * Math.max(0.25, lc.playbackRate || 1);
+      list.push([Number(srcStart.toFixed(2)), Number(srcEnd.toFixed(2))]);
+      usedVideoRanges.set(lc.url, list);
+    }
+  }
+
+  // Build open intervals [gapStart, gapEnd] around locked clips
+  const gaps: Array<[number, number]> = [];
+  let cursor = 0;
+  for (const lc of lockedClips) {
+    const st = lc.startSec ?? 0;
+    if (st - cursor >= 0.45) {
+      gaps.push([Number(cursor.toFixed(3)), Number(st.toFixed(3))]);
+    }
+    cursor = Math.max(cursor, st + lc.durationSec);
+  }
+  const outerEnd = options.hasAudio
+    ? effectiveLimit
+    : Math.max(effectiveLimit, cursor + 24);
+  if (outerEnd - cursor >= 0.45) {
+    gaps.push([Number(cursor.toFixed(3)), Number(outerEnd.toFixed(3))]);
+  }
+
+  const binById = new Map(binItems.map((b) => [b.id, b]));
+  const allPlacements: AutoBeatSlicePlacement[] = [];
+  gaps.forEach(([gapStart, gapEnd], gapIdx) => {
+    const gapSpan = Number((gapEnd - gapStart).toFixed(3));
+    if (gapSpan < 0.45) return;
+    const gapSeed =
+      autoCfg.variationSeed !== undefined
+        ? (autoCfg.variationSeed + (gapIdx + 1) * 7919) >>> 0
+        : undefined;
+    const gapPlacements = generateAutoClipPlan(
+      binItems,
+      beatGrid,
+      manualMarkersAbs,
+      trimBase,
+      gapEnd,
+      {
+        mode: autoCfg.mode,
+        rhythm: autoCfg.rhythm,
+        editorialProfile: autoCfg.editorialProfile,
+        transitionStyle: autoCfg.transitionStyle,
+        motionLevel: autoCfg.motionLevel,
+        mediaPriority: autoCfg.mediaPriority,
+        minClipSec: Math.min(autoCfg.minClipSec, Math.max(0.45, gapSpan * 0.9)),
+        maxClipSec: autoCfg.maxClipSec,
+        targetDurationSec: gapSpan,
+        startOffsetSec: gapStart,
+        avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
+        shuffleOrder: autoCfg.shuffleOrder,
+        excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
+        excludeUsedUrls: usedUrls,
+        excludeVideoRangesByUrl: usedVideoRanges,
+        fillToTargetEnd: true,
+        hasAudio: Boolean(options.hasAudio),
+        monoData: options.monoData,
+        sampleRate: options.sampleRate,
+        variationSeed: gapSeed,
+      }
+    );
+    for (const p of gapPlacements) {
+      allPlacements.push(p);
+      const asset = binById.get(p.binItemId);
+      if (!asset?.url) continue;
+      if (asset.kind === 'image') {
+        usedUrls.add(asset.url);
+      } else {
+        const list = usedVideoRanges.get(asset.url) ?? [];
+        const sEnd = p.sourceStartSec + p.durationSec * Math.max(0.25, p.playbackRate || 1);
+        list.push([Number(p.sourceStartSec.toFixed(2)), Number(sEnd.toFixed(2))]);
+        usedVideoRanges.set(asset.url, list);
+      }
+    }
+  });
+
+  allPlacements.sort((a, b) => a.startSec - b.startSec);
+  return { lockedClips, placements: allPlacements };
+}
+
 
 
 
