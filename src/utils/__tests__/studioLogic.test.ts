@@ -2958,6 +2958,185 @@ test('detectTrackBpmAndBeats and generateAutoClipPlan lock onto 128 BPM kick tra
   }
 });
 
+test('50+ mixed media bin with generic filenames utilizes unique files without repeats and stays fresh across consecutive takes', () => {
+  const bin: MediaBinItem[] = [];
+  for (let i = 0; i < 40; i++) {
+    // Deliberately reuse generic filename "image.jpg" across the first 15 photos with distinct fileSize
+    bin.push({
+      id: `p-${i}`,
+      kind: 'image',
+      fileName: i < 15 ? 'image.jpg' : `photo-${i}.jpg`,
+      fileSize: 100_000 + i * 137,
+      url: `blob:p-${i}`,
+      width: 1920,
+      height: 1080,
+      defaultDurationSec: 4,
+    });
+  }
+  for (let j = 0; j < 15; j++) {
+    bin.push({
+      id: `v-${j}`,
+      kind: 'video',
+      fileName: j < 6 ? 'video.mp4' : `clip-${j}.mp4`,
+      fileSize: 2_000_000 + j * 4096,
+      url: `blob:v-${j}`,
+      width: 1920,
+      height: 1080,
+      videoDuration: 18,
+      defaultDurationSec: 18,
+    });
+  }
+
+  const totalSec = 72;
+  const beats = Array.from({ length: 145 }, (_, i) => Number((i * 0.5).toFixed(3)));
+  const grid = { bpm: 120, beatSec: 0.5, beats, downbeatOffset: 0 };
+
+  const take1 = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    editorialProfile: 'story_arc',
+    shuffleOrder: true,
+    avoidAdjacentRepeat: true,
+    fillToTargetEnd: true,
+    strictSingleUse: true,
+    excludeEdgeSec: 0,
+    hasAudio: false,
+    variationSeed: 1001,
+  });
+
+  assert.ok(take1.length >= 20, `Expected >=20 slices in 50+ mixed bin take 1, got ${take1.length}`);
+  const covered1 = take1.reduce((s, p) => s + p.durationSec, 0);
+  assert.ok(covered1 >= 68, `Expected Take 1 to cover >=68s of 72s timeline, got ${covered1.toFixed(1)}s`);
+
+  // No adjacent repeats, no repeated photos, no overlapping video ranges
+  const seenImages1 = new Set<string>();
+  const videoRanges1 = new Map<string, Array<[number, number]>>();
+  const genericImagesUsed1 = new Set<string>();
+  for (let i = 0; i < take1.length; i++) {
+    const p = take1[i];
+    if (i > 0) {
+      assert.notEqual(p.binItemId, take1[i - 1].binItemId, `Adjacent repeat at #${i}: ${p.binItemId}`);
+    }
+    const item = bin.find((b) => b.id === p.binItemId)!;
+    if (item.kind === 'image') {
+      assert.equal(seenImages1.has(item.url), false, `Photo ${item.id} repeated inside take 1`);
+      seenImages1.add(item.url);
+      if (item.fileName === 'image.jpg') genericImagesUsed1.add(item.id);
+    } else {
+      const s0 = p.sourceStartSec;
+      const s1 = s0 + p.durationSec * p.playbackRate;
+      const existing = videoRanges1.get(item.url) ?? [];
+      for (const [es, ee] of existing) {
+        const overlap = Math.min(s1, ee) - Math.max(s0, es);
+        assert.ok(overlap <= 0.05, `Overlapping video slice on ${item.id}: [${s0}..${s1}] vs [${es}..${ee}]`);
+      }
+      existing.push([s0, s1]);
+      videoRanges1.set(item.url, existing);
+    }
+  }
+
+  // Must showcase multiple photos including distinct fileSize files sharing "image.jpg", not drop them or starve photos
+  assert.ok(seenImages1.size >= 8, `Expected >=8 unique photos showcased on mixed 50+ bin, got ${seenImages1.size}`);
+  assert.ok(genericImagesUsed1.size >= 2, `Expected multiple distinct-fileSize 'image.jpg' files used, got ${genericImagesUsed1.size}`);
+  assert.ok(videoRanges1.size >= 8, `Expected >=8 unique videos used, got ${videoRanges1.size}`);
+
+  // Build cross-take soft avoidance from Take 1 and generate Take 2
+  const preferAvoidUrls = new Set<string>(seenImages1);
+  const preferAvoidVideoRangesByUrl = new Map<string, Array<[number, number]>>(videoRanges1);
+
+  const take2 = generateAutoClipPlan(bin, grid, [], 0, totalSec, {
+    mode: 'auto_rhythm',
+    rhythm: 'auto',
+    editorialProfile: 'story_arc',
+    shuffleOrder: true,
+    avoidAdjacentRepeat: true,
+    fillToTargetEnd: true,
+    strictSingleUse: true,
+    excludeEdgeSec: 0,
+    preferAvoidUrls,
+    preferAvoidVideoRangesByUrl,
+    hasAudio: false,
+    variationSeed: 2002,
+  });
+
+  assert.ok(take2.length >= 20, `Expected >=20 slices in take 2, got ${take2.length}`);
+  const covered2 = take2.reduce((s, p) => s + p.durationSec, 0);
+  assert.ok(covered2 >= 68, `Expected Take 2 to cover >=68s of 72s timeline, got ${covered2.toFixed(1)}s`);
+  const seenImages2 = new Set<string>();
+  let overlapImgCount = 0;
+  let overlapVidSliceCount = 0;
+  for (const p of take2) {
+    const item = bin.find((b) => b.id === p.binItemId)!;
+    if (item.kind === 'image') {
+      seenImages2.add(item.url);
+      if (seenImages1.has(item.url)) overlapImgCount++;
+    } else {
+      const s0 = p.sourceStartSec;
+      const s1 = s0 + p.durationSec * p.playbackRate;
+      const prevRanges = videoRanges1.get(item.url) ?? [];
+      if (prevRanges.some(([es, ee]) => Math.min(s1, ee) - Math.max(s0, es) > 0.15)) {
+        overlapVidSliceCount++;
+      }
+    }
+  }
+
+  // Take 2 must prioritize unused photos/ranges from the 55-item library
+  assert.equal(overlapImgCount, 0, `Take 2 should showcase fresh photos before repeating Take 1 photos (got ${overlapImgCount} repeats)`);
+  assert.ok(overlapVidSliceCount <= 2, `Take 2 should pick fresh video segments vs Take 1 (got ${overlapVidSliceCount} overlaps)`);
+});
+
+test('detectTrackBpmAndBeats DP beat tracker follows quiet intro and post-breakdown phase shift >85ms', () => {
+  const sr = 22050;
+  const dur = 28;
+  const mono = new Float32Array(sr * dur);
+  const bpm = 120;
+  const beatSec = 0.5;
+
+  // Compute exact kick onset timestamps:
+  // - 0.0..2.0s: quiet ambient intro (no kicks)
+  // - 2.0..12.0s: steady kicks at k * 0.5s
+  // - 12.0..13.6s: breakdown gap
+  // - 13.62..27.5s: phase-shifted groove shifted by +120ms (beats at 13.62, 14.12, ...)
+  const trueBeats: number[] = [];
+  for (let t = 2.0; t <= 11.6; t += beatSec) {
+    trueBeats.push(Number(t.toFixed(4)));
+  }
+  for (let t = 13.62; t <= 27.2; t += beatSec) {
+    trueBeats.push(Number(t.toFixed(4)));
+  }
+
+  // Gentle ambient pad throughout so intro isn't dead silence
+  for (let i = 0; i < mono.length; i++) {
+    mono[i] = Math.sin((i / sr) * 2 * Math.PI * 110) * 0.04;
+  }
+
+  for (const kt of trueBeats) {
+    const s0 = Math.round(kt * sr);
+    for (let j = 0; j < 700 && s0 + j < mono.length; j++) {
+      const env = Math.exp(-j / 140);
+      const click = j < 90 ? Math.sin((j / sr) * 2 * Math.PI * 1150) * 0.5 : 0;
+      const body = Math.sin((j / sr) * 2 * Math.PI * 62) * 0.9;
+      mono[s0 + j] += (body + click) * env;
+    }
+  }
+
+  const grid = detectTrackBpmAndBeats(mono, sr, 0, dur, 1.0);
+  assert.ok(Math.abs(grid.bpm - bpm) <= 2, `Expected ~120 BPM, got ${grid.bpm}`);
+
+  // Verify beats AFTER the 120ms breakdown shift lock closely onto true shifted kicks (within 25ms mean error)
+  const postShiftTrue = trueBeats.filter((t) => t >= 15.0 && t <= 26.5);
+  let postErrSum = 0;
+  for (const kt of postShiftTrue) {
+    const nearest = Math.min(...grid.beats.map((b) => Math.abs(b - kt)));
+    postErrSum += nearest;
+  }
+  const postMeanErrMs = (postErrSum / postShiftTrue.length) * 1000;
+  assert.ok(
+    postMeanErrMs <= 25,
+    `Expected DP tracker to re-lock onto +120ms phase shift after breakdown (<=25ms mean err), got ${postMeanErrMs.toFixed(1)}ms`
+  );
+});
+
 
 
 

@@ -1369,7 +1369,7 @@ export function detectTrackBpmAndBeats(
       (doubleLag <= maxAcfLag ? acf[doubleLag] * 0.34 : 0) +
       (halfLag >= minAcfLag ? acf[halfLag] * 0.20 : 0);
     const tempoPrior =
-      candBpm >= 88 && candBpm <= 142 ? 1.15 : candBpm >= 72 && candBpm <= 165 ? 1.03 : 0.94;
+      candBpm >= 84 && candBpm <= 148 ? 1.08 : candBpm >= 68 && candBpm <= 176 ? 1.0 : 0.94;
     const score = harmonicSupport * tempoPrior;
     if (score > bestScore) {
       bestScore = score;
@@ -1478,64 +1478,109 @@ export function detectTrackBpmAndBeats(
     bestPhase = altHalfPhase;
   }
 
-  // Adaptive transient-locked PLL tracker tightly anchored to global phase lattice to eliminate cumulative drift
-  const beats: number[] = [];
-  const pllMaxDrift = Math.min(0.04, beatSec * 0.09);
-  const searchRadiusSteps = Math.max(2, Math.round(pllMaxDrift / hopSec));
-  const pllSteerThreshold = Math.max(0.015, activeOnsetMean * 0.72);
-  // If ultra-fine phase wrapped slightly negative across modulo beatSec right near t=0 while t=0 has an onset, anchor at 0
-  if (bestPhase > beatSec * 0.85 && onsets[0] >= pllSteerThreshold * 0.6) {
+  // Dynamic-programming (Ellis-style) beat sequence tracking:
+  // Combines exact global phase lattice support during silent/beatless passages with smooth log-ratio
+  // tempo tracking so real-world tracks with tempo bends, rubato, or breakdown phase resets stay dead-on the kick.
+  const combAnchorThresh = Math.max(0.015, activeOnsetMean * 0.72);
+  if (bestPhase > beatSec * 0.85 && onsets[0] >= combAnchorThresh * 0.6) {
     bestPhase = 0;
   }
-  let expectedT = bestPhase;
 
-  while (expectedT < clipDuration - 0.04) {
-    const gridAnchor =
-      bestPhase + Math.round((expectedT - bestPhase) / beatSec) * beatSec;
-    const boundedCenter = Math.max(
-      gridAnchor - pllMaxDrift,
-      Math.min(gridAnchor + pllMaxDrift, expectedT)
-    );
-    const centerIdx = Math.round(boundedCenter / hopSec);
-    let bestPeakIdx = Math.max(0, Math.min(totalSteps - 1, centerIdx));
-    let bestPeakWeighted = -1;
-    let bestPeakRaw = onsets[bestPeakIdx] || 0;
+  const beatStepsExact = Math.max(4, beatSec / hopSec);
+  const minPrevStep = Math.max(4, Math.round(beatStepsExact * 0.72));
+  const maxPrevStep = Math.max(minPrevStep + 2, Math.round(beatStepsExact * 1.38));
+  const minInitStep = Math.min(totalSteps - 1, Math.round(beatStepsExact * 1.45));
+  const normScale = Math.max(0.03, activeOnsetMean * 1.6);
 
-    for (let d = -searchRadiusSteps; d <= searchRadiusSteps; d++) {
-      const idx = Math.max(0, Math.min(totalSteps - 1, centerIdx + d));
-      const proxWeight = 1 - Math.abs(d) / (searchRadiusSteps * 2.0);
-      const weighted =
-        (onsets[idx] * 0.48 + lowOnsets[idx] * 0.34 + attackOnsets[idx] * 0.52) * proxWeight;
-      if (weighted > bestPeakWeighted) {
-        bestPeakWeighted = weighted;
-        bestPeakIdx = idx;
-        bestPeakRaw = onsets[idx];
+  const dpOnset = new Float32Array(totalSteps);
+  for (let s = 0; s < totalSteps; s++) {
+    const combo = onsets[s] * 0.46 + lowOnsets[s] * 0.34 + attackOnsets[s] * 0.54;
+    dpOnset[s] = Math.min(4.0, combo / normScale);
+  }
+
+  const dpScore = new Float64Array(totalSteps);
+  const prevBeat = new Int32Array(totalSteps).fill(-1);
+  const tempoPenaltyWeight = 11.5;
+
+  for (let s = 0; s < totalSteps; s++) {
+    const t = s * hopSec;
+    const cycles = (t - bestPhase) / beatSec;
+    const distSteps = Math.abs(cycles - Math.round(cycles)) * beatStepsExact;
+    const phaseGuide = distSteps < 2.2 ? (1 - distSteps / 2.2) * 0.045 : 0;
+    const localScore = dpOnset[s] + phaseGuide;
+
+    let bestPrev = -1;
+    let bestVal = s <= minInitStep ? localScore : -1e9;
+    const pStart = Math.max(0, s - maxPrevStep);
+    const pEnd = s - minPrevStep;
+    for (let p = pStart; p <= pEnd; p++) {
+      const interval = s - p;
+      const logRatio = Math.log(interval / beatStepsExact);
+      const cand = dpScore[p] - tempoPenaltyWeight * logRatio * logRatio + localScore;
+      if (cand > bestVal) {
+        bestVal = cand;
+        bestPrev = p;
       }
     }
+    dpScore[s] = bestVal;
+    prevBeat[s] = bestPrev;
+  }
 
-    // Sub-hop parabolic peak refinement for 2-3ms beat precision
-    let subStep = bestPeakIdx;
-    if (bestPeakIdx > 0 && bestPeakIdx < totalSteps - 1 && bestPeakRaw >= pllSteerThreshold) {
-      const y0 = onsets[bestPeakIdx - 1] * 0.48 + lowOnsets[bestPeakIdx - 1] * 0.34 + attackOnsets[bestPeakIdx - 1] * 0.52;
-      const y1 = onsets[bestPeakIdx] * 0.48 + lowOnsets[bestPeakIdx] * 0.34 + attackOnsets[bestPeakIdx] * 0.52;
-      const y2 = onsets[bestPeakIdx + 1] * 0.48 + lowOnsets[bestPeakIdx + 1] * 0.34 + attackOnsets[bestPeakIdx + 1] * 0.52;
+  let endBestIdx = totalSteps - 1;
+  let endBestScore = -1e9;
+  const endSearchStart = Math.max(
+    0,
+    totalSteps - Math.max(minPrevStep + 1, Math.round(beatStepsExact * 1.55))
+  );
+  for (let s = endSearchStart; s < totalSteps; s++) {
+    if (dpScore[s] > endBestScore) {
+      endBestScore = dpScore[s];
+      endBestIdx = s;
+    }
+  }
+
+  const dpPath: number[] = [];
+  let cur = endBestIdx;
+  while (cur >= 0) {
+    dpPath.push(cur);
+    cur = prevBeat[cur];
+  }
+  dpPath.reverse();
+
+  const beats: number[] = [];
+  for (const stepIdx of dpPath) {
+    const rawCombo = onsets[stepIdx];
+    const hasAttack =
+      rawCombo >= combAnchorThresh || attackOnsets[stepIdx] >= combAnchorThresh * 0.8;
+    let beatTimeSec: number;
+    if (hasAttack && stepIdx > 0 && stepIdx < totalSteps - 1) {
+      const y0 =
+        onsets[stepIdx - 1] * 0.46 + lowOnsets[stepIdx - 1] * 0.34 + attackOnsets[stepIdx - 1] * 0.54;
+      const y1 =
+        onsets[stepIdx] * 0.46 + lowOnsets[stepIdx] * 0.34 + attackOnsets[stepIdx] * 0.54;
+      const y2 =
+        onsets[stepIdx + 1] * 0.46 + lowOnsets[stepIdx + 1] * 0.34 + attackOnsets[stepIdx + 1] * 0.54;
       const denom = 2 * (y0 - 2 * y1 + y2);
+      let subStep = stepIdx;
       if (Math.abs(denom) > 1e-8 && denom < 0) {
         subStep += Math.max(-0.45, Math.min(0.45, (y0 - y2) / denom));
       }
-    }
-
-    const snapped = Number(Math.max(0, subStep * hopSec).toFixed(3));
-    if (beats.length === 0 || snapped - beats[beats.length - 1] > beatSec * 0.48) {
-      beats.push(snapped);
-    }
-
-    const anchorPull = (gridAnchor - boundedCenter) * 0.52;
-    if (bestPeakRaw >= pllSteerThreshold) {
-      const err = snapped - boundedCenter;
-      expectedT = boundedCenter + beatSec + err * 0.14 + anchorPull;
+      beatTimeSec = Math.max(0, subStep * hopSec);
     } else {
-      expectedT = boundedCenter + beatSec + anchorPull;
+      // During silent intros / beatless gaps, lock tightly onto comb phase if within step jitter
+      const approxT = stepIdx * hopSec;
+      const gridSnap = bestPhase + Math.round((approxT - bestPhase) / beatSec) * beatSec;
+      beatTimeSec =
+        Math.abs(gridSnap - approxT) <= hopSec * 1.65 && gridSnap >= 0
+          ? gridSnap
+          : Math.max(0, approxT);
+    }
+    const snapped = Number(beatTimeSec.toFixed(3));
+    if (
+      snapped < clipDuration - 0.04 &&
+      (beats.length === 0 || snapped - beats[beats.length - 1] > beatSec * 0.55)
+    ) {
+      beats.push(snapped);
     }
   }
 
@@ -3394,6 +3439,8 @@ export function generateAutoClipPlan(
     excludeEdgeSec?: number;
     excludeUsedUrls?: Set<string>;
     excludeVideoRangesByUrl?: Map<string, Array<[number, number]>>;
+    preferAvoidUrls?: Set<string>;
+    preferAvoidVideoRangesByUrl?: Map<string, Array<[number, number]>>;
     fillToTargetEnd?: boolean;
     strictSingleUse?: boolean;
     hasAudio?: boolean;
@@ -3437,8 +3484,9 @@ export function generateAutoClipPlan(
   // Prepare media pool up-front so Stage 1 & Stage 2 share exact knowledge of mixed photo + video assets
   const getAssetContentKey = (b: MediaBinItem): string => {
     const cleanName = (b.fileName || '').trim().toLowerCase();
+    const sizeKey = b.fileSize !== undefined && b.fileSize > 0 ? `:${b.fileSize}` : '';
     if (b.kind === 'image') {
-      return cleanName ? `img:${cleanName}:${b.width}x${b.height}` : `url:${b.url}`;
+      return cleanName ? `img:${cleanName}:${b.width}x${b.height}${sizeKey}` : `url:${b.url}`;
     }
     const durKey = Math.round((b.videoDuration ?? b.defaultDurationSec ?? 0) * 10);
     const sKey =
@@ -3446,7 +3494,7 @@ export function generateAutoClipPlan(
     const eKey =
       b.defaultSourceEndSec !== undefined ? Number(b.defaultSourceEndSec.toFixed(1)) : '';
     return cleanName
-      ? `vid:${cleanName}:${durKey}:${b.width}x${b.height}:${sKey}:${eKey}`
+      ? `vid:${cleanName}:${durKey}:${b.width}x${b.height}${sizeKey}:${sKey}:${eKey}`
       : `url:${b.url}`;
   };
 
@@ -3499,6 +3547,21 @@ export function generateAutoClipPlan(
       const merged = excludedRangesByKey.get(k) ?? [];
       merged.push(...list);
       excludedRangesByKey.set(k, merged);
+    }
+  }
+  const softExcludedImgKeys = new Set<string>();
+  if (options.preferAvoidUrls) {
+    for (const u of options.preferAvoidUrls) {
+      softExcludedImgKeys.add(urlToKey.get(u) ?? `url:${u}`);
+    }
+  }
+  const softExcludedRangesByKey = new Map<string, Array<[number, number]>>();
+  if (options.preferAvoidVideoRangesByUrl) {
+    for (const [u, list] of options.preferAvoidVideoRangesByUrl.entries()) {
+      const k = urlToKey.get(u) ?? `url:${u}`;
+      const merged = softExcludedRangesByKey.get(k) ?? [];
+      merged.push(...list);
+      softExcludedRangesByKey.set(k, merged);
     }
   }
 
@@ -3646,11 +3709,11 @@ export function generateAutoClipPlan(
 
   const detectedFiltered =
     beatGrid.beats.length >= 2
-      ? beatGrid.beats.filter((b) => b > startOffsetSec + 0.04 && b < targetLimit - 0.12)
+      ? beatGrid.beats.filter((b) => b > startOffsetSec + 0.05 && b < targetLimit - 0.12)
       : [];
   const filteredIdx =
     beatGrid.beats.length >= 2
-      ? beatGrid.beats.findIndex((b) => b > startOffsetSec + 0.04 && b < targetLimit - 0.12)
+      ? beatGrid.beats.findIndex((b) => b > startOffsetSec + 0.05 && b < targetLimit - 0.12)
       : -1;
 
   let baseBeats: number[];
@@ -3777,17 +3840,23 @@ export function generateAutoClipPlan(
     const isBuildupBeforeDrop =
       section === 'buildup' || (nextDropDelta > 0 && nextDropDelta <= 8 && section !== 'drop');
 
+    const uniqueImageKeysCount = new Set(poolImages.map((img) => img.contentKey)).size;
+    const richPhotoBin = hasMixedPool && mediaPriority !== 'video_first' && uniqueImageKeysCount > 3;
+    const photoMajorityBin =
+      richPhotoBin && uniqueImageKeysCount >= Math.max(6, Math.round(uniqueVideoContentKeysCount * 1.4));
+
     const allowShortPhotoPunch =
       hasMixedPool &&
       shouldShuffle &&
       section !== 'beatless' &&
+      mediaPriority !== 'video_first' &&
       (rhythm === 'auto' || rhythm === 'beats_4') &&
       maxClipBound >= beatSec * 1.8 &&
       recentSteps.length > 0 &&
-      prevStep1 >= 4 &&
+      (prevStep1 >= 4 || (photoMajorityBin && stage1SlotOrd % 2 === 1 && prevStep2 >= 4)) &&
       (section === 'intro'
         ? (uniqueVideoContentKeysCount <= 2 && stage1SlotOrd >= 1) ||
-          (stage1SlotOrd >= 2 && takeOpeningRoll > 0.4 && curOnset >= 0.45)
+          (stage1SlotOrd >= 2 && (photoMajorityBin || (takeOpeningRoll > 0.4 && curOnset >= 0.45)))
         : isShortSpan
           ? hasRealAudioSignals
             ? energy >= 0.5 || hitStrength >= 0.58 || (prevStep2 >= 4 && curOnset >= 0.5)
@@ -3796,14 +3865,18 @@ export function generateAutoClipPlan(
             ? (prevStep2 >= 4 ||
                 energy >= 0.65 ||
                 section === 'drop' ||
-                uniqueVideoContentKeysCount <= 2) &&
+                uniqueVideoContentKeysCount <= 2 ||
+                richPhotoBin) &&
               (hasRealAudioSignals
-                ? energy >= 0.48 || hitStrength >= 0.56 || stage1SlotOrd % 4 === 3
+                ? energy >= 0.48 ||
+                  hitStrength >= (richPhotoBin ? 0.44 : 0.56) ||
+                  stage1SlotOrd % (richPhotoBin ? 2 : 4) === (richPhotoBin ? 1 : 3)
                 : stage1SlotOrd % 2 === 1)
-            : prevStep2 >= 4 &&
+            : (prevStep2 >= 4 || richPhotoBin) &&
               (hasRealAudioSignals
-                ? stage1SlotOrd % 3 === 2 || hitStrength >= 0.56
-                : stage1SlotOrd % 3 === 2));
+                ? stage1SlotOrd % (richPhotoBin ? 2 : 3) === (richPhotoBin ? 1 : 2) ||
+                  hitStrength >= (richPhotoBin ? 0.45 : 0.56)
+                : stage1SlotOrd % (richPhotoBin ? 2 : 3) === (richPhotoBin ? 1 : 2)));
 
     let preferredOrder: number[];
     const effectiveRhythm =
@@ -4489,14 +4562,26 @@ export function generateAutoClipPlan(
     } else {
       const transHeadroom =
         transitionStyle === 'cuts_only' ? 0 : Math.min(0.4, dur * 0.14) * entry.rate;
+      const priorSoft = softExcludedRangesByKey.get(entry.contentKey);
+      const unseenByPrior =
+        priorSoft && priorSoft.length > 0
+          ? subtractUsedIntervals(ranges[0] ? [entry.initStart, entry.initEnd] : [0, 0], [
+              ...(usedSlicesByKey.get(entry.contentKey) ?? []).map(
+                ([us, ue]): [number, number] => [Math.max(entry.initStart, us - slicePad), ue + slicePad]
+              ),
+              ...(excludedRangesByKey.get(entry.contentKey) ?? []),
+              ...priorSoft,
+            ], minSliceKeep).filter(([rs, re]) => re - rs >= mediaNeed - 0.01)
+          : [];
+      const activeRanges = unseenByPrior.length > 0 ? unseenByPrior : ranges;
       const fittingWithHeadroom: Array<[number, number]> =
         transHeadroom > 0
-          ? ranges.filter(([rs, re]) => re - rs >= mediaNeed + transHeadroom)
+          ? activeRanges.filter(([rs, re]) => re - rs >= mediaNeed + transHeadroom)
           : [];
       const fitting: Array<[number, number]> =
         fittingWithHeadroom.length > 0
           ? fittingWithHeadroom
-          : ranges.filter(([rs, re]) => re - rs >= mediaNeed - 0.01);
+          : activeRanges.filter(([rs, re]) => re - rs >= mediaNeed - 0.01);
       const [rs, re] =
         fitting.length > 0 ? fitting[Math.floor(rng() * fitting.length)] : ranges[0];
       const clampedNeed = Math.min(mediaNeed, Math.max(0.25, re - rs));
@@ -5213,8 +5298,27 @@ export function generateAutoClipPlan(
     return strictVideoOnLongSlots ? [] : activeList;
   };
 
+  const isFreshRelativeToPriorTakes = (entry: PoolAsset, dur: number): boolean => {
+    if (entry.kind === 'image') return !softExcludedImgKeys.has(entry.contentKey);
+    const priorSoft = softExcludedRangesByKey.get(entry.contentKey);
+    if (!priorSoft || priorSoft.length === 0) return true;
+    const mediaNeed = Math.min(dur * entry.rate, Math.max(0.4, entry.initEnd - entry.initStart));
+    const unseen = subtractUsedIntervals(
+      [entry.initStart, entry.initEnd],
+      [
+        ...(usedSlicesByKey.get(entry.contentKey) ?? []).map(
+          ([us, ue]): [number, number] => [Math.max(entry.initStart, us - slicePad), ue + slicePad]
+        ),
+        ...(excludedRangesByKey.get(entry.contentKey) ?? []),
+        ...priorSoft,
+      ],
+      minSliceKeep
+    );
+    return unseen.some(([rs, re]) => re - rs >= mediaNeed - 0.01);
+  };
+
   // Strictly prioritize unused files first (minUsage exact equality, zero +1 shortcut),
-  // and maximize distance since nearest timeline placement to prevent back-and-forth looping.
+  // prefer files/slices not already shown in recent takes, and maximize distance since nearest timeline placement.
   const pickShuffledAsset = (
     eligible: PoolAsset[],
     slot: MusicalSlot,
@@ -5235,7 +5339,16 @@ export function generateAutoClipPlan(
     const strictlyLeastUsed = poolStage1.filter(
       (e) => (usageCountByKey.get(e.contentKey) ?? 0) === minUsage
     );
-    const poolLeast = strictlyLeastUsed.length > 0 ? strictlyLeastUsed : poolStage1;
+    const freshInLeast =
+      softExcludedImgKeys.size > 0 || softExcludedRangesByKey.size > 0
+        ? strictlyLeastUsed.filter((e) => isFreshRelativeToPriorTakes(e, slot.dur))
+        : [];
+    const poolLeast =
+      freshInLeast.length > 0
+        ? freshInLeast
+        : strictlyLeastUsed.length > 0
+          ? strictlyLeastUsed
+          : poolStage1;
     const nonPingPong2 =
       poolLeast.length > 1
         ? poolLeast.filter((e) => e.contentKey !== prev2Key && e.contentKey !== next2Key)
@@ -5320,7 +5433,84 @@ export function generateAutoClipPlan(
     while (sIdx < workingSlots.length && placements.length < maxSlots * 2) {
       const slot = workingSlots[sIdx];
       let rawEligible = pool.filter((e) => canAssetFitUnused(e, slot.dur, true, false));
+      if (rawEligible.length === 0) {
+        const canSplitThisSlot = slot.dur >= splitFloor * 2 - 0.05 && splitSlotAtBeat(slot) !== null;
+        if (!canSplitThisSlot) {
+          const untrimmedUnused = pool.filter(
+            (e) =>
+              (usageCountByKey.get(e.contentKey) ?? 0) === 0 &&
+              canAssetFitUnused(e, slot.dur, false, false)
+          );
+          if (untrimmedUnused.length > 0) {
+            rawEligible = untrimmedUnused;
+          }
+        }
+      }
       let eligible = filterByMixedPriority(rawEligible, slot, false, { prevKey: lastKey });
+
+      // Showcase unused photos on crisp 1-2 beat punches rather than slicing already-shown videos a 2nd/3rd time
+      if (
+        hasMixedPool &&
+        mediaPriority !== 'video_first' &&
+        eligible.length > 0 &&
+        eligible.every((e) => e.kind === 'video' && (usageCountByKey.get(e.contentKey) ?? 0) >= 1) &&
+        poolImages.some(
+          (img) =>
+            !usedImageKeys.has(img.contentKey) &&
+            (!avoidAdjacentRepeat || img.contentKey !== lastKey)
+        )
+      ) {
+        if (
+          !isShortBeatSlot(slot) &&
+          slot.beatEndIdx - slot.beatStartIdx >= 3 &&
+          slot.section !== 'beatless' &&
+          splitGuard < Math.max(450, workingSlots.length * 2)
+        ) {
+          const punchBeats = beatSec * 2 <= shortBeatMaxSec + 0.02 ? 2 : 1;
+          const splitIdx = slot.beatEndIdx - punchBeats;
+          if (splitIdx > slot.beatStartIdx) {
+            const splitT = Number(beatTimes[splitIdx].toFixed(3));
+            const leftDur = Number((splitT - slot.startSec).toFixed(3));
+            const rightDur = Number((slot.startSec + slot.dur - splitT).toFixed(3));
+            if (leftDur >= 0.45 && rightDur >= 0.4 && rightDur <= shortBeatMaxSec + 0.02) {
+              splitGuard++;
+              const midImpact =
+                (onsetAccent[splitIdx] ?? slot.cutImpact) * 0.55 +
+                (melodicNovelty[splitIdx] ?? 0.4) * 0.45;
+              const remainingVideosHaveSlices = poolVideos.some(
+                (v) =>
+                  (!avoidAdjacentRepeat || v.contentKey !== lastKey) &&
+                  canAssetFitUnused(v, leftDur, false, false)
+              );
+              const leftSlot: MusicalSlot = {
+                startSec: slot.startSec,
+                dur: leftDur,
+                beatStartIdx: slot.beatStartIdx,
+                beatEndIdx: splitIdx,
+                energy: slot.energy,
+                cutImpact: midImpact,
+                section: slot.section,
+                isPreDrop: dropImpactSet.has(splitIdx),
+              };
+              const rightSlot: MusicalSlot = {
+                startSec: splitT,
+                dur: rightDur,
+                beatStartIdx: splitIdx,
+                beatEndIdx: slot.beatEndIdx,
+                energy: phraseEnergy[splitIdx] ?? slot.energy,
+                cutImpact: slot.cutImpact,
+                section: beatSections[splitIdx] ?? slot.section,
+                isPreDrop: slot.isPreDrop,
+              };
+              if (remainingVideosHaveSlices) {
+                workingSlots.splice(sIdx, 1, leftSlot, rightSlot);
+                continue;
+              }
+            }
+          }
+        }
+      }
+
       if (eligible.length === 0) {
         if (hasAnyUnusedFootage(splitFloor) && splitGuard < Math.max(350, workingSlots.length)) {
           const pair = splitSlotAtBeat(slot);
@@ -5344,6 +5534,24 @@ export function generateAutoClipPlan(
             workingSlots.splice(sIdx, 1, finePair[0], finePair[1]);
             continue;
           }
+        }
+      }
+      // If only unused photos remain once videos are spent and slot is long (>2 beats), split into crisp beat-synced photo cuts
+      if (
+        hasMixedPool &&
+        mediaPriority !== 'video_first' &&
+        eligible.length > 0 &&
+        eligible.every((e) => e.kind === 'image') &&
+        slot.dur > Math.max(shortBeatMaxSec, beatSec * 2.4) &&
+        slot.beatEndIdx - slot.beatStartIdx >= 2 &&
+        splitGuard < Math.max(450, workingSlots.length * 2)
+      ) {
+        const photoFloor = Math.max(0.45, Math.min(beatSec * 1.8, shortBeatMaxSec * 0.85));
+        const photoPair = splitSlotAtBeat(slot, photoFloor);
+        if (photoPair) {
+          splitGuard++;
+          workingSlots.splice(sIdx, 1, photoPair[0], photoPair[1]);
+          continue;
         }
       }
       if (eligible.length === 0) {
@@ -5416,6 +5624,61 @@ export function generateAutoClipPlan(
           reserveShortForPhotos: hasMixedPool,
         });
         if (eligible.length > 0) {
+          if (
+            hasMixedPool &&
+            mediaPriority !== 'video_first' &&
+            !isShortBeatSlot(slot) &&
+            slot.beatEndIdx - slot.beatStartIdx >= 3 &&
+            slot.section !== 'beatless' &&
+            splitGuard < maxSplitBudget &&
+            eligible.every((e) => e.kind === 'video' && (usageCountByKey.get(e.contentKey) ?? 0) >= 1) &&
+            poolImages.some(
+              (img) =>
+                !usedImageKeys.has(img.contentKey) &&
+                (!avoidAdjacentRepeat || (img.contentKey !== prevKey && img.contentKey !== nextKey))
+            )
+          ) {
+            const punchBeats = beatSec * 2 <= shortBeatMaxSec + 0.02 ? 2 : 1;
+            const splitIdx = slot.beatEndIdx - punchBeats;
+            if (splitIdx > slot.beatStartIdx) {
+              const splitT = Number(beatTimes[splitIdx].toFixed(3));
+              const leftDur = Number((splitT - slot.startSec).toFixed(3));
+              const rightDur = Number((slot.startSec + slot.dur - splitT).toFixed(3));
+              if (leftDur >= 0.45 && rightDur >= 0.4 && rightDur <= shortBeatMaxSec + 0.02) {
+                splitGuard++;
+                const midImpact =
+                  (onsetAccent[splitIdx] ?? slot.cutImpact) * 0.55 +
+                  (melodicNovelty[splitIdx] ?? 0.4) * 0.45;
+                workingSlots.splice(
+                  idx,
+                  1,
+                  {
+                    startSec: slot.startSec,
+                    dur: leftDur,
+                    beatStartIdx: slot.beatStartIdx,
+                    beatEndIdx: splitIdx,
+                    energy: slot.energy,
+                    cutImpact: midImpact,
+                    section: slot.section,
+                    isPreDrop: dropImpactSet.has(splitIdx),
+                  },
+                  {
+                    startSec: splitT,
+                    dur: rightDur,
+                    beatStartIdx: splitIdx,
+                    beatEndIdx: slot.beatEndIdx,
+                    energy: phraseEnergy[splitIdx] ?? slot.energy,
+                    cutImpact: slot.cutImpact,
+                    section: beatSections[splitIdx] ?? slot.section,
+                    isPreDrop: slot.isPreDrop,
+                  }
+                );
+                assigned.splice(idx, 1, null, null);
+                madeProgress = true;
+                break;
+              }
+            }
+          }
           const wouldForceAdjRepeat =
             avoidAdjacentRepeat &&
             uniqueAssetKeyCount > 1 &&
@@ -5676,7 +5939,7 @@ export interface AutoReplaceClipResult {
 export function getMediaContentSignature(
   item: Pick<
     MediaBinItem | VisualMediaState,
-    'kind' | 'fileName' | 'url' | 'width' | 'height' | 'videoDuration'
+    'kind' | 'fileName' | 'fileSize' | 'url' | 'width' | 'height' | 'videoDuration'
   > & {
     defaultDurationSec?: number;
     generatorId?: string;
@@ -5686,11 +5949,14 @@ export function getMediaContentSignature(
     return `gen:${item.generatorId || item.fileName || 'fx'}`;
   }
   const cleanName = (item.fileName || '').trim().toLowerCase();
+  const sizeKey = item.fileSize !== undefined && item.fileSize > 0 ? `:${item.fileSize}` : '';
   if (item.kind === 'image') {
-    return cleanName ? `img:${cleanName}:${item.width}x${item.height}` : `url:${item.url}`;
+    return cleanName ? `img:${cleanName}:${item.width}x${item.height}${sizeKey}` : `url:${item.url}`;
   }
   const durKey = Math.round((item.videoDuration ?? item.defaultDurationSec ?? 0) * 10);
-  return cleanName ? `vid:${cleanName}:${durKey}:${item.width}x${item.height}` : `url:${item.url}`;
+  return cleanName
+    ? `vid:${cleanName}:${durKey}:${item.width}x${item.height}${sizeKey}`
+    : `url:${item.url}`;
 }
 
 /**
@@ -5864,6 +6130,8 @@ export function planAutoClipsAroundLocked(
     hasAudio?: boolean;
     monoData?: Float32Array;
     sampleRate?: number;
+    preferAvoidUrls?: Set<string>;
+    preferAvoidVideoRangesByUrl?: Map<string, Array<[number, number]>>;
   } = {}
 ): LockedPlanGapResult {
   const lockedRaw = existingItems
@@ -5918,6 +6186,8 @@ export function planAutoClipsAroundLocked(
         avoidAdjacentRepeat: autoCfg.avoidAdjacentRepeat,
         shuffleOrder: autoCfg.shuffleOrder,
         excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
+        preferAvoidUrls: options.preferAvoidUrls,
+        preferAvoidVideoRangesByUrl: options.preferAvoidVideoRangesByUrl,
         fillToTargetEnd: Boolean(options.hasAudio),
         strictSingleUse: !autoCfg.allowReuseWhenExhausted,
         hasAudio: Boolean(options.hasAudio),
@@ -5992,6 +6262,8 @@ export function planAutoClipsAroundLocked(
         excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
         excludeUsedUrls: usedUrls,
         excludeVideoRangesByUrl: usedVideoRanges,
+        preferAvoidUrls: options.preferAvoidUrls,
+        preferAvoidVideoRangesByUrl: options.preferAvoidVideoRangesByUrl,
         fillToTargetEnd: true,
         strictSingleUse: !autoCfg.allowReuseWhenExhausted,
         hasAudio: Boolean(options.hasAudio),

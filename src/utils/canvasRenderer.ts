@@ -32,7 +32,10 @@ export interface RenderFrameParams {
 
 let txCanvasA: HTMLCanvasElement | null = null;
 let txCanvasB: HTMLCanvasElement | null = null;
-const videoFrameCache = new WeakMap<HTMLVideoElement, HTMLCanvasElement>();
+const videoFrameCache = new WeakMap<
+  HTMLVideoElement,
+  { canvas: HTMLCanvasElement; src: string }
+>();
 
 function getOffscreenContext(
   slot: 'a' | 'b',
@@ -54,13 +57,21 @@ function getOffscreenContext(
   return { canvas, ctx };
 }
 
-function updateVideoFrameCache(video: HTMLVideoElement, srcW: number, srcH: number): void {
+function updateVideoFrameCache(
+  video: HTMLVideoElement,
+  srcW: number,
+  srcH: number,
+  srcUrl: string
+): void {
   if (srcW <= 0 || srcH <= 0) return;
-  let cached = videoFrameCache.get(video);
-  if (!cached) {
-    cached = document.createElement('canvas');
-    videoFrameCache.set(video, cached);
+  let entry = videoFrameCache.get(video);
+  if (!entry) {
+    entry = { canvas: document.createElement('canvas'), src: srcUrl };
+    videoFrameCache.set(video, entry);
+  } else {
+    entry.src = srcUrl;
   }
+  const cached = entry.canvas;
   const maxCacheW = 960;
   const scale = srcW > maxCacheW ? maxCacheW / srcW : 1;
   const cw = Math.max(2, Math.round(srcW * scale));
@@ -522,18 +533,32 @@ function drawSingleClipLayer(
       ctx.restore();
       return;
     }
-    const videoReady = vidEl.readyState >= 2 && (!vidEl.seeking || isExport);
+    const vDur = Math.max(0.25, media.videoDuration || vidEl.duration || 10);
+    const rate = Math.max(0.25, media.playbackRate || 1);
+    const expectedSrcTime =
+      (media.sourceStartSec + clipProgress * Math.max(0.1, media.durationSec || 4) * rate) % vDur;
+    const rawDiff = Math.abs((vidEl.currentTime || 0) - expectedSrcTime);
+    const modDiff = Math.min(rawDiff, Math.max(0, vDur - rawDiff));
+    // Guard against caching Frame 0 right after attaching src before target seek completes
+    const isNearTargetFrame = modDiff <= 0.85 || !vidEl.paused;
+    const activeSrcKey = vidEl.currentSrc || vidEl.getAttribute('src') || media.url;
+    const videoReady = vidEl.readyState >= 2 && ((!vidEl.seeking && isNearTargetFrame) || isExport);
     if (videoReady) {
-      if (!isExport) {
-        updateVideoFrameCache(vidEl, drawSrcW, drawSrcH);
+      if (!isExport && !vidEl.seeking && isNearTargetFrame) {
+        updateVideoFrameCache(vidEl, drawSrcW, drawSrcH, activeSrcKey);
       }
     } else {
-      const cached = videoFrameCache.get(vidEl);
-      if (cached && cached.width > 0 && cached.height > 0) {
-        drawSource = cached;
-        drawSrcW = cached.width;
-        drawSrcH = cached.height;
-      } else if (vidEl.readyState < 2) {
+      const entry = videoFrameCache.get(vidEl);
+      if (
+        entry &&
+        entry.src === activeSrcKey &&
+        entry.canvas.width > 0 &&
+        entry.canvas.height > 0
+      ) {
+        drawSource = entry.canvas;
+        drawSrcW = entry.canvas.width;
+        drawSrcH = entry.canvas.height;
+      } else {
         ctx.restore();
         return;
       }

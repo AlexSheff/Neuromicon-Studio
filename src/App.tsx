@@ -324,6 +324,8 @@ export default function App() {
   const hydratedRef = useRef(false);
   const blobKeyMapRef = useRef<Map<string, string>>(new Map());
   const audioBlobKeyRef = useRef<string | undefined>(undefined);
+  const priorGenAvoidUrlsRef = useRef<Set<string>>(new Set());
+  const priorGenAvoidRangesRef = useRef<Map<string, Array<[number, number]>>>(new Map());
   const pastRef = useRef<HistorySnapshot[]>([]);
   const futureRef = useRef<HistorySnapshot[]>([]);
   const pendingBaseSnapshotRef = useRef<HistorySnapshot | null>(null);
@@ -763,9 +765,8 @@ export default function App() {
         activeIds.add(items[slice.prevIndex].id);
       }
 
-      // Rolling lookahead window: promote active/transitioning + upcoming clips (within 3.2s)
-      // to preload='auto' and prewarm next 2 upcoming clips so beat cuts fire cleanly with zero seek lag,
-      // while keeping total live WebMediaPlayer instances bounded on long auto-generated timelines.
+      // Rolling lookahead window: strictly prioritize active/transitioning + upcoming clips first
+      // so fast beat cuts never get starved by past clips holding WebMediaPlayer slots.
       const preloadWindowIds = new Set<string>(activeIds);
       const keepAttachedIds = new Set<string>(activeIds);
       const prewarmTargets = new Map<string, number>();
@@ -773,19 +774,13 @@ export default function App() {
 
       for (const s of segments) {
         const dt = s.startSec - localTime;
-        if (dt <= 0) {
-          if (Math.abs(s.endSec - localTime) <= 6) {
-            const recent = items[s.clipIndex];
-            if (recent?.kind === 'video') keepAttachedIds.add(recent.id);
-          }
-          continue;
-        }
+        if (dt <= 0) continue;
         const upcoming = items[s.clipIndex];
         if (!upcoming || upcoming.kind !== 'video') continue;
-        if (dt <= 6.2 || upcomingVideoCount < 8) {
+        if (dt <= 8.5 || upcomingVideoCount < 10) {
           preloadWindowIds.add(upcoming.id);
           keepAttachedIds.add(upcoming.id);
-          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 10 && dt <= 6.2) {
+          if (!activeIds.has(upcoming.id) && prewarmTargets.size < 10 && dt <= 8.5) {
             const vDur = upcoming.videoDuration || 1;
             const maxSafe = Math.max(0, vDur - 0.04);
             prewarmTargets.set(
@@ -794,14 +789,28 @@ export default function App() {
             );
           }
           upcomingVideoCount++;
-        } else if (dt <= 12 && keepAttachedIds.size < 22) {
+        } else if (dt <= 18 && keepAttachedIds.size < 22) {
           keepAttachedIds.add(upcoming.id);
         }
-        if (keepAttachedIds.size >= 22 && dt > 12) break;
+        if (keepAttachedIds.size >= 22 && dt > 18) break;
+      }
+
+      // Reserve up to 2 immediate past clips only after upcoming slots are allocated (and cap total at 26)
+      let recentPastCount = 0;
+      for (let idx = segments.length - 1; idx >= 0; idx--) {
+        if (keepAttachedIds.size >= 26 || recentPastCount >= 2) break;
+        const s = segments[idx];
+        if (s.endSec <= localTime && localTime - s.endSec <= 1.2) {
+          const recent = items[s.clipIndex];
+          if (recent?.kind === 'video' && !keepAttachedIds.has(recent.id)) {
+            keepAttachedIds.add(recent.id);
+            recentPastCount++;
+          }
+        }
       }
 
       const totalVideoCount = items.reduce((acc, it) => acc + (it.kind === 'video' ? 1 : 0), 0);
-      const enforceDecoderBudget = totalVideoCount > 24;
+      const enforceDecoderBudget = totalVideoCount > 28;
 
       items.forEach((item) => {
         if (item.kind !== 'video' || !item.videoElement) return;
@@ -874,6 +883,7 @@ export default function App() {
               v.addEventListener(
                 'loadedmetadata',
                 () => {
+                  pendingSeekHookedRef.current.delete(v);
                   const pending = pendingVideoSeekRef.current.get(v);
                   if (pending !== undefined) {
                     pendingVideoSeekRef.current.delete(v);
@@ -900,7 +910,7 @@ export default function App() {
             if (v.paused) {
               if (v.readyState < 1) {
                 applySafeSeek(targetSec);
-              } else if (Math.abs(v.currentTime - targetSec) > 0.18 && !v.seeking) {
+              } else if (Math.abs(v.currentTime - targetSec) > 0.10 && !v.seeking) {
                 v.currentTime = targetSec;
               }
               v.play().catch(() => {});
@@ -922,7 +932,7 @@ export default function App() {
         } else if (prewarmSec !== undefined) {
           v.muted = true;
           if (!v.paused) v.pause();
-          if (v.readyState < 1 || (!v.seeking && Math.abs(v.currentTime - prewarmSec) > 0.08)) {
+          if (v.readyState < 1 || (!v.seeking && Math.abs(v.currentTime - prewarmSec) > 0.05)) {
             applySafeSeek(prewarmSec);
           }
         } else {
@@ -1070,6 +1080,7 @@ export default function App() {
           id,
           kind: 'image',
           fileName: binItem.fileName,
+          fileSize: binItem.fileSize,
           url: binItem.url,
           width: binItem.width,
           height: binItem.height,
@@ -1111,6 +1122,7 @@ export default function App() {
         id,
         kind: 'video',
         fileName: binItem.fileName,
+        fileSize: binItem.fileSize,
         url: binItem.url,
         width: binItem.width || 1080,
         height: binItem.height || 1920,
@@ -1290,12 +1302,14 @@ export default function App() {
       blobKey?: string,
       isSharedUrl = false,
       sourceBlob?: Blob,
-      autoPlace?: { atTimeSec?: number; mode?: 'playhead' | 'end' | 'exact' }
+      autoPlace?: { atTimeSec?: number; mode?: 'playhead' | 'end' | 'exact' },
+      batchUpload = false
     ) => {
       if (blobKey) {
         blobKeyMapRef.current.set(url, blobKey);
       }
       const binId = `bin-${createItemId()}`;
+      const recordHistory = batchUpload ? queueDebouncedHistory : pushImmediateHistory;
       if (kind === 'image') {
         const img = new Image();
         img.onload = () => {
@@ -1303,13 +1317,14 @@ export default function App() {
             id: binId,
             kind: 'image',
             fileName,
+            fileSize: sourceBlob?.size,
             url,
             width: img.naturalWidth,
             height: img.naturalHeight,
             imageElement: img,
             defaultDurationSec: 4.0,
           };
-          pushImmediateHistory();
+          recordHistory();
           const nextBinImg = [...mediaBinRef.current, newBinItem];
           mediaBinRef.current = nextBinImg;
           setMediaBin(nextBinImg);
@@ -1345,13 +1360,14 @@ export default function App() {
             id: binId,
             kind: 'video',
             fileName,
+            fileSize: sourceBlob?.size,
             url,
             width: video.videoWidth || 1080,
             height: video.videoHeight || 1920,
             videoDuration: vDur,
             defaultDurationSec: Number(Math.max(0.5, Math.min(600, vDur)).toFixed(1)),
           };
-          pushImmediateHistory();
+          recordHistory();
           const nextBinVid = [...mediaBinRef.current, newBinItem];
           mediaBinRef.current = nextBinVid;
           setMediaBin(nextBinVid);
@@ -1400,7 +1416,14 @@ export default function App() {
         video.src = url;
       }
     },
-    [getAudioContext, lang, placeBinItemOnTimeline, pushImmediateHistory, showError]
+    [
+      getAudioContext,
+      lang,
+      placeBinItemOnTimeline,
+      pushImmediateHistory,
+      queueDebouncedHistory,
+      showError,
+    ]
   );
 
   const applyAudioBuffer = useCallback(
@@ -1644,11 +1667,13 @@ export default function App() {
           string,
           { duration: number; width: number; height: number; decodedAudio?: AudioBuffer }
         >();
+        const restoredSizeByKey = new Map<string, number>();
         const restoredBin: MediaBinItem[] = [];
         for (const sb of saved.mediaBin || []) {
           if (!sb.blobKey) continue;
           const blob = await loadBlobFromIDB(sb.blobKey);
           if (!blob) continue;
+          restoredSizeByKey.set(sb.blobKey, blob.size || sb.fileSize || 0);
           let url = restoredUrlByKey.get(sb.blobKey);
           if (!url) {
             url = URL.createObjectURL(blob);
@@ -1667,6 +1692,7 @@ export default function App() {
                 id: sb.id || `bin-${createItemId()}`,
                 kind: 'image',
                 fileName: sb.fileName,
+                fileSize: blob.size || sb.fileSize,
                 url,
                 width: img.naturalWidth || sb.width,
                 height: img.naturalHeight || sb.height,
@@ -1706,6 +1732,7 @@ export default function App() {
                 id: sb.id || `bin-${createItemId()}`,
                 kind: 'video',
                 fileName: sb.fileName,
+                fileSize: blob.size || sb.fileSize,
                 url,
                 width: vW,
                 height: vH,
@@ -1765,10 +1792,13 @@ export default function App() {
             if (!url) {
               const blob = await loadBlobFromIDB(sc.blobKey);
               if (!blob) continue;
+              restoredSizeByKey.set(sc.blobKey, blob.size || sc.fileSize || 0);
               url = URL.createObjectURL(blob);
               restoredUrlByKey.set(sc.blobKey, url);
               blobKeyMapRef.current.set(url, sc.blobKey);
             }
+            const resolvedClipFileSize =
+              restoredSizeByKey.get(sc.blobKey) || sc.fileSize || undefined;
 
             if (sc.kind === 'image') {
               let img = restoredImageByKey.get(sc.blobKey) ?? null;
@@ -1786,6 +1816,7 @@ export default function App() {
                   id: sc.id,
                   kind: 'image',
                   fileName: sc.fileName,
+                  fileSize: resolvedClipFileSize,
                   url,
                   width: img.naturalWidth,
                   height: img.naturalHeight,
@@ -1809,6 +1840,7 @@ export default function App() {
                     id: `bin-${createItemId()}`,
                     kind: 'image',
                     fileName: sc.fileName,
+                    fileSize: resolvedClipFileSize,
                     url,
                     width: img.naturalWidth,
                     height: img.naturalHeight,
@@ -1837,6 +1869,9 @@ export default function App() {
                   try {
                     const blob = await loadBlobFromIDB(sc.blobKey);
                     if (blob) {
+                      if (!restoredSizeByKey.has(sc.blobKey)) {
+                        restoredSizeByKey.set(sc.blobKey, blob.size || sc.fileSize || 0);
+                      }
                       const arr = await blob.arrayBuffer();
                       decodedBuf = await getAudioContext().decodeAudioData(arr);
                     }
@@ -1857,10 +1892,13 @@ export default function App() {
 
               if (ok && cachedMeta) {
                 const vDur = cachedMeta.duration;
+                const finalVideoFileSize =
+                  restoredSizeByKey.get(sc.blobKey) || sc.fileSize || undefined;
                 restoredClips.push({
                   id: sc.id,
                   kind: 'video',
                   fileName: sc.fileName,
+                  fileSize: finalVideoFileSize,
                   url,
                   width: cachedMeta.width,
                   height: cachedMeta.height,
@@ -1886,6 +1924,7 @@ export default function App() {
                     id: `bin-${createItemId()}`,
                     kind: 'video',
                     fileName: sc.fileName,
+                    fileSize: finalVideoFileSize,
                     url,
                     width: cachedMeta.width,
                     height: cachedMeta.height,
@@ -2106,6 +2145,7 @@ export default function App() {
   const handleVisualFiles = useCallback(
     (files: File[], autoPlaceAtSec?: number) => {
       let placedFirst = false;
+      const isBatchUpload = files.length > 1;
       for (const file of files) {
         if (!file || file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
           const classified = classifyMediaError({
@@ -2156,7 +2196,8 @@ export default function App() {
           blobKey,
           false,
           file,
-          autoPlace
+          autoPlace,
+          isBatchUpload
         );
       }
     },
@@ -2359,6 +2400,9 @@ export default function App() {
 
       const excludeUsedUrls = new Set<string>();
       const excludeVideoRangesByUrl = new Map<string, Array<[number, number]>>();
+      const preferAvoidUrls = new Set<string>();
+      const preferAvoidVideoRangesByUrl = new Map<string, Array<[number, number]>>();
+      const validBinUrls = new Set(binList.map((b) => b.url).filter(Boolean));
 
       if (isAppend) {
         const prevIntervals = getNormalizedManualClipIntervals(normalizedPrev);
@@ -2378,6 +2422,30 @@ export default function App() {
             const srcEnd = srcStart + Math.max(0.4, c.durationSec) * Math.max(0.25, c.playbackRate || 1);
             list.push([Number(srcStart.toFixed(2)), Number(srcEnd.toFixed(2))]);
             excludeVideoRangesByUrl.set(c.url, list);
+          }
+        }
+      } else {
+        for (const u of priorGenAvoidUrlsRef.current) {
+          if (validBinUrls.has(u)) preferAvoidUrls.add(u);
+        }
+        for (const [u, ranges] of priorGenAvoidRangesRef.current.entries()) {
+          if (validBinUrls.has(u) && ranges.length > 0) {
+            preferAvoidVideoRangesByUrl.set(
+              u,
+              ranges.map(([s, e]) => [s, e] as [number, number])
+            );
+          }
+        }
+        for (const c of prevItems) {
+          if (c.locked || !c.url || !validBinUrls.has(c.url)) continue;
+          if (c.kind === 'image') {
+            preferAvoidUrls.add(c.url);
+          } else if (c.kind === 'video') {
+            const list = preferAvoidVideoRangesByUrl.get(c.url) || [];
+            const srcStart = Math.max(0, c.sourceStartSec || 0);
+            const srcEnd = srcStart + Math.max(0.4, c.durationSec) * Math.max(0.25, c.playbackRate || 1);
+            list.push([Number(srcStart.toFixed(2)), Number(srcEnd.toFixed(2))]);
+            preferAvoidVideoRangesByUrl.set(c.url, list);
           }
         }
       }
@@ -2405,6 +2473,8 @@ export default function App() {
             hasAudio: Boolean(aud),
             monoData: monoDataRef.current,
             sampleRate: aud?.sampleRate,
+            preferAvoidUrls,
+            preferAvoidVideoRangesByUrl,
           }
         );
         preservedLockedClips = lockedPlan.lockedClips;
@@ -2432,6 +2502,8 @@ export default function App() {
             excludeEdgeSec: autoCfg.excludeEdgeSec ?? 5,
             excludeUsedUrls: isAppend ? excludeUsedUrls : undefined,
             excludeVideoRangesByUrl: isAppend ? excludeVideoRangesByUrl : undefined,
+            preferAvoidUrls: !isAppend ? preferAvoidUrls : undefined,
+            preferAvoidVideoRangesByUrl: !isAppend ? preferAvoidVideoRangesByUrl : undefined,
             fillToTargetEnd: Boolean(aud),
             strictSingleUse: !autoCfg.allowReuseWhenExhausted,
             hasAudio: Boolean(aud),
@@ -2497,6 +2569,65 @@ export default function App() {
       if (builtClips.length === 0 && preservedLockedClips.length === 0) {
         showError(tFor(langRef.current).errAutoClipEmpty);
         return;
+      }
+
+      if (!isAppend) {
+        // Track used footage across consecutive Replace generations so clicks stay fresh,
+        // resetting cycled history smoothly once >= 88% of unique photos/ranges have rotated.
+        const uniqueBinImgUrls = new Set(
+          binList.filter((b) => b.kind === 'image' && b.url).map((b) => b.url)
+        );
+        const currentAvoidCount = Array.from(priorGenAvoidUrlsRef.current).filter((u) =>
+          uniqueBinImgUrls.has(u)
+        ).length;
+        if (uniqueBinImgUrls.size > 0 && currentAvoidCount >= Math.ceil(uniqueBinImgUrls.size * 0.88)) {
+          priorGenAvoidUrlsRef.current.clear();
+        }
+        const newlyPlacedVideoRanges = new Map<string, Array<[number, number]>>();
+        for (const c of builtClips) {
+          if (!c.url) continue;
+          if (c.kind === 'image') {
+            priorGenAvoidUrlsRef.current.add(c.url);
+          } else if (c.kind === 'video') {
+            const srcStart = Math.max(0, c.sourceStartSec || 0);
+            const srcEnd =
+              srcStart + Math.max(0.4, c.durationSec) * Math.max(0.25, c.playbackRate || 1);
+            const range: [number, number] = [
+              Number(srcStart.toFixed(2)),
+              Number(srcEnd.toFixed(2)),
+            ];
+            const prevList = priorGenAvoidRangesRef.current.get(c.url) || [];
+            prevList.push(range);
+            priorGenAvoidRangesRef.current.set(c.url, prevList);
+            const newList = newlyPlacedVideoRanges.get(c.url) || [];
+            newList.push(range);
+            newlyPlacedVideoRanges.set(c.url, newList);
+          }
+        }
+        const binDurByUrl = new Map<string, number>();
+        for (const b of binList) {
+          if (b.kind === 'video' && b.url && b.videoDuration) {
+            binDurByUrl.set(b.url, b.videoDuration);
+          }
+        }
+        for (const [u, ranges] of Array.from(priorGenAvoidRangesRef.current.entries())) {
+          if (!validBinUrls.has(u)) {
+            priorGenAvoidRangesRef.current.delete(u);
+            continue;
+          }
+          const vDur = binDurByUrl.get(u) || 0;
+          if (vDur > 0) {
+            const covered = ranges.reduce((s, [a, b]) => s + Math.max(0, b - a), 0);
+            if (covered >= vDur * 0.85) {
+              const latest = newlyPlacedVideoRanges.get(u);
+              if (latest && latest.length > 0) {
+                priorGenAvoidRangesRef.current.set(u, latest);
+              } else {
+                priorGenAvoidRangesRef.current.delete(u);
+              }
+            }
+          }
+        }
       }
 
       const nextItems = isAppend
@@ -2609,6 +2740,8 @@ export default function App() {
       const target = mediaBinRef.current.find((b) => b.id === binItemId);
       if (!target) return;
       pushImmediateHistory();
+      priorGenAvoidUrlsRef.current.delete(target.url);
+      priorGenAvoidRangesRef.current.delete(target.url);
       setMediaBin((prev) => prev.filter((b) => b.id !== binItemId));
       const usedElsewhere =
         mediaItemsRef.current.some((m) => m.url === target.url) ||
@@ -2624,6 +2757,8 @@ export default function App() {
     if (mediaBinRef.current.length === 0) return;
     pushImmediateHistory();
     const prevBin = mediaBinRef.current;
+    priorGenAvoidUrlsRef.current.clear();
+    priorGenAvoidRangesRef.current.clear();
     setMediaBin([]);
     for (const target of prevBin) {
       const usedElsewhere =
@@ -4408,6 +4543,7 @@ export default function App() {
         }
 
         // Restore Media Library + generator/image/video clips whose IDB blobs exist locally
+        const importedSizeByKey = new Map<string, number>();
         const urlByKey = new Map<string, string>();
         const nextBin: MediaBinItem[] = [];
         for (const sb of parsed.mediaBin || []) {
@@ -4417,6 +4553,7 @@ export default function App() {
             missingBinaryMedia = true;
             continue;
           }
+          importedSizeByKey.set(sb.blobKey, blob.size || sb.fileSize || 0);
           let url = urlByKey.get(sb.blobKey);
           if (!url) {
             url = URL.createObjectURL(blob);
@@ -4435,6 +4572,7 @@ export default function App() {
                 id: sb.id || `bin-${createItemId()}`,
                 kind: 'image',
                 fileName: sb.fileName,
+                fileSize: blob.size || sb.fileSize,
                 url,
                 width: img.naturalWidth || sb.width || 1920,
                 height: img.naturalHeight || sb.height || 1080,
@@ -4467,6 +4605,7 @@ export default function App() {
                 id: sb.id || `bin-${createItemId()}`,
                 kind: 'video',
                 fileName: sb.fileName,
+                fileSize: blob.size || sb.fileSize,
                 url,
                 width: video.videoWidth || sb.width || 1080,
                 height: video.videoHeight || sb.height || 1920,
@@ -4527,6 +4666,8 @@ export default function App() {
               urlByKey.set(sc.blobKey, url);
               blobKeyMapRef.current.set(url, sc.blobKey);
             }
+            const importedClipSize =
+              importedSizeByKey.get(sc.blobKey) || blob.size || sc.fileSize || undefined;
             if (sc.kind === 'image') {
               const img = await new Promise<HTMLImageElement | null>((resolve) => {
                 const el = new Image();
@@ -4539,6 +4680,7 @@ export default function App() {
                   id: sc.id || createItemId(),
                   kind: 'image',
                   fileName: sc.fileName,
+                  fileSize: importedClipSize,
                   url,
                   width: img.naturalWidth || sc.width || 1920,
                   height: img.naturalHeight || sc.height || 1080,
@@ -4562,6 +4704,7 @@ export default function App() {
                     id: `bin-${createItemId()}`,
                     kind: 'image',
                     fileName: sc.fileName,
+                    fileSize: importedClipSize,
                     url,
                     width: img.naturalWidth || sc.width || 1920,
                     height: img.naturalHeight || sc.height || 1080,
@@ -4611,6 +4754,7 @@ export default function App() {
                   id: sc.id || createItemId(),
                   kind: 'video',
                   fileName: sc.fileName,
+                  fileSize: importedClipSize,
                   url,
                   width: vW,
                   height: vH,
@@ -4636,6 +4780,7 @@ export default function App() {
                     id: `bin-${createItemId()}`,
                     kind: 'video',
                     fileName: sc.fileName,
+                    fileSize: importedClipSize,
                     url,
                     width: video.videoWidth || sc.width || 1080,
                     height: video.videoHeight || sc.height || 1920,
@@ -4652,6 +4797,8 @@ export default function App() {
             missingBinaryMedia = true;
           }
         }
+        priorGenAvoidUrlsRef.current.clear();
+        priorGenAvoidRangesRef.current.clear();
         setMediaBin(nextBin);
         if (nextClips.length > 0) {
           let finalClips = nextClips;

@@ -21,6 +21,7 @@ export interface SerializedBinItem {
   id: string;
   kind: 'image' | 'video';
   fileName: string;
+  fileSize?: number;
   width: number;
   height: number;
   videoDuration?: number;
@@ -37,6 +38,7 @@ export interface SerializedClip {
   id: string;
   kind: 'image' | 'video' | 'generator';
   fileName: string;
+  fileSize?: number;
   width: number;
   height: number;
   videoDuration?: number;
@@ -294,6 +296,7 @@ export function serializeStudioState(
       id: b.id,
       kind: b.kind,
       fileName: b.fileName,
+      fileSize: b.fileSize,
       width: b.width,
       height: b.height,
       videoDuration: b.videoDuration,
@@ -309,6 +312,7 @@ export function serializeStudioState(
       id: m.id,
       kind: m.kind,
       fileName: m.fileName,
+      fileSize: m.fileSize,
       width: m.width,
       height: m.height,
       videoDuration: m.videoDuration,

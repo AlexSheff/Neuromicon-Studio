@@ -204,6 +204,7 @@ export interface MediaBinItem {
   id: string;
   kind: 'image' | 'video';
   fileName: string;
+  fileSize?: number;
   url: string;
   width: number;
   height: number;
@@ -222,6 +223,7 @@ export interface VisualMediaState {
   id: string;
   kind: 'image' | 'video' | 'generator';
   fileName: string;
+  fileSize?: number;
   url: string;
   width: number;
   height: number;
